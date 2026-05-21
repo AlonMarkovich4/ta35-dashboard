@@ -1,0 +1,20 @@
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Database (generated at runtime)
+database/ta35.db
+
+# Data files (uploaded manually, not version-controlled)
+data/uploads/*.csv
+data/current/*.csv
+
+# Streamlit secrets
+.streamlit/secrets.toml
+
+# Virtual environment
+venv/
+
+# Environment variables
+.env
