@@ -20,7 +20,8 @@ CREATE TABLE IF NOT EXISTS events (
     event_date  DATE    NOT NULL,
     name        TEXT    NOT NULL,
     category    TEXT    NOT NULL,
-    description TEXT    DEFAULT ''
+    description TEXT    DEFAULT '',
+    source      TEXT    DEFAULT ''
 )
 """
 
@@ -109,10 +110,16 @@ _SEED_EVENTS: list[dict] = [
 # ─── פונקציות DB ──────────────────────────────────────────────────────
 
 def init_events_db(engine) -> None:
-    """יוצר טבלת events ב-SQLite אם אינה קיימת."""
+    """יוצר טבלת events ב-SQLite אם אינה קיימת; מוסיף עמודת source אם חסרה."""
     with engine.connect() as conn:
         conn.execute(text(_CREATE_EVENTS_SQL))
         conn.commit()
+        # migration: add source column for existing databases that predate it
+        try:
+            conn.execute(text("ALTER TABLE events ADD COLUMN source TEXT DEFAULT ''"))
+            conn.commit()
+        except Exception:
+            pass  # column already exists
 
 
 def seed_events(engine, force: bool = False) -> int:
@@ -151,7 +158,30 @@ def load_all_events(engine) -> pd.DataFrame:
     init_events_db(engine)
     with engine.connect() as conn:
         rows = conn.execute(
-            text("SELECT id, event_date, name, category, description FROM events ORDER BY event_date")
+            text("SELECT id, event_date, name, category, description, source "
+                 "FROM events ORDER BY event_date")
+        ).fetchall()
+    df = pd.DataFrame(rows, columns=["id", "event_date", "name", "category", "description", "source"])
+    if not df.empty:
+        df["event_date"] = pd.to_datetime(df["event_date"])
+    return df
+
+
+def load_events_by_source(engine, source: str, limit: int = 10) -> pd.DataFrame:
+    """
+    טוען אירועים לפי מקור, ממוין לפי ID יורד (החדשים קודם).
+
+    source — שם המקור (לדוגמה: 'interactiveil' לטלגרם)
+    limit  — מספר שורות מקסימלי (ברירת מחדל: 10)
+    """
+    init_events_db(engine)
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text(
+                "SELECT id, event_date, name, category, description "
+                "FROM events WHERE source = :src ORDER BY id DESC LIMIT :lim"
+            ),
+            {"src": source, "lim": limit},
         ).fetchall()
     df = pd.DataFrame(rows, columns=["id", "event_date", "name", "category", "description"])
     if not df.empty:
@@ -160,7 +190,7 @@ def load_all_events(engine) -> pd.DataFrame:
 
 
 def add_event(engine, event_date: str | date, name: str, category: str,
-              description: str = "") -> int:
+              description: str = "", source: str = "") -> int:
     """
     מוסיף אירוע חדש לטבלה.
     מחזיר את ה-id של הרשומה החדשה.
@@ -169,9 +199,9 @@ def add_event(engine, event_date: str | date, name: str, category: str,
     date_str = event_date.strftime("%Y-%m-%d") if isinstance(event_date, date) else str(event_date)
     with engine.connect() as conn:
         conn.execute(
-            text("INSERT INTO events (event_date, name, category, description) "
-                 "VALUES (:d, :n, :c, :desc)"),
-            {"d": date_str, "n": name, "c": category, "desc": description},
+            text("INSERT INTO events (event_date, name, category, description, source) "
+                 "VALUES (:d, :n, :c, :desc, :src)"),
+            {"d": date_str, "n": name, "c": category, "desc": description, "src": source},
         )
         row_id = conn.execute(text("SELECT last_insert_rowid()")).scalar()
         conn.commit()

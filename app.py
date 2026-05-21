@@ -13,6 +13,12 @@ if str(_SRC) not in sys.path:
 
 from styles import inject_global_css
 
+# הפעל webhook server על port 8502 (רץ פעם אחת — Python מכיל מודולים ב-cache)
+try:
+    import webhook_runner  # noqa: F401
+except Exception:
+    pass
+
 _PROJECT_ROOT = Path(__file__).parent
 
 # ─── Page config ────────────────────────────────────────────────────

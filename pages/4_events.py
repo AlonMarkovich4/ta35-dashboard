@@ -456,6 +456,38 @@ else:
         },
     )
 
+# ─── Section 7: Telegram news ────────────────────────────────────────
+st.markdown("---")
+st.subheader("7. 📡 חדשות מטלגרם אחרונות")
+
+try:
+    from events import load_events_by_source as _load_tg
+    _tg_df = _load_tg(engine, source="interactiveil", limit=10)
+    if _tg_df.empty:
+        st.info(
+            "אין חדשות מטלגרם עדיין. "
+            "הגדר Telegram Bot שישלח POST ל-`http://<server>:8502/webhook/telegram`."
+        )
+    else:
+        _tg_disp = _tg_df.copy()
+        _tg_disp["event_date"] = _tg_disp["event_date"].dt.strftime("%d/%m/%Y")
+        _tg_disp = _tg_disp.rename(columns={
+            "event_date": "תאריך",
+            "name":       "כותרת",
+            "category":   "קטגוריה",
+        })
+        st.dataframe(
+            _tg_disp[["תאריך", "קטגוריה", "כותרת"]],
+            hide_index=True,
+            use_container_width=True,
+            column_config={
+                "תאריך":    st.column_config.TextColumn(width="small"),
+                "קטגוריה":  st.column_config.TextColumn(width="small"),
+            },
+        )
+except Exception as _tg_exc:
+    st.warning(f"לא ניתן לטעון חדשות טלגרם: {_tg_exc}")
+
 # ─── Disclaimer ──────────────────────────────────────────────────────
 st.markdown("---")
 st.caption(
