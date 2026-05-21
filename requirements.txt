@@ -1,0 +1,23 @@
+# TA-35 Expiry Intelligence — תלויות
+
+# דשבורד
+streamlit>=1.32.0
+
+# נתונים
+pandas>=2.2.0
+numpy>=1.26.0
+
+# גרפים
+plotly>=5.20.0
+
+# בסיס נתונים
+sqlalchemy>=2.0.0
+
+# עיבוד תאריכים
+python-dateutil>=2.9.0
+
+# RSS / חדשות
+feedparser>=6.0.0
+
+# בדיקות
+pytest>=8.0.0
