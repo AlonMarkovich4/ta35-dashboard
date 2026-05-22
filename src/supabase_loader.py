@@ -3,28 +3,22 @@ supabase_loader.py — קריאת שרשרת אופציות מ-Supabase (טבל�
 
 מחזיר dict בפורמט זהה ל-parse_putvscall() כדי שהדשבורד ישתמש בו ללא שינוי.
 
-### יחידות — מה מגיע מה-DB לעומת מה מצפה options_parser.py
+### יחידות — DB vs options_parser
 
-  tase_putcall DB            | options_parser chain
-  ────────────────────────── | ─────────────────────────────────────
-  lastrate_call  (int×100)   | call_price  [₪]   = lastrate / 100 * MULTIPLIER
-  lastrate_put   (int×100)   | put_price   [₪]   = lastrate / 100 * MULTIPLIER
-  highrate_call  (int×100)   | call_high   [₪]   = highrate / 100 * MULTIPLIER
-  lowrate_call   (int×100)   | call_low    [₪]   = lowrate  / 100 * MULTIPLIER
-  highrate_put   (int×100)   | put_high    [₪]   = highrate / 100 * MULTIPLIER
-  lowrate_put    (int×100)   | put_low     [₪]   = lowrate  / 100 * MULTIPLIER
-  expirationprice_call (int) | strike             = ללא המרה
-  delta_call / delta_put     | call_delta / put_delta  = ללא המרה (0–100 scale)
-  overallturnoverunits_*     | call_volume / put_volume = ללא המרה
-  openpositions_*            | call_oi / put_oi         = ללא המרה
+  עמודה DB (lastrate/highrate/lowrate)
+  ├─ ערך ≤ 1000 → כבר בנקודות  → × MULTIPLIER  → ₪  (call_price)
+  └─ ערך > 1000 → כבר בשקלים   → ללא המרה      → ₪  (call_price)
 
-  חישוב: call_pts = call_price / MULTIPLIER
-  → (lastrate / 100 * MULTIPLIER) / MULTIPLIER = lastrate / 100  ✓
+  עמודת delta (delta_call / delta_put)
+  ├─ |δ| > 1   → סקלת אחוזים (0–100 / -100–0) → ÷ 100 → (-1, 1)
+  └─ |δ| ≤ 1   → כבר דצימלי                   → ללא המרה
+
+  calc: call_pts = call_price / MULTIPLIER  (₪ ÷ 50 → נקודות)
 
 פונקציות ציבוריות:
   has_db()                             → bool
-  get_sample_row(engine)               → dict | None  (אבחון — שורה גולמית אחת)
-  get_available_expiries(engine)       → list[str]  (תאריכים YYYY-MM-DD)
+  get_sample_row(engine)               → dict | None  (שורה גולמית ATM לאבחון)
+  get_available_expiries(engine)       → list[str]   (YYYY-MM-DD)
   get_latest_option_chain(expiry_date) → dict | None
 """
 from __future__ import annotations
@@ -59,6 +53,43 @@ def _make_engine(engine=None):
     return create_engine(db_url, echo=False)
 
 
+# ─── Price / delta normalisation ───────────────────────────────────────
+
+def _to_nis(v: float) -> float:
+    """
+    ממיר מחיר גולמי מה-DB ל-₪ לתאימות עם options_parser.
+
+    ≤ 1000 → נקודות  → × MULTIPLIER → ₪
+    > 1000 → כבר ₪   → ללא המרה
+    """
+    abs_v = abs(v)
+    if abs_v > 1000:
+        return float(v)           # already ₪
+    return float(v) * MULTIPLIER  # points → ₪
+
+
+def _to_decimal_delta(v: float) -> float:
+    """
+    ממיר דלתא גולמית ל-(-1, 1).
+
+    |δ| > 1 → סקלת אחוזים → ÷ 100
+    |δ| ≤ 1 → כבר דצימלי   → ללא המרה
+    """
+    if abs(v) > 1:
+        return float(v) / 100.0
+    return float(v)
+
+
+def _norm_price_series(s: pd.Series) -> pd.Series:
+    """מחיל _to_nis על Series, מטפל ב-NaN."""
+    return pd.to_numeric(s, errors="coerce").fillna(0.0).apply(_to_nis)
+
+
+def _norm_delta_series(s: pd.Series) -> pd.Series:
+    """מחיל _to_decimal_delta על Series, מטפל ב-NaN."""
+    return pd.to_numeric(s, errors="coerce").fillna(0.0).apply(_to_decimal_delta)
+
+
 # ─── Expiry type inference ─────────────────────────────────────────────
 
 def _infer_expiry_type(drvtype_val: str, expiry_dt: Optional[date]) -> str:
@@ -89,10 +120,10 @@ def _infer_expiry_type(drvtype_val: str, expiry_dt: Optional[date]) -> str:
 
 def get_sample_row(engine=None) -> Optional[dict]:
     """
-    מחזיר שורה גולמית אחת מ-tase_putcall לאבחון — ערכים כמו שהם ב-DB.
+    מחזיר שורה גולמית ATM אחת מ-tase_putcall לאבחון — ערכים כמו שהם ב-DB.
 
-    שימושי לאימות פורמט מחירים (int×100? float? agorot?).
-    מחזיר None אם אין חיבור DB או שהטבלה ריקה.
+    בוחר מה-fetch האחרון את השורה שה-strike שלה הכי קרוב ל-baserate_call.
+    מחזיר None אם אין חיבור DB, הטבלה ריקה, או שגיאה.
     """
     eng = _make_engine(engine)
     if eng is None:
@@ -103,14 +134,19 @@ def get_sample_row(engine=None) -> Optional[dict]:
                 SELECT
                     expiry_date, fetched_at, drvtype,
                     expirationprice_call, expirationprice_put,
-                    lastrate_call, lastrate_put,
-                    highrate_call, lowrate_call,
-                    highrate_put,  lowrate_put,
-                    delta_call, delta_put,
+                    baserate_call,
+                    lastrate_call,  lastrate_put,
+                    highrate_call,  lowrate_call,
+                    highrate_put,   lowrate_put,
+                    delta_call,     delta_put,
                     overallturnoverunits_call, overallturnoverunits_put,
-                    openpositions_call, openpositions_put
+                    openpositions_call,        openpositions_put
                 FROM tase_putcall
-                ORDER BY fetched_at DESC
+                WHERE fetched_at = (SELECT MAX(fetched_at) FROM tase_putcall)
+                ORDER BY ABS(
+                    COALESCE(expirationprice_call, expirationprice_put)
+                    - COALESCE(baserate_call, 4500)
+                )
                 LIMIT 1
             """),
             con=eng,
@@ -126,8 +162,8 @@ def get_sample_row(engine=None) -> Optional[dict]:
 
 def get_available_expiries(engine=None) -> list[str]:
     """
-    מחזיר רשימת תאריכי פקיעה זמינים מ-tase_putcall (פורמט YYYY-MM-DD).
-    מחזיר [] אם אין חיבור DB, הטבלה לא קיימת, או שגיאה אחרת.
+    מחזיר רשימת תאריכי פקיעה זמינים מ-tase_putcall (YYYY-MM-DD).
+    מחזיר [] אם אין חיבור DB, הטבלה לא קיימת, או שגיאה.
     """
     eng = _make_engine(engine)
     if eng is None:
@@ -149,21 +185,8 @@ def get_latest_option_chain(
     """
     קורא שרשרת אופציות מ-Supabase ומחזיר dict בפורמט זהה ל-parse_putvscall().
 
-    expiry_date — תאריך פקיעה (YYYY-MM-DD); אם None — מביא את כל הפקיעות הזמינות.
-    מחזיר None אם אין חיבור DB, הטבלה ריקה, או אירעה שגיאה.
-
-    מבנה החזרה:
-        {
-          'as_of_date':  str,       # DD/MM/YYYY (תאריך fetch)
-          'fetched_at':  Any,       # timestamp מקורי לתצוגת "עודכן לאחרונה"
-          'expiries': [
-            {
-              'date':        str,   # DD/MM/YYYY
-              'expiry_type': str,   # 'שבועי' / 'חודשי'
-              'chain':       pd.DataFrame
-            }
-          ]
-        }
+    expiry_date — תאריך פקיעה (YYYY-MM-DD); None → כל הפקיעות הזמינות.
+    מחזיר None אם אין חיבור DB, הטבלה ריקה, או שגיאה.
     """
     eng = _make_engine(engine)
     if eng is None:
@@ -228,12 +251,6 @@ def _load_chains(eng, expiry_date: Optional[str]) -> Optional[dict]:
     }
 
 
-# המרת מחיר: DB מאחסן lastrate/highrate/lowrate כ-int×100 (centi-points).
-# חלוקה ב-100.0 מחזירה נקודות; כפל ב-MULTIPLIER מחזיר ₪ לתאימות options_parser.
-# קיצור: lastrate / 100 * MULTIPLIER = lastrate * 0.5
-_RATE_TO_NIS = f"/ 100.0 * {MULTIPLIER}"
-
-
 def _load_one_expiry(eng, conn, target: str):
     """
     טוען שרשרת פקיעה אחת.
@@ -249,25 +266,23 @@ def _load_one_expiry(eng, conn, target: str):
 
     fetch_ts = latest_row[0]
 
-    # המרת מחירים: DB int×100 (centi-points) → נקודות → ₪
-    # לדוגמה: lastrate_call=1050 → 10.50 נקודות → 525 ₪
+    # שלב 1: קרא ערכים גולמיים מה-DB — ללא המרה בSQL
     df_raw = pd.read_sql(
-        text(f"""
+        text("""
             SELECT
-                COALESCE(expirationprice_call, expirationprice_put)
-                                                          AS strike,
-                lastrate_call  {_RATE_TO_NIS}             AS call_price,
-                lastrate_put   {_RATE_TO_NIS}             AS put_price,
-                delta_call                                AS call_delta,
-                delta_put                                 AS put_delta,
-                openpositions_call                        AS call_oi,
-                openpositions_put                         AS put_oi,
-                overallturnoverunits_call                 AS call_volume,
-                overallturnoverunits_put                  AS put_volume,
-                highrate_call  {_RATE_TO_NIS}             AS call_high,
-                lowrate_call   {_RATE_TO_NIS}             AS call_low,
-                highrate_put   {_RATE_TO_NIS}             AS put_high,
-                lowrate_put    {_RATE_TO_NIS}             AS put_low,
+                COALESCE(expirationprice_call, expirationprice_put) AS strike,
+                lastrate_call   AS call_price,
+                lastrate_put    AS put_price,
+                delta_call      AS call_delta,
+                delta_put       AS put_delta,
+                openpositions_call          AS call_oi,
+                openpositions_put           AS put_oi,
+                overallturnoverunits_call   AS call_volume,
+                overallturnoverunits_put    AS put_volume,
+                highrate_call   AS call_high,
+                lowrate_call    AS call_low,
+                highrate_put    AS put_high,
+                lowrate_put     AS put_low,
                 drvtype
             FROM tase_putcall
             WHERE expiry_date = :exp AND fetched_at = :fetch
@@ -280,8 +295,9 @@ def _load_one_expiry(eng, conn, target: str):
     if df_raw.empty:
         return None
 
+    df_raw["strike"] = pd.to_numeric(df_raw["strike"], errors="coerce")
     df_raw = df_raw.dropna(subset=["strike"])
-    df_raw = df_raw[pd.to_numeric(df_raw["strike"], errors="coerce") >= _MIN_STRIKE]
+    df_raw = df_raw[df_raw["strike"] >= _MIN_STRIKE]
 
     if df_raw.empty:
         return None
@@ -292,17 +308,20 @@ def _load_one_expiry(eng, conn, target: str):
         else ""
     )
 
-    num_cols = [
-        "strike",
-        "call_price", "put_price",
-        "call_delta",  "put_delta",
-        "call_oi",     "put_oi",
-        "call_volume", "put_volume",
-        "call_high",   "call_low",
-        "put_high",    "put_low",
-    ]
-    df = df_raw[num_cols].copy()
-    for col in num_cols:
+    # שלב 2: נרמול — מחירים לₓ, דלתא לדצימלי
+    price_cols = ["call_price", "put_price", "call_high", "call_low", "put_high", "put_low"]
+    delta_cols = ["call_delta", "put_delta"]
+    other_cols = ["call_oi", "put_oi", "call_volume", "put_volume"]
+
+    df = df_raw[["strike"] + price_cols + delta_cols + other_cols].copy()
+
+    for col in price_cols:
+        df[col] = _norm_price_series(df[col])
+
+    for col in delta_cols:
+        df[col] = _norm_delta_series(df[col])
+
+    for col in ["strike"] + other_cols:
         df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
 
     df = (
