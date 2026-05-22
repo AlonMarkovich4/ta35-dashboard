@@ -24,7 +24,12 @@ from events import compute_risk_score
 from options_parser import MULTIPLIER, find_atm, get_strategy_strikes, parse_putvscall
 from payoff import build_payoff_fig, format_legs, strategy_legs_detail, strategy_summary
 from styles import inject_global_css
-from supabase_loader import get_available_expiries, get_latest_option_chain, has_db
+from supabase_loader import (
+    get_available_expiries,
+    get_latest_option_chain,
+    get_sample_row,
+    has_db,
+)
 
 _PROJECT_ROOT = Path(__file__).parent.parent
 
@@ -87,6 +92,24 @@ if _HAS_DB:
                     f"עודכן לאחרונה: "
                     f"{pd.to_datetime(_ft).strftime('%d/%m/%Y %H:%M')}"
                 )
+
+        with st.expander("🔍 אבחון — שורה גולמית מהDB"):
+            _sample = get_sample_row()
+            if _sample:
+                _diag_rows = []
+                for _k, _v in _sample.items():
+                    _diag_rows.append({"עמודה": _k, "ערך גולמי": str(_v)})
+                st.dataframe(
+                    pd.DataFrame(_diag_rows),
+                    hide_index=True,
+                    use_container_width=True,
+                )
+                st.caption(
+                    "lastrate_call/put, highrate_*, lowrate_* מאוחסנים כ-int×100. "
+                    "חלוקה ב-100 מחזירה נקודות; כפל ב-50 מחזיר ₪."
+                )
+            else:
+                st.info("לא ניתן לקרוא שורה — בדוק DATABASE_URL")
 
     with col_up:
         st.markdown("**📄 העלאה ידנית**")

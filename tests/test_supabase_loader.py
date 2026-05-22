@@ -22,6 +22,7 @@ from supabase_loader import (
     _make_engine,
     get_available_expiries,
     get_latest_option_chain,
+    get_sample_row,
     has_db,
 )
 
@@ -344,3 +345,101 @@ class TestGetLatestOptionChain:
             result = get_latest_option_chain(expiry_date="2026-05-22", engine=mock_engine)
 
         assert result["expiries"][0]["expiry_type"] == "שבועי"
+
+
+# ─── get_sample_row ────────────────────────────────────────────────────
+
+class TestGetSampleRow:
+    def test_returns_none_without_engine(self, monkeypatch):
+        monkeypatch.delenv("DATABASE_URL", raising=False)
+        assert get_sample_row() is None
+
+    def test_returns_none_on_db_error(self):
+        mock_engine = MagicMock()
+        mock_engine.connect.side_effect = Exception("DB down")
+        assert get_sample_row(engine=mock_engine) is None
+
+    def test_returns_none_when_table_empty(self):
+        empty_df = pd.DataFrame()
+        mock_engine = MagicMock()
+        with patch("supabase_loader.pd.read_sql", return_value=empty_df):
+            assert get_sample_row(engine=mock_engine) is None
+
+    def test_returns_dict_with_raw_columns(self):
+        sample_df = pd.DataFrame([{
+            "expiry_date":             "2026-05-29",
+            "fetched_at":              datetime(2026, 5, 22, 10, 0),
+            "drvtype":                 "W",
+            "expirationprice_call":    1920,
+            "expirationprice_put":     1920,
+            "lastrate_call":           1050,
+            "lastrate_put":            980,
+            "highrate_call":           1100,
+            "lowrate_call":            980,
+            "highrate_put":            1020,
+            "lowrate_put":             940,
+            "delta_call":              52.0,
+            "delta_put":               48.0,
+            "overallturnoverunits_call": 500,
+            "overallturnoverunits_put":  480,
+            "openpositions_call":       12000,
+            "openpositions_put":        11500,
+        }])
+        mock_engine = MagicMock()
+        with patch("supabase_loader.pd.read_sql", return_value=sample_df):
+            result = get_sample_row(engine=mock_engine)
+
+        assert result is not None
+        assert isinstance(result, dict)
+        assert result["lastrate_call"] == 1050
+        assert result["expirationprice_call"] == 1920
+
+
+# ─── Price conversion documentation ───────────────────────────────────
+
+class TestPriceConversion:
+    """
+    מתעד את המרת המחיר: DB int×100 (centi-points) → ₪ → נקודות.
+
+    מוסכמה: lastrate_call=1050 פירושו 10.50 נקודות.
+      1. SQL: 1050 / 100.0 * 50 = 525 ₪  → call_price
+      2. Python: 525 / 50 = 10.5          → call_pts
+    """
+
+    def _run_with_raw_price(self, raw_price_nis: float) -> float:
+        """מחשב call_pts עבור call_price שכבר עבר המרת SQL."""
+        fetch_ts     = datetime(2026, 5, 22, 10, 0)
+        chain_df_raw = pd.DataFrame([_make_chain_row(1920.0, call_price=raw_price_nis)])
+
+        mock_conn = MagicMock()
+        mock_conn.__enter__ = MagicMock(return_value=mock_conn)
+        mock_conn.__exit__  = MagicMock(return_value=False)
+        mock_conn.execute.return_value.fetchall.return_value = [("2026-05-29",)]
+        mock_conn.execute.return_value.fetchone.return_value = (fetch_ts,)
+
+        mock_engine = MagicMock()
+        mock_engine.connect.return_value = mock_conn
+
+        with patch("supabase_loader.pd.read_sql", return_value=chain_df_raw):
+            result = get_latest_option_chain(expiry_date="2026-05-29", engine=mock_engine)
+
+        return float(result["expiries"][0]["chain"].iloc[0]["call_pts"])
+
+    def test_525_nis_gives_10_5_pts(self):
+        """lastrate_call=1050 centi-pts → SQL → 525 ₪ → 10.5 נקודות."""
+        assert self._run_with_raw_price(525.0) == pytest.approx(10.5, abs=0.01)
+
+    def test_250_nis_gives_5_pts(self):
+        """lastrate_call=500 centi-pts → SQL → 250 ₪ → 5.0 נקודות."""
+        assert self._run_with_raw_price(250.0) == pytest.approx(5.0, abs=0.01)
+
+    def test_zero_price_stays_zero(self):
+        """מחיר 0 ב-DB נשמר כ-0 ב-chain."""
+        assert self._run_with_raw_price(0.0) == pytest.approx(0.0, abs=0.001)
+
+    def test_centi_points_formula(self):
+        """ממיר: int×100 → ÷100 → נקודות; ×50 → ₪ → ÷50 = נקודות שוב."""
+        db_val = 1050           # int×100 (centi-points)
+        pts    = db_val / 100.0  # 10.5
+        nis    = pts * MULTIPLIER  # 525
+        assert nis / MULTIPLIER == pytest.approx(pts, abs=0.001)

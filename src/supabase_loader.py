@@ -3,8 +3,27 @@ supabase_loader.py — קריאת שרשרת אופציות מ-Supabase (טבל�
 
 מחזיר dict בפורמט זהה ל-parse_putvscall() כדי שהדשבורד ישתמש בו ללא שינוי.
 
+### יחידות — מה מגיע מה-DB לעומת מה מצפה options_parser.py
+
+  tase_putcall DB            | options_parser chain
+  ────────────────────────── | ─────────────────────────────────────
+  lastrate_call  (int×100)   | call_price  [₪]   = lastrate / 100 * MULTIPLIER
+  lastrate_put   (int×100)   | put_price   [₪]   = lastrate / 100 * MULTIPLIER
+  highrate_call  (int×100)   | call_high   [₪]   = highrate / 100 * MULTIPLIER
+  lowrate_call   (int×100)   | call_low    [₪]   = lowrate  / 100 * MULTIPLIER
+  highrate_put   (int×100)   | put_high    [₪]   = highrate / 100 * MULTIPLIER
+  lowrate_put    (int×100)   | put_low     [₪]   = lowrate  / 100 * MULTIPLIER
+  expirationprice_call (int) | strike             = ללא המרה
+  delta_call / delta_put     | call_delta / put_delta  = ללא המרה (0–100 scale)
+  overallturnoverunits_*     | call_volume / put_volume = ללא המרה
+  openpositions_*            | call_oi / put_oi         = ללא המרה
+
+  חישוב: call_pts = call_price / MULTIPLIER
+  → (lastrate / 100 * MULTIPLIER) / MULTIPLIER = lastrate / 100  ✓
+
 פונקציות ציבוריות:
   has_db()                             → bool
+  get_sample_row(engine)               → dict | None  (אבחון — שורה גולמית אחת)
   get_available_expiries(engine)       → list[str]  (תאריכים YYYY-MM-DD)
   get_latest_option_chain(expiry_date) → dict | None
 """
@@ -13,7 +32,6 @@ from __future__ import annotations
 import calendar
 import os
 from datetime import date, timedelta
-from pathlib import Path
 from typing import Optional
 
 import pandas as pd
@@ -65,6 +83,43 @@ def _infer_expiry_type(drvtype_val: str, expiry_dt: Optional[date]) -> str:
             return "חודשי"
 
     return "שבועי"
+
+
+# ─── Diagnostics ──────────────────────────────────────────────────────
+
+def get_sample_row(engine=None) -> Optional[dict]:
+    """
+    מחזיר שורה גולמית אחת מ-tase_putcall לאבחון — ערכים כמו שהם ב-DB.
+
+    שימושי לאימות פורמט מחירים (int×100? float? agorot?).
+    מחזיר None אם אין חיבור DB או שהטבלה ריקה.
+    """
+    eng = _make_engine(engine)
+    if eng is None:
+        return None
+    try:
+        df = pd.read_sql(
+            text("""
+                SELECT
+                    expiry_date, fetched_at, drvtype,
+                    expirationprice_call, expirationprice_put,
+                    lastrate_call, lastrate_put,
+                    highrate_call, lowrate_call,
+                    highrate_put,  lowrate_put,
+                    delta_call, delta_put,
+                    overallturnoverunits_call, overallturnoverunits_put,
+                    openpositions_call, openpositions_put
+                FROM tase_putcall
+                ORDER BY fetched_at DESC
+                LIMIT 1
+            """),
+            con=eng,
+        )
+        if df.empty:
+            return None
+        return df.iloc[0].to_dict()
+    except Exception:
+        return None
 
 
 # ─── Public API ────────────────────────────────────────────────────────
@@ -124,7 +179,6 @@ def get_latest_option_chain(
 def _load_chains(eng, expiry_date: Optional[str]) -> Optional[dict]:
     """מבצע את שאילתות ה-DB ובונה את ה-dict המוחזר."""
     with eng.connect() as conn:
-        # בחר תאריכי פקיעה לטעינה
         if expiry_date:
             targets = [expiry_date]
         else:
@@ -174,12 +228,17 @@ def _load_chains(eng, expiry_date: Optional[str]) -> Optional[dict]:
     }
 
 
+# המרת מחיר: DB מאחסן lastrate/highrate/lowrate כ-int×100 (centi-points).
+# חלוקה ב-100.0 מחזירה נקודות; כפל ב-MULTIPLIER מחזיר ₪ לתאימות options_parser.
+# קיצור: lastrate / 100 * MULTIPLIER = lastrate * 0.5
+_RATE_TO_NIS = f"/ 100.0 * {MULTIPLIER}"
+
+
 def _load_one_expiry(eng, conn, target: str):
     """
     טוען שרשרת פקיעה אחת.
     מחזיר (DataFrame, drvtype, fetched_at) או None אם אין נתונים.
     """
-    # מצא את ה-fetch העדכני ביותר לפקיעה זו
     latest_row = conn.execute(
         text("SELECT MAX(fetched_at) FROM tase_putcall WHERE expiry_date = :exp"),
         {"exp": target},
@@ -190,23 +249,25 @@ def _load_one_expiry(eng, conn, target: str):
 
     fetch_ts = latest_row[0]
 
-    # קרא את הנתונים עם עמודות מוגדרות בשם לבהירות
+    # המרת מחירים: DB int×100 (centi-points) → נקודות → ₪
+    # לדוגמה: lastrate_call=1050 → 10.50 נקודות → 525 ₪
     df_raw = pd.read_sql(
-        text("""
+        text(f"""
             SELECT
-                COALESCE(expirationprice_call, expirationprice_put)  AS strike,
-                lastrate_call                                         AS call_price,
-                lastrate_put                                          AS put_price,
-                delta_call                                            AS call_delta,
-                delta_put                                             AS put_delta,
-                openpositions_call                                    AS call_oi,
-                openpositions_put                                     AS put_oi,
-                overallturnoverunits_call                             AS call_volume,
-                overallturnoverunits_put                              AS put_volume,
-                highrate_call                                         AS call_high,
-                lowrate_call                                          AS call_low,
-                highrate_put                                          AS put_high,
-                lowrate_put                                           AS put_low,
+                COALESCE(expirationprice_call, expirationprice_put)
+                                                          AS strike,
+                lastrate_call  {_RATE_TO_NIS}             AS call_price,
+                lastrate_put   {_RATE_TO_NIS}             AS put_price,
+                delta_call                                AS call_delta,
+                delta_put                                 AS put_delta,
+                openpositions_call                        AS call_oi,
+                openpositions_put                         AS put_oi,
+                overallturnoverunits_call                 AS call_volume,
+                overallturnoverunits_put                  AS put_volume,
+                highrate_call  {_RATE_TO_NIS}             AS call_high,
+                lowrate_call   {_RATE_TO_NIS}             AS call_low,
+                highrate_put   {_RATE_TO_NIS}             AS put_high,
+                lowrate_put    {_RATE_TO_NIS}             AS put_low,
                 drvtype
             FROM tase_putcall
             WHERE expiry_date = :exp AND fetched_at = :fetch
@@ -219,23 +280,26 @@ def _load_one_expiry(eng, conn, target: str):
     if df_raw.empty:
         return None
 
-    # הסר שורות ללא strike תקין
     df_raw = df_raw.dropna(subset=["strike"])
-    df_raw = df_raw[df_raw["strike"].astype(float) >= _MIN_STRIKE]
+    df_raw = df_raw[pd.to_numeric(df_raw["strike"], errors="coerce") >= _MIN_STRIKE]
 
     if df_raw.empty:
         return None
 
-    drvtype_val = df_raw["drvtype"].dropna().iloc[0] if not df_raw["drvtype"].dropna().empty else ""
+    drvtype_val = (
+        df_raw["drvtype"].dropna().iloc[0]
+        if not df_raw["drvtype"].dropna().empty
+        else ""
+    )
 
-    # בנה DataFrame סופי בפורמט chain
     num_cols = [
-        "strike", "call_price", "put_price",
-        "call_delta", "put_delta",
-        "call_oi", "put_oi",
+        "strike",
+        "call_price", "put_price",
+        "call_delta",  "put_delta",
+        "call_oi",     "put_oi",
         "call_volume", "put_volume",
-        "call_high", "call_low",
-        "put_high", "put_low",
+        "call_high",   "call_low",
+        "put_high",    "put_low",
     ]
     df = df_raw[num_cols].copy()
     for col in num_cols:
