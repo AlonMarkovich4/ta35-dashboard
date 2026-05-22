@@ -31,6 +31,8 @@ from typing import Optional
 import pandas as pd
 from sqlalchemy import create_engine, text
 
+_TODAY = date.today  # callable — evaluated at call time, not import time
+
 MULTIPLIER  = 50       # ₪ לנקודה — זהה ל-options_parser
 _MIN_STRIKE = 100.0
 
@@ -143,9 +145,15 @@ def get_sample_row(engine=None) -> Optional[dict]:
                     openpositions_call,        openpositions_put
                 FROM tase_putcall
                 WHERE fetched_at = (SELECT MAX(fetched_at) FROM tase_putcall)
+                  AND (lastrate_call <> 0 OR lastrate_put <> 0)
                 ORDER BY ABS(
                     COALESCE(expirationprice_call, expirationprice_put)
-                    - COALESCE(baserate_call, 4500)
+                    - COALESCE(
+                        baserate_call,
+                        (SELECT AVG(COALESCE(expirationprice_call, expirationprice_put))
+                         FROM tase_putcall
+                         WHERE fetched_at = (SELECT MAX(fetched_at) FROM tase_putcall))
+                      )
                 )
                 LIMIT 1
             """),
@@ -163,15 +171,28 @@ def get_sample_row(engine=None) -> Optional[dict]:
 def get_available_expiries(engine=None) -> list[str]:
     """
     מחזיר רשימת תאריכי פקיעה זמינים מ-tase_putcall (YYYY-MM-DD).
+
+    מחזיר רק פקיעות עתידיות (expiry_date >= היום).
+    אם אין פקיעות עתידיות — מחזיר את הפקיעה הכי קרובה לתאריך הנוכחי (fallback).
     מחזיר [] אם אין חיבור DB, הטבלה לא קיימת, או שגיאה.
     """
     eng = _make_engine(engine)
     if eng is None:
         return []
     try:
+        today_str = _TODAY().isoformat()
         with eng.connect() as conn:
             rows = conn.execute(text(
-                "SELECT DISTINCT expiry_date FROM tase_putcall ORDER BY expiry_date"
+                "SELECT DISTINCT expiry_date FROM tase_putcall"
+                " WHERE expiry_date >= :today ORDER BY expiry_date"
+            ), {"today": today_str}).fetchall()
+            future = [str(r[0]) for r in rows if r[0] is not None]
+            if future:
+                return future
+            # fallback — nearest past expiry
+            rows = conn.execute(text(
+                "SELECT DISTINCT expiry_date FROM tase_putcall"
+                " ORDER BY expiry_date DESC LIMIT 1"
             )).fetchall()
         return [str(r[0]) for r in rows if r[0] is not None]
     except Exception:
@@ -205,10 +226,19 @@ def _load_chains(eng, expiry_date: Optional[str]) -> Optional[dict]:
         if expiry_date:
             targets = [expiry_date]
         else:
-            rows    = conn.execute(text(
-                "SELECT DISTINCT expiry_date FROM tase_putcall ORDER BY expiry_date"
-            )).fetchall()
+            today_str = _TODAY().isoformat()
+            rows = conn.execute(text(
+                "SELECT DISTINCT expiry_date FROM tase_putcall"
+                " WHERE expiry_date >= :today ORDER BY expiry_date"
+            ), {"today": today_str}).fetchall()
             targets = [str(r[0]) for r in rows if r[0] is not None]
+            if not targets:
+                # fallback — nearest past expiry
+                rows = conn.execute(text(
+                    "SELECT DISTINCT expiry_date FROM tase_putcall"
+                    " ORDER BY expiry_date DESC LIMIT 1"
+                )).fetchall()
+                targets = [str(r[0]) for r in rows if r[0] is not None]
 
         if not targets:
             return None
@@ -221,7 +251,7 @@ def _load_chains(eng, expiry_date: Optional[str]) -> Optional[dict]:
             if result is None:
                 continue
 
-            chain_df, drvtype_val, fetch_ts = result
+            chain_df, drvtype_val, fetch_ts, baserate = result
 
             if latest_ts is None or fetch_ts > latest_ts:
                 latest_ts = fetch_ts
@@ -234,6 +264,7 @@ def _load_chains(eng, expiry_date: Optional[str]) -> Optional[dict]:
                 "date":        date_str,
                 "expiry_type": exp_type,
                 "chain":       chain_df,
+                "baserate":    baserate,
             })
 
     if not expiries:
@@ -283,6 +314,7 @@ def _load_one_expiry(eng, conn, target: str):
                 lowrate_call    AS call_low,
                 highrate_put    AS put_high,
                 lowrate_put     AS put_low,
+                baserate_call,
                 drvtype
             FROM tase_putcall
             WHERE expiry_date = :exp AND fetched_at = :fetch
@@ -302,11 +334,25 @@ def _load_one_expiry(eng, conn, target: str):
     if df_raw.empty:
         return None
 
+    # סנן שורות ללא מסחר (גם call וגם put הם 0)
+    call_zero = pd.to_numeric(df_raw["call_price"], errors="coerce").fillna(0.0) == 0.0
+    put_zero  = pd.to_numeric(df_raw["put_price"],  errors="coerce").fillna(0.0) == 0.0
+    df_raw = df_raw[~(call_zero & put_zero)]
+
+    if df_raw.empty:
+        return None
+
     drvtype_val = (
         df_raw["drvtype"].dropna().iloc[0]
         if not df_raw["drvtype"].dropna().empty
         else ""
     )
+
+    # חלץ baserate לשימוש ב-ATM — fallback לממוצע סטרייקים אם None
+    baserate_raw = pd.to_numeric(df_raw["baserate_call"], errors="coerce").dropna()
+    baserate = float(baserate_raw.iloc[0]) if not baserate_raw.empty else None
+    if baserate is None:
+        baserate = float(df_raw["strike"].mean())
 
     # שלב 2: נרמול — מחירים לₓ, דלתא לדצימלי
     price_cols = ["call_price", "put_price", "call_high", "call_low", "put_high", "put_low"]
@@ -332,4 +378,4 @@ def _load_one_expiry(eng, conn, target: str):
     df["call_pts"] = (df["call_price"] / MULTIPLIER).round(2)
     df["put_pts"]  = (df["put_price"]  / MULTIPLIER).round(2)
 
-    return df, str(drvtype_val), fetch_ts
+    return df, str(drvtype_val), fetch_ts, baserate

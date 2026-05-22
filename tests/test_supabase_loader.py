@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 from supabase_loader import (
     MULTIPLIER,
     _infer_expiry_type,
+    _load_one_expiry,
     _make_engine,
     _to_nis,
     _to_decimal_delta,
@@ -31,23 +32,29 @@ from supabase_loader import (
 
 # ─── Fixtures ──────────────────────────────────────────────────────────
 
-def _make_chain_row(strike: float, call_price: float = 50.0, put_price: float = 40.0) -> dict:
+def _make_chain_row(
+    strike: float,
+    call_price: float = 50.0,
+    put_price: float = 40.0,
+    baserate_call: float = 1920.0,
+) -> dict:
     """מחזיר שורה לדוגמה ב-DataFrame גולמי (כמו pd.read_sql)."""
     return {
-        "strike":      strike,
-        "call_price":  call_price,
-        "put_price":   put_price,
-        "call_delta":  55.0,
-        "put_delta":   45.0,
-        "call_oi":     1000.0,
-        "put_oi":      900.0,
-        "call_volume": 200.0,
-        "put_volume":  180.0,
-        "call_high":   55.0,
-        "call_low":    45.0,
-        "put_high":    42.0,
-        "put_low":     38.0,
-        "drvtype":     "W",
+        "strike":        strike,
+        "call_price":    call_price,
+        "put_price":     put_price,
+        "call_delta":    55.0,
+        "put_delta":     45.0,
+        "call_oi":       1000.0,
+        "put_oi":        900.0,
+        "call_volume":   200.0,
+        "put_volume":    180.0,
+        "call_high":     55.0,
+        "call_low":      45.0,
+        "put_high":      42.0,
+        "put_low":       38.0,
+        "baserate_call": baserate_call,
+        "drvtype":       "W",
     }
 
 
@@ -144,25 +151,44 @@ class TestInferExpiryType:
 
 # ─── get_available_expiries ────────────────────────────────────────────
 
+def _mock_conn_two_calls(first_result, second_result=None):
+    """עוזר: mock connection עם שתי קריאות execute עוקבות."""
+    mock_conn = MagicMock()
+    mock_conn.__enter__ = MagicMock(return_value=mock_conn)
+    mock_conn.__exit__  = MagicMock(return_value=False)
+    results = [MagicMock(), MagicMock()]
+    results[0].fetchall.return_value = first_result
+    if second_result is not None:
+        results[1].fetchall.return_value = second_result
+    mock_conn.execute.side_effect = results
+    return mock_conn
+
+
 class TestGetAvailableExpiries:
     def test_returns_empty_without_engine(self, monkeypatch):
         monkeypatch.delenv("DATABASE_URL", raising=False)
         assert get_available_expiries() == []
 
-    def test_returns_list_from_mock_engine(self):
-        mock_conn = MagicMock()
-        mock_conn.execute.return_value.fetchall.return_value = [
-            ("2026-05-22",),
-            ("2026-05-29",),
-        ]
-        mock_conn.__enter__ = MagicMock(return_value=mock_conn)
-        mock_conn.__exit__ = MagicMock(return_value=False)
-
+    def test_returns_future_expiries(self):
+        """מחזיר רק פקיעות עתידיות כשיש."""
+        mock_conn = _mock_conn_two_calls(
+            first_result=[("2026-05-29",), ("2026-06-05",)],
+        )
         mock_engine = MagicMock()
         mock_engine.connect.return_value = mock_conn
-
         result = get_available_expiries(engine=mock_engine)
-        assert result == ["2026-05-22", "2026-05-29"]
+        assert result == ["2026-05-29", "2026-06-05"]
+
+    def test_fallback_to_nearest_past_when_no_future(self):
+        """אין פקיעות עתידיות → מחזיר הפקיעה האחרונה."""
+        mock_conn = _mock_conn_two_calls(
+            first_result=[],
+            second_result=[("2026-05-21",)],
+        )
+        mock_engine = MagicMock()
+        mock_engine.connect.return_value = mock_conn
+        result = get_available_expiries(engine=mock_engine)
+        assert result == ["2026-05-21"]
 
     def test_returns_empty_on_db_error(self):
         mock_engine = MagicMock()
@@ -170,17 +196,13 @@ class TestGetAvailableExpiries:
         assert get_available_expiries(engine=mock_engine) == []
 
     def test_filters_none_values(self):
-        mock_conn = MagicMock()
-        mock_conn.execute.return_value.fetchall.return_value = [
-            (None,),
-            ("2026-05-22",),
-        ]
-        mock_conn.__enter__ = MagicMock(return_value=mock_conn)
-        mock_conn.__exit__ = MagicMock(return_value=False)
+        mock_conn = _mock_conn_two_calls(
+            first_result=[(None,), ("2026-05-29",)],
+        )
         mock_engine = MagicMock()
         mock_engine.connect.return_value = mock_conn
         result = get_available_expiries(engine=mock_engine)
-        assert result == ["2026-05-22"]
+        assert result == ["2026-05-29"]
 
 
 # ─── get_latest_option_chain ───────────────────────────────────────────
@@ -396,6 +418,103 @@ class TestGetSampleRow:
         assert isinstance(result, dict)
         assert result["lastrate_call"] == 1050
         assert result["expirationprice_call"] == 1920
+
+
+# ─── _load_one_expiry — zero-price filter & baserate ──────────────────
+
+class TestLoadOneExpiryFilters:
+    """בודק סינון שורות ללא מסחר ושימוש ב-baserate."""
+
+    def _make_mock_conn_for_expiry(self, fetch_ts, df_raw):
+        """mock connection המחזיר fetch_ts ואז df_raw ב-pd.read_sql."""
+        mock_conn = MagicMock()
+        mock_conn.execute.return_value.fetchone.return_value = (fetch_ts,)
+        return mock_conn
+
+    def test_zero_call_and_put_rows_are_removed(self):
+        """שורה שבה call=0 וגם put=0 מסוננת לפני נרמול."""
+        fetch_ts = datetime(2026, 5, 22, 10, 0)
+        rows = [
+            _make_chain_row(1900.0, call_price=0.0, put_price=0.0),   # יסונן
+            _make_chain_row(1920.0, call_price=10.0, put_price=0.0),  # נשאר
+        ]
+        df_raw = pd.DataFrame(rows)
+        mock_conn = MagicMock()
+        mock_conn.execute.return_value.fetchone.return_value = (fetch_ts,)
+        mock_engine = MagicMock()
+
+        with patch("supabase_loader.pd.read_sql", return_value=df_raw):
+            result = _load_one_expiry(mock_engine, mock_conn, "2026-05-29")
+
+        assert result is not None
+        chain_df = result[0]
+        assert len(chain_df) == 1
+        assert chain_df.iloc[0]["strike"] == pytest.approx(1920.0)
+
+    def test_row_with_only_put_zero_is_kept(self):
+        """שורה עם call > 0 נשארת גם אם put = 0."""
+        fetch_ts = datetime(2026, 5, 22, 10, 0)
+        df_raw = pd.DataFrame([_make_chain_row(1920.0, call_price=5.0, put_price=0.0)])
+        mock_conn = MagicMock()
+        mock_conn.execute.return_value.fetchone.return_value = (fetch_ts,)
+        mock_engine = MagicMock()
+
+        with patch("supabase_loader.pd.read_sql", return_value=df_raw):
+            result = _load_one_expiry(mock_engine, mock_conn, "2026-05-29")
+
+        assert result is not None
+        assert len(result[0]) == 1
+
+    def test_returns_none_when_all_rows_are_zero(self):
+        """אם כל השורות הן 0/0 — מחזיר None."""
+        fetch_ts = datetime(2026, 5, 22, 10, 0)
+        df_raw = pd.DataFrame([
+            _make_chain_row(1900.0, call_price=0.0, put_price=0.0),
+            _make_chain_row(1920.0, call_price=0.0, put_price=0.0),
+        ])
+        mock_conn = MagicMock()
+        mock_conn.execute.return_value.fetchone.return_value = (fetch_ts,)
+        mock_engine = MagicMock()
+
+        with patch("supabase_loader.pd.read_sql", return_value=df_raw):
+            result = _load_one_expiry(mock_engine, mock_conn, "2026-05-29")
+
+        assert result is None
+
+    def test_baserate_from_baserate_call_column(self):
+        """baserate נלקח מ-baserate_call כשהוא זמין."""
+        fetch_ts = datetime(2026, 5, 22, 10, 0)
+        df_raw = pd.DataFrame([_make_chain_row(1920.0, baserate_call=1915.0)])
+        mock_conn = MagicMock()
+        mock_conn.execute.return_value.fetchone.return_value = (fetch_ts,)
+        mock_engine = MagicMock()
+
+        with patch("supabase_loader.pd.read_sql", return_value=df_raw):
+            result = _load_one_expiry(mock_engine, mock_conn, "2026-05-29")
+
+        assert result is not None
+        baserate = result[3]
+        assert baserate == pytest.approx(1915.0, abs=0.01)
+
+    def test_baserate_falls_back_to_mean_strike_when_null(self):
+        """baserate_call=None → fallback לממוצע סטרייקים."""
+        fetch_ts = datetime(2026, 5, 22, 10, 0)
+        rows = [
+            _make_chain_row(1900.0, baserate_call=None),
+            _make_chain_row(1920.0, baserate_call=None),
+        ]
+        df_raw = pd.DataFrame(rows)
+        df_raw["baserate_call"] = None   # force None column
+        mock_conn = MagicMock()
+        mock_conn.execute.return_value.fetchone.return_value = (fetch_ts,)
+        mock_engine = MagicMock()
+
+        with patch("supabase_loader.pd.read_sql", return_value=df_raw):
+            result = _load_one_expiry(mock_engine, mock_conn, "2026-05-29")
+
+        assert result is not None
+        baserate = result[3]
+        assert baserate == pytest.approx(1910.0, abs=0.01)  # (1900+1920)/2
 
 
 # ─── _to_nis ──────────────────────────────────────────────────────────
