@@ -24,6 +24,7 @@ from events import compute_risk_score
 from options_parser import MULTIPLIER, find_atm, get_strategy_strikes, parse_putvscall
 from payoff import build_payoff_fig, format_legs, strategy_legs_detail, strategy_summary
 from styles import inject_global_css
+from supabase_loader import get_available_expiries, get_latest_option_chain, has_db
 
 _PROJECT_ROOT = Path(__file__).parent.parent
 
@@ -50,24 +51,69 @@ st.title("🎯 פקיעה קרובה — ניתוח שרשרת אופציות")
 st.markdown("ניתוח שרשרת Put/Call מהבורסה + המלצות אסטרטגיות לפקיעה הקרובה")
 
 
-# ─── Upload section ─────────────────────────────────────────────────
-st.subheader("1. העלאת שרשרת אופציות")
+# ─── Source section ─────────────────────────────────────────────────
+st.subheader("1. מקור שרשרת אופציות")
 
-col_up, col_info = st.columns([2, 3])
-with col_up:
-    uploaded = st.file_uploader(
-        "קובץ putvscall.csv מהבורסה (tase.co.il)",
-        type=["csv"],
-        help="הורד מהבורסה: נגזרים ← Put vs Call ← יצוא CSV",
-    )
-with col_info:
-    st.info(
-        "**איך מורידים את הקובץ:**\n"
-        "1. כנס ל-tase.co.il → נגזרים\n"
-        "2. בחר Put vs Call (TA-35)\n"
-        "3. לחץ יצוא → CSV\n"
-        "4. העלה כאן את הקובץ שהורד"
-    )
+_HAS_DB = has_db()
+
+if _HAS_DB:
+    col_sb, col_up = st.columns([1, 1])
+
+    with col_sb:
+        st.markdown("**🌐 Supabase**")
+        available = get_available_expiries()
+        if available:
+            sel_exp = st.selectbox(
+                "בחר פקיעה",
+                available,
+                format_func=lambda d: pd.to_datetime(d).strftime("%d/%m/%Y"),
+                key="sb_exp_select",
+            )
+            if st.button("🔄 טען מ-Supabase", use_container_width=True):
+                with st.spinner("מביא נתונים מ-Supabase..."):
+                    _result = get_latest_option_chain(sel_exp)
+                if _result:
+                    st.session_state["chain_supabase"] = _result
+                    st.rerun()
+                else:
+                    st.error("❌ לא נמצאו נתונים ב-Supabase לפקיעה זו")
+        else:
+            st.info("אין נתונים ב-Supabase כרגע")
+
+        if "chain_supabase" in st.session_state:
+            _ft = st.session_state["chain_supabase"].get("fetched_at")
+            if _ft:
+                st.caption(
+                    f"עודכן לאחרונה: "
+                    f"{pd.to_datetime(_ft).strftime('%d/%m/%Y %H:%M')}"
+                )
+
+    with col_up:
+        st.markdown("**📄 העלאה ידנית**")
+        uploaded = st.file_uploader(
+            "putvscall.csv מ-tase.co.il",
+            type=["csv"],
+            help="הורד מהבורסה: נגזרים ← Put vs Call ← יצוא CSV",
+            label_visibility="collapsed",
+        )
+        st.caption("הורד מ-tase.co.il → נגזרים → Put vs Call → יצוא CSV")
+
+else:
+    col_up, col_info = st.columns([2, 3])
+    with col_up:
+        uploaded = st.file_uploader(
+            "קובץ putvscall.csv מהבורסה (tase.co.il)",
+            type=["csv"],
+            help="הורד מהבורסה: נגזרים ← Put vs Call ← יצוא CSV",
+        )
+    with col_info:
+        st.info(
+            "**איך מורידים את הקובץ:**\n"
+            "1. כנס ל-tase.co.il → נגזרים\n"
+            "2. בחר Put vs Call (TA-35)\n"
+            "3. לחץ יצוא → CSV\n"
+            "4. העלה כאן את הקובץ שהורד"
+        )
 
 # ─── Parse or use demo file ─────────────────────────────────────────
 _DEMO_PATH = (
@@ -79,6 +125,7 @@ _has_demo = _DEMO_PATH.exists()
 
 source_label = ""
 if uploaded is not None:
+    # קובץ שהועלה ידנית — עדיפות גבוהה ביותר
     raw_bytes = uploaded.read()
     source_label = f"📄 {uploaded.name}"
     cache_key = f"chain_{uploaded.name}_{len(raw_bytes)}"
@@ -89,6 +136,13 @@ if uploaded is not None:
             st.error(f"❌ שגיאה בפרסור הקובץ: {exc}")
             st.stop()
     parsed = st.session_state[cache_key]
+
+elif st.session_state.get("chain_supabase"):
+    # נתוני Supabase שנטענו בלחיצת כפתור
+    parsed = st.session_state["chain_supabase"]
+    _ft    = parsed.get("fetched_at")
+    _ts    = pd.to_datetime(_ft).strftime("%d/%m/%Y %H:%M") if _ft else ""
+    source_label = f"🌐 Supabase ({_ts})" if _ts else "🌐 Supabase"
 
 elif _has_demo:
     st.caption(f"⚠️ מוצג קובץ דוגמה: {_DEMO_PATH.name} (העלה קובץ עדכני לניתוח אמיתי)")
@@ -102,7 +156,10 @@ elif _has_demo:
     parsed = st.session_state["chain_demo"]
 
 else:
-    st.info("העלה קובץ putvscall.csv מהבורסה כדי להתחיל")
+    if _HAS_DB:
+        st.info("לחץ **🔄 טען מ-Supabase** כדי לקבל נתונים עדכניים, או העלה קובץ CSV")
+    else:
+        st.info("העלה קובץ putvscall.csv מהבורסה כדי להתחיל")
     st.stop()
 
 if not parsed.get("expiries"):
