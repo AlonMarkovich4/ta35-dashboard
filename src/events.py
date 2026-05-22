@@ -10,20 +10,18 @@ from datetime import date, timedelta
 from typing import Optional
 
 import pandas as pd
-from sqlalchemy import text
+from sqlalchemy import Column, Date, Integer, MetaData, Table, Text, text
 
-# ─── SQL ─────────────────────────────────────────────────────────────
-
-_CREATE_EVENTS_SQL = """
-CREATE TABLE IF NOT EXISTS events (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    event_date  DATE    NOT NULL,
-    name        TEXT    NOT NULL,
-    category    TEXT    NOT NULL,
-    description TEXT    DEFAULT '',
-    source      TEXT    DEFAULT ''
+_EVENTS_METADATA = MetaData()
+_EVENTS_TABLE = Table(
+    "events", _EVENTS_METADATA,
+    Column("id",          Integer, primary_key=True),
+    Column("event_date",  Date,    nullable=False),
+    Column("name",        Text,    nullable=False),
+    Column("category",    Text,    nullable=False),
+    Column("description", Text,    server_default="''"),
+    Column("source",      Text,    server_default="''"),
 )
-"""
 
 # ─── אירועים היסטוריים להזרעה ─────────────────────────────────────
 # קטגוריות: מלחמה | מגפה | ריבית | משבר | פוליטי
@@ -110,16 +108,16 @@ _SEED_EVENTS: list[dict] = [
 # ─── פונקציות DB ──────────────────────────────────────────────────────
 
 def init_events_db(engine) -> None:
-    """יוצר טבלת events ב-SQLite אם אינה קיימת; מוסיף עמודת source אם חסרה."""
-    with engine.connect() as conn:
-        conn.execute(text(_CREATE_EVENTS_SQL))
-        conn.commit()
-        # migration: add source column for existing databases that predate it
-        try:
-            conn.execute(text("ALTER TABLE events ADD COLUMN source TEXT DEFAULT ''"))
-            conn.commit()
-        except Exception:
-            pass  # column already exists
+    """יוצר טבלת events אם אינה קיימת — תומך ב-SQLite ו-PostgreSQL."""
+    _EVENTS_METADATA.create_all(engine, checkfirst=True)
+    # migration: add source column for existing SQLite DBs that predate it
+    if engine.dialect.name == "sqlite":
+        with engine.connect() as conn:
+            try:
+                conn.execute(text("ALTER TABLE events ADD COLUMN source TEXT DEFAULT ''"))
+                conn.commit()
+            except Exception:
+                pass  # column already exists
 
 
 def seed_events(engine, force: bool = False) -> int:

@@ -22,11 +22,11 @@ _SRC = Path(__file__).parent
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
+
 from data_loader import get_engine
 from events import add_event, init_events_db, load_all_events
 from news_fetcher import classify_event, is_market_relevant
 
-_DB_PATH   = Path(__file__).parent.parent / "database" / "ta35.db"
 _DEDUP_LEN = 80
 _MAX_NAME  = 120
 
@@ -75,7 +75,7 @@ async def receive_telegram(payload: TelegramPayload, request: Request) -> dict:
     if category is None:
         return {"status": "skipped", "reason": "unclassified"}
 
-    engine = get_engine(_DB_PATH)
+    engine = get_engine()
     init_events_db(engine)
 
     ev_df = load_all_events(engine)

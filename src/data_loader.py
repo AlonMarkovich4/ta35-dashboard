@@ -2,16 +2,20 @@
 מודול לטעינה, ניקוי ושמירת נתוני פקיעות TA-35.
 
 זרימת עבודה:
-  CSV → load_market_csv() → DataFrame נקי → save_to_db() → expiry_history ב-SQLite
+  CSV → load_market_csv() → DataFrame נקי → save_to_db() → expiry_history בDB
 """
 
 import logging
+import os
 from pathlib import Path
 from typing import Optional
 
 import numpy as np
 import pandas as pd
-from sqlalchemy import create_engine, text
+from sqlalchemy import (
+    Column, Date, Float, Integer, MetaData, Table, Text,
+    create_engine, text,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -34,24 +38,24 @@ COLUMN_MAP = {
     "אחוז": "abs_move_pct",
 }
 
-CREATE_TABLE_SQL = """
-CREATE TABLE IF NOT EXISTS expiry_history (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    expiry_date DATE NOT NULL,
-    expiry_time TEXT,
-    expiry_type TEXT NOT NULL,
-    base_price REAL,
-    expiry_price REAL,
-    open_pct REAL,
-    close_price REAL,
-    daily_pct REAL,
-    volume REAL,
-    transactions INTEGER,
-    points REAL,
-    abs_move_pct REAL,
-    move_pct REAL
+_METADATA = MetaData()
+_EXPIRY_HISTORY = Table(
+    "expiry_history", _METADATA,
+    Column("id",           Integer, primary_key=True),
+    Column("expiry_date",  Date,    nullable=False),
+    Column("expiry_time",  Text),
+    Column("expiry_type",  Text,    nullable=False),
+    Column("base_price",   Float),
+    Column("expiry_price", Float),
+    Column("open_pct",     Float),
+    Column("close_price",  Float),
+    Column("daily_pct",    Float),
+    Column("volume",       Float),
+    Column("transactions", Integer),
+    Column("points",       Float),
+    Column("abs_move_pct", Float),
+    Column("move_pct",     Float),
 )
-"""
 
 
 def _clean_numeric(series: pd.Series) -> pd.Series:
@@ -120,20 +124,25 @@ def load_market_csv(csv_path: Optional[Path] = None) -> pd.DataFrame:
 
 def get_engine(db_path: Optional[Path] = None):
     """
-    מחזיר SQLAlchemy engine לחיבור ל-SQLite.
-    יוצר תיקיית database אם אינה קיימת.
+    מחזיר SQLAlchemy engine.
+    אם DATABASE_URL מוגדר בסביבה — מתחבר ל-PostgreSQL.
+    אחרת — SQLite מקומי בנתיב db_path (או ברירת מחדל).
     """
+    db_url = os.getenv("DATABASE_URL", "")
+    if db_url:
+        # Render מחזיר postgres:// אך SQLAlchemy דורש postgresql://
+        if db_url.startswith("postgres://"):
+            db_url = db_url.replace("postgres://", "postgresql://", 1)
+        return create_engine(db_url, echo=False)
     path = Path(db_path) if db_path else DB_PATH
     path.parent.mkdir(parents=True, exist_ok=True)
     return create_engine(f"sqlite:///{path}", echo=False)
 
 
 def init_db(engine=None) -> None:
-    """יוצר טבלת expiry_history ב-SQLite אם אינה קיימת."""
+    """יוצר טבלת expiry_history אם אינה קיימת — תומך ב-SQLite ו-PostgreSQL."""
     eng = engine or get_engine()
-    with eng.connect() as conn:
-        conn.execute(text(CREATE_TABLE_SQL))
-        conn.commit()
+    _METADATA.create_all(eng, checkfirst=True)
     logger.info("טבלת expiry_history אותחלה")
 
 

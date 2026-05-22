@@ -1,9 +1,35 @@
+databases:
+  - name: ta35-db
+    databaseName: ta35
+    user: ta35
+
 services:
+  # ── דשבורד Streamlit ──────────────────────────────────────────────
   - type: web
     name: ta35-dashboard
     runtime: python
     buildCommand: pip install -r requirements.txt
-    startCommand: python main.py
+    startCommand: >-
+      streamlit run app.py
+      --server.port $PORT
+      --server.address 0.0.0.0
+      --server.headless true
     envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: ta35-db
+          property: connectionString
+
+  # ── Webhook receiver (Telegram → DB) ─────────────────────────────
+  - type: web
+    name: ta35-webhook
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python scripts/webhook_worker.py
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: ta35-db
+          property: connectionString
       - key: WEBHOOK_SECRET
         sync: false   # הגדר ידנית ב-Render dashboard
