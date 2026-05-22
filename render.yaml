@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: ta35-dashboard
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    envVars:
+      - key: WEBHOOK_SECRET
+        sync: false   # הגדר ידנית ב-Render dashboard

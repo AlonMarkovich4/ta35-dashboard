@@ -13,11 +13,14 @@ if str(_SRC) not in sys.path:
 
 from styles import inject_global_css
 
-# הפעל webhook server על port 8502 (רץ פעם אחת — Python מכיל מודולים ב-cache)
-try:
-    import webhook_runner  # noqa: F401
-except Exception:
-    pass
+# הפעל webhook server על port 8502 רק בסביבה מקומית.
+# בפרודקשן (main.py) DISABLE_WEBHOOK_RUNNER=1 ו-FastAPI מטפל ב-webhook ישירות.
+import os as _os
+if not _os.getenv("DISABLE_WEBHOOK_RUNNER"):
+    try:
+        import webhook_runner  # noqa: F401
+    except Exception:
+        pass
 
 _PROJECT_ROOT = Path(__file__).parent
 

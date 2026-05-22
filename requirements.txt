@@ -22,6 +22,7 @@ feedparser>=6.0.0
 # Webhook API
 fastapi>=0.111.0
 uvicorn>=0.29.0
+websockets>=12.0
 
 # בדיקות
 pytest>=8.0.0
