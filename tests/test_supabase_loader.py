@@ -540,7 +540,7 @@ class TestLoadOneExpiryFilters:
     # ── סינון 3: מחיר חריג > _MAX_PRICE_PTS נקודות ────────────────────
 
     def test_price_outlier_row_is_removed(self):
-        """שורה עם call_price > 2000 נקודות (raw: > 100000 ₪) מסוננת."""
+        """שורה עם call_price > 500 נקודות (raw: > 25000 ₪) מסוננת."""
         rows = [
             _make_chain_row(4200.0, call_price=150000.0, put_price=50.0),  # 3000 pts → יסונן
             _make_chain_row(4300.0),
@@ -555,9 +555,9 @@ class TestLoadOneExpiryFilters:
         assert 4200.0 not in result[0]["strike"].values
 
     def test_normal_price_row_not_removed(self):
-        """מחיר סביר (≤ 2000 נקודות) נשאר לאחר סינון outlier."""
+        """מחיר סביר (≤ 500 נקודות) נשאר לאחר סינון outlier."""
         rows = [
-            _make_chain_row(4300.0, call_price=500.0, put_price=500.0),  # 500 pts → נשאר
+            _make_chain_row(4300.0, call_price=500.0, put_price=500.0),  # 10 pts → נשאר
             _make_chain_row(4400.0),
             _make_chain_row(4500.0),
             _make_chain_row(4600.0),
@@ -629,32 +629,32 @@ class TestLoadOneExpiryFilters:
 
         assert result is not None
         atm_level = result[3]
-        # after _to_nis(100.0) = 5000₪; index_est = 4300 + 5000/50 - 5000/50 = 4300
+        # _to_nis(100.0) = 100.0₪ (identity); c_pts = 100/50 = 2.0; index_est = 4300 + 2.0 - 2.0 = 4300
         assert atm_level == pytest.approx(4300.0, abs=1.0)
 
 
 # ─── _raw_to_option_pts ───────────────────────────────────────────────
 
 class TestRawToOptionPts:
-    """ממיר ערך גולמי DB לנקודות לצורך סינון outliers."""
+    """ממיר ערך גולמי DB (₪) לנקודות: abs(v) / MULTIPLIER."""
 
-    def test_small_value_kept_as_points(self):
-        """2.0 (≤ 1000) → 2.0 נקודות."""
-        assert _raw_to_option_pts(2.0) == pytest.approx(2.0, abs=0.001)
+    def test_small_value_divided_by_multiplier(self):
+        """2.0 ₪ → 2.0/50 = 0.04 נקודות."""
+        assert _raw_to_option_pts(2.0) == pytest.approx(0.04, abs=0.001)
 
     def test_large_value_divided_by_multiplier(self):
-        """29123.0 (> 1000, ₪) → 29123/50 = 582.46 נקודות."""
+        """29123.0 ₪ → 29123/50 = 582.46 נקודות."""
         assert _raw_to_option_pts(29123.0) == pytest.approx(582.46, abs=0.01)
 
     def test_outlier_150000_exceeds_threshold(self):
-        """150000 ₪ = 3000 נקודות > _MAX_PRICE_PTS (2000) → ייסונן."""
+        """150000 ₪ = 3000 נקודות > _MAX_PRICE_PTS (500) → ייסונן."""
         pts = _raw_to_option_pts(150000.0)
         assert pts > _MAX_PRICE_PTS
 
-    def test_29123_does_not_exceed_threshold(self):
-        """29123 ₪ = 582 נקודות < _MAX_PRICE_PTS — לא outlier לפי סף."""
+    def test_29123_exceeds_new_threshold(self):
+        """29123 ₪ = 582 נקודות > _MAX_PRICE_PTS (500) — outlier לפי הסף החדש."""
         pts = _raw_to_option_pts(29123.0)
-        assert pts < _MAX_PRICE_PTS
+        assert pts > _MAX_PRICE_PTS
 
     def test_zero_returns_zero(self):
         assert _raw_to_option_pts(0.0) == pytest.approx(0.0, abs=0.001)
@@ -663,22 +663,22 @@ class TestRawToOptionPts:
 # ─── _to_nis ──────────────────────────────────────────────────────────
 
 class TestToNis:
-    """כלל סף: ≤ 1000 → נקודות × MULTIPLIER → ₪; > 1000 → כבר ₪."""
+    """פונקציית זהות — כל lastrate_* מאוחסן ב-₪ ומוחזר כפי שהוא."""
 
-    def test_small_value_multiplied_by_multiplier(self):
-        """2.0 נקודות × 50 = 100 ₪."""
-        assert _to_nis(2.0) == pytest.approx(100.0, abs=0.01)
+    def test_small_value_returned_as_is(self):
+        """2.0 ₪ → מוחזר 2.0 ₪ (ללא המרה)."""
+        assert _to_nis(2.0) == pytest.approx(2.0, abs=0.01)
 
-    def test_large_value_kept_as_is(self):
-        """26623.0 > 1000 → כבר ₪, ללא שינוי."""
+    def test_large_value_returned_as_is(self):
+        """26623.0 ₪ → מוחזר 26623.0 ₪ ללא שינוי."""
         assert _to_nis(26623.0) == pytest.approx(26623.0, abs=0.01)
 
-    def test_boundary_exactly_1000_treated_as_points(self):
-        """1000.0 (≤ 1000) → 1000 × 50 = 50000 ₪."""
-        assert _to_nis(1000.0) == pytest.approx(50000.0, abs=0.01)
+    def test_boundary_1000_returned_as_is(self):
+        """1000.0 ₪ → מוחזר 1000.0 ₪ (ללא כפל ב-MULTIPLIER)."""
+        assert _to_nis(1000.0) == pytest.approx(1000.0, abs=0.01)
 
-    def test_above_boundary_kept_as_nis(self):
-        """1001.0 > 1000 → נשאר 1001.0 ₪."""
+    def test_above_boundary_returned_as_is(self):
+        """1001.0 ₪ → מוחזר 1001.0 ₪."""
         assert _to_nis(1001.0) == pytest.approx(1001.0, abs=0.01)
 
     def test_zero_returns_zero(self):
@@ -711,10 +711,10 @@ class TestToDecimalDelta:
 
 class TestPriceConversion:
     """
-    מתעד את המרת המחיר לפי כלל סף.
+    מתעד את המרת המחיר — כל lastrate_* הוא ב-₪; call_pts = call_price / MULTIPLIER.
 
-    ≤ 1000 → נקודות × 50 → ₪  (call_price); call_pts = ₪ / 50 = ערך מקורי
-    > 1000 → כבר ₪             (call_price); call_pts = ₪ / 50
+    call_price (₪) = ערך ה-DB (ללא שינוי)
+    call_pts       = call_price / 50
     """
 
     def _run_with_raw_price(self, raw_db_price: float) -> tuple:
@@ -746,17 +746,17 @@ class TestPriceConversion:
         row = target.iloc[0]
         return float(row["call_price"]), float(row["call_pts"])
 
-    def test_small_value_treated_as_points(self):
-        """2.0 (≤ 1000 נקודות) → 2.0 × 50 = 100 ₪ → call_pts = 2.0."""
+    def test_small_value_treated_as_nis(self):
+        """2.0 ₪ → call_price=2.0 ₪ → call_pts=0.04."""
         call_price, call_pts = self._run_with_raw_price(2.0)
-        assert call_price == pytest.approx(100.0, abs=0.01)
-        assert call_pts   == pytest.approx(2.0, abs=0.001)
+        assert call_price == pytest.approx(2.0, abs=0.01)
+        assert call_pts   == pytest.approx(2.0 / MULTIPLIER, abs=0.001)
 
-    def test_large_value_treated_as_nis(self):
-        """26623.0 (> 1000 ₪) → נשאר 26623.0 ₪ → call_pts = 532.46."""
-        call_price, call_pts = self._run_with_raw_price(26623.0)
-        assert call_price == pytest.approx(26623.0, abs=0.01)
-        assert call_pts   == pytest.approx(26623.0 / MULTIPLIER, abs=0.01)
+    def test_realistic_nis_value_treated_as_nis(self):
+        """12500.0 ₪ (250 נקודות — ≤ 500 סף) → call_price=12500 ₪ → call_pts=250."""
+        call_price, call_pts = self._run_with_raw_price(12500.0)
+        assert call_price == pytest.approx(12500.0, abs=0.01)
+        assert call_pts   == pytest.approx(12500.0 / MULTIPLIER, abs=0.01)
 
     def test_zero_price_stays_zero(self):
         """מחיר 0 ב-DB → 0 ₪ → 0 נקודות."""
@@ -764,8 +764,8 @@ class TestPriceConversion:
         assert call_price == pytest.approx(0.0, abs=0.001)
         assert call_pts   == pytest.approx(0.0, abs=0.001)
 
-    def test_boundary_1000_treated_as_points(self):
-        """1000.0 (≤ 1000) → 1000 × 50 = 50000 ₪ → call_pts = 1000.0."""
+    def test_boundary_1000_treated_as_nis(self):
+        """1000.0 ₪ = 20 נקודות → call_price=1000 ₪ → call_pts=20.0."""
         call_price, call_pts = self._run_with_raw_price(1000.0)
-        assert call_price == pytest.approx(50000.0, abs=0.01)
-        assert call_pts   == pytest.approx(1000.0, abs=0.01)
+        assert call_price == pytest.approx(1000.0, abs=0.01)
+        assert call_pts   == pytest.approx(1000.0 / MULTIPLIER, abs=0.01)
