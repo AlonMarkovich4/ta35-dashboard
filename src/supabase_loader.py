@@ -31,10 +31,15 @@ from typing import Optional
 import pandas as pd
 from sqlalchemy import create_engine, text
 
+from options_parser import find_atm
+
 _TODAY = date.today  # callable — evaluated at call time, not import time
 
-MULTIPLIER  = 50       # ₪ לנקודה — זהה ל-options_parser
-_MIN_STRIKE = 100.0
+MULTIPLIER       = 50      # ₪ לנקודה — זהה ל-options_parser
+_MIN_STRIKE      = 100.0
+_MAX_PRICE_PTS   = 2000.0  # מחיר אופציה מקסימלי סביר בנקודות
+_ATM_RANGE_PCT   = 0.20    # ±20% מרמת ה-ATM — מסנן OTM/ITM עמוק
+_MIN_CHAIN_ROWS  = 3       # מינימום שורות תקינות כדי להחזיר שרשרת
 
 # ─── DB connection ─────────────────────────────────────────────────────
 
@@ -92,6 +97,19 @@ def _norm_delta_series(s: pd.Series) -> pd.Series:
     return pd.to_numeric(s, errors="coerce").fillna(0.0).apply(_to_decimal_delta)
 
 
+def _raw_to_option_pts(v: float) -> float:
+    """
+    ממיר ערך גולמי מה-DB לנקודות — לשימוש בסינון outliers לפני נרמול מלא.
+
+    ≤ 1000 → כבר בנקודות → ללא המרה
+    > 1000 → כבר ₪        → ÷ MULTIPLIER → נקודות
+    """
+    abs_v = abs(v)
+    if abs_v > 1000:
+        return abs_v / MULTIPLIER
+    return abs_v
+
+
 # ─── Expiry type inference ─────────────────────────────────────────────
 
 def _infer_expiry_type(drvtype_val: str, expiry_dt: Optional[date]) -> str:
@@ -124,14 +142,14 @@ def get_sample_row(engine=None) -> Optional[dict]:
     """
     מחזיר שורה גולמית ATM אחת מ-tase_putcall לאבחון — ערכים כמו שהם ב-DB.
 
-    בוחר מה-fetch האחרון את השורה שה-strike שלה הכי קרוב ל-baserate_call.
+    ATM נקבע לפי put-call parity: השורה שבה |call_price_nis - put_price_nis| מינימלי.
     מחזיר None אם אין חיבור DB, הטבלה ריקה, או שגיאה.
     """
     eng = _make_engine(engine)
     if eng is None:
         return None
     try:
-        df = pd.read_sql(
+        df_all = pd.read_sql(
             text("""
                 SELECT
                     expiry_date, fetched_at, drvtype,
@@ -146,22 +164,27 @@ def get_sample_row(engine=None) -> Optional[dict]:
                 FROM tase_putcall
                 WHERE fetched_at = (SELECT MAX(fetched_at) FROM tase_putcall)
                   AND (lastrate_call <> 0 OR lastrate_put <> 0)
-                ORDER BY ABS(
-                    COALESCE(expirationprice_call, expirationprice_put)
-                    - COALESCE(
-                        baserate_call,
-                        (SELECT AVG(COALESCE(expirationprice_call, expirationprice_put))
-                         FROM tase_putcall
-                         WHERE fetched_at = (SELECT MAX(fetched_at) FROM tase_putcall))
-                      )
-                )
-                LIMIT 1
             """),
             con=eng,
         )
-        if df.empty:
+        if df_all.empty:
             return None
-        return df.iloc[0].to_dict()
+
+        # נרמל לₓ כדי לזהות ATM לפי put-call parity
+        call_nis = pd.to_numeric(df_all["lastrate_call"], errors="coerce").fillna(0.0).apply(_to_nis)
+        put_nis  = pd.to_numeric(df_all["lastrate_put"],  errors="coerce").fillna(0.0).apply(_to_nis)
+
+        # בחר שורות שבהן שני הצדדים פעילים; fallback לצד אחד
+        both_active = (call_nis > 0) & (put_nis > 0)
+        df_active = df_all[both_active] if both_active.any() else df_all[(call_nis > 0) | (put_nis > 0)]
+
+        if df_active.empty:
+            return None
+
+        parity_dist = (call_nis.loc[df_active.index] - put_nis.loc[df_active.index]).abs()
+        atm_idx = parity_dist.idxmin()
+
+        return df_all.loc[atm_idx].to_dict()
     except Exception:
         return None
 
@@ -284,8 +307,10 @@ def _load_chains(eng, expiry_date: Optional[str]) -> Optional[dict]:
 
 def _load_one_expiry(eng, conn, target: str):
     """
-    טוען שרשרת פקיעה אחת.
-    מחזיר (DataFrame, drvtype, fetched_at) או None אם אין נתונים.
+    טוען שרשרת פקיעה אחת ומחיל סינון רב-שכבתי.
+
+    מחזיר (DataFrame, drvtype, fetched_at, atm_level) או None אם הנתונים לא תקינים.
+    None מוחזר גם אם נותרות פחות מ-_MIN_CHAIN_ROWS שורות לאחר הסינון.
     """
     latest_row = conn.execute(
         text("SELECT MAX(fetched_at) FROM tase_putcall WHERE expiry_date = :exp"),
@@ -297,7 +322,7 @@ def _load_one_expiry(eng, conn, target: str):
 
     fetch_ts = latest_row[0]
 
-    # שלב 1: קרא ערכים גולמיים מה-DB — ללא המרה בSQL
+    # שלב 1: קרא ערכים גולמיים מה-DB — ללא המרה ב-SQL
     df_raw = pd.read_sql(
         text("""
             SELECT
@@ -314,7 +339,6 @@ def _load_one_expiry(eng, conn, target: str):
                 lowrate_call    AS call_low,
                 highrate_put    AS put_high,
                 lowrate_put     AS put_low,
-                baserate_call,
                 drvtype
             FROM tase_putcall
             WHERE expiry_date = :exp AND fetched_at = :fetch
@@ -334,10 +358,28 @@ def _load_one_expiry(eng, conn, target: str):
     if df_raw.empty:
         return None
 
-    # סנן שורות ללא מסחר (גם call וגם put הם 0)
-    call_zero = pd.to_numeric(df_raw["call_price"], errors="coerce").fillna(0.0) == 0.0
-    put_zero  = pd.to_numeric(df_raw["put_price"],  errors="coerce").fillna(0.0) == 0.0
-    df_raw = df_raw[~(call_zero & put_zero)]
+    # סינון 1: שורות ללא מסחר — גם call וגם put אפס
+    call_raw = pd.to_numeric(df_raw["call_price"], errors="coerce").fillna(0.0)
+    put_raw  = pd.to_numeric(df_raw["put_price"],  errors="coerce").fillna(0.0)
+    df_raw = df_raw[~((call_raw == 0.0) & (put_raw == 0.0))]
+
+    if df_raw.empty:
+        return None
+
+    # סינון 2: שורות ללא דלתא — גם call_delta וגם put_delta אפס (אין מסחר אמיתי)
+    cdelta_raw = pd.to_numeric(df_raw["call_delta"], errors="coerce").fillna(0.0)
+    pdelta_raw = pd.to_numeric(df_raw["put_delta"],  errors="coerce").fillna(0.0)
+    df_raw = df_raw[~((cdelta_raw == 0.0) & (pdelta_raw == 0.0))]
+
+    if df_raw.empty:
+        return None
+
+    # סינון 3: ערכי מחיר חריגים — מעל _MAX_PRICE_PTS נקודות
+    call_raw_u = pd.to_numeric(df_raw["call_price"], errors="coerce").fillna(0.0)
+    put_raw_u  = pd.to_numeric(df_raw["put_price"],  errors="coerce").fillna(0.0)
+    call_pts_raw = call_raw_u.apply(_raw_to_option_pts)
+    put_pts_raw  = put_raw_u.apply(_raw_to_option_pts)
+    df_raw = df_raw[~((call_pts_raw > _MAX_PRICE_PTS) | (put_pts_raw > _MAX_PRICE_PTS))]
 
     if df_raw.empty:
         return None
@@ -348,12 +390,6 @@ def _load_one_expiry(eng, conn, target: str):
         else ""
     )
 
-    # חלץ baserate לשימוש ב-ATM — fallback לממוצע סטרייקים אם None
-    baserate_raw = pd.to_numeric(df_raw["baserate_call"], errors="coerce").dropna()
-    baserate = float(baserate_raw.iloc[0]) if not baserate_raw.empty else None
-    if baserate is None:
-        baserate = float(df_raw["strike"].mean())
-
     # שלב 2: נרמול — מחירים לₓ, דלתא לדצימלי
     price_cols = ["call_price", "put_price", "call_high", "call_low", "put_high", "put_low"]
     delta_cols = ["call_delta", "put_delta"]
@@ -363,10 +399,8 @@ def _load_one_expiry(eng, conn, target: str):
 
     for col in price_cols:
         df[col] = _norm_price_series(df[col])
-
     for col in delta_cols:
         df[col] = _norm_delta_series(df[col])
-
     for col in ["strike"] + other_cols:
         df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
 
@@ -375,7 +409,28 @@ def _load_one_expiry(eng, conn, target: str):
           .sort_values("strike")
           .reset_index(drop=True)
     )
+
+    # שלב 3: זיהוי ATM לפי put-call parity (ייבוא מ-options_parser)
+    atm_info = find_atm(df)
+    if atm_info:
+        atm_level = float(atm_info.get("index_estimate", atm_info.get("strike", df["strike"].mean())))
+    else:
+        atm_level = float(df["strike"].mean())
+
+    # סינון 4: סטרייקים מחוץ ל-±_ATM_RANGE_PCT מרמת ה-ATM
+    df = df[((df["strike"] - atm_level).abs() / atm_level) <= _ATM_RANGE_PCT]
+
+    if len(df) < _MIN_CHAIN_ROWS:
+        import warnings
+        warnings.warn(
+            f"נתוני Supabase לא תקינים לפקיעה {target} — "
+            f"נותרו {len(df)} שורות בלבד (מינימום {_MIN_CHAIN_ROWS})",
+            stacklevel=2,
+        )
+        return None
+
+    df = df.reset_index(drop=True)
     df["call_pts"] = (df["call_price"] / MULTIPLIER).round(2)
     df["put_pts"]  = (df["put_price"]  / MULTIPLIER).round(2)
 
-    return df, str(drvtype_val), fetch_ts, baserate
+    return df, str(drvtype_val), fetch_ts, atm_level

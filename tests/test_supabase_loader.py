@@ -18,9 +18,13 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from supabase_loader import (
     MULTIPLIER,
+    _ATM_RANGE_PCT,
+    _MAX_PRICE_PTS,
+    _MIN_CHAIN_ROWS,
     _infer_expiry_type,
     _load_one_expiry,
     _make_engine,
+    _raw_to_option_pts,
     _to_nis,
     _to_decimal_delta,
     get_available_expiries,
@@ -36,25 +40,25 @@ def _make_chain_row(
     strike: float,
     call_price: float = 50.0,
     put_price: float = 40.0,
-    baserate_call: float = 1920.0,
+    call_delta: float = 55.0,
+    put_delta: float = 45.0,
 ) -> dict:
-    """מחזיר שורה לדוגמה ב-DataFrame גולמי (כמו pd.read_sql)."""
+    """מחזיר שורה לדוגמה ב-DataFrame גולמי (כמו pd.read_sql של _load_one_expiry)."""
     return {
-        "strike":        strike,
-        "call_price":    call_price,
-        "put_price":     put_price,
-        "call_delta":    55.0,
-        "put_delta":     45.0,
-        "call_oi":       1000.0,
-        "put_oi":        900.0,
-        "call_volume":   200.0,
-        "put_volume":    180.0,
-        "call_high":     55.0,
-        "call_low":      45.0,
-        "put_high":      42.0,
-        "put_low":       38.0,
-        "baserate_call": baserate_call,
-        "drvtype":       "W",
+        "strike":      strike,
+        "call_price":  call_price,
+        "put_price":   put_price,
+        "call_delta":  call_delta,
+        "put_delta":   put_delta,
+        "call_oi":     1000.0,
+        "put_oi":      900.0,
+        "call_volume": 200.0,
+        "put_volume":  180.0,
+        "call_high":   55.0,
+        "call_low":    45.0,
+        "put_high":    42.0,
+        "put_low":     38.0,
+        "drvtype":     "W",
     }
 
 
@@ -270,9 +274,12 @@ class TestGetLatestOptionChain:
     def test_call_pts_and_put_pts_are_divided_by_multiplier(self):
         """call_pts = call_price(₪) / MULTIPLIER; ערכים >1000 נשארים בₓ ישירות."""
         fetch_ts = datetime(2026, 5, 22, 10, 0)
-        # ערכים > 1000 → כבר ₪ → _to_nis משאיר; call_pts = ₪ / 50
-        row = _make_chain_row(1920.0, call_price=5000.0, put_price=3000.0)
-        chain_df_raw = pd.DataFrame([row])
+        # 3 שורות זהות (≥ _MIN_CHAIN_ROWS); בודקים את הערכים של הסטרייק הראשון
+        chain_df_raw = pd.DataFrame([
+            _make_chain_row(1880.0, call_price=5000.0, put_price=3000.0),
+            _make_chain_row(1920.0, call_price=5000.0, put_price=3000.0),
+            _make_chain_row(1960.0, call_price=5000.0, put_price=3000.0),
+        ])
 
         mock_conn = MagicMock()
         mock_conn.__enter__ = MagicMock(return_value=mock_conn)
@@ -286,13 +293,15 @@ class TestGetLatestOptionChain:
         with patch("supabase_loader.pd.read_sql", return_value=chain_df_raw):
             result = get_latest_option_chain(expiry_date="2026-05-29", engine=mock_engine)
 
+        assert result is not None
         chain = result["expiries"][0]["chain"]
-        assert chain.iloc[0]["call_pts"] == pytest.approx(5000.0 / MULTIPLIER, abs=0.01)
-        assert chain.iloc[0]["put_pts"]  == pytest.approx(3000.0 / MULTIPLIER, abs=0.01)
+        row = chain.iloc[0]
+        assert row["call_pts"] == pytest.approx(5000.0 / MULTIPLIER, abs=0.01)
+        assert row["put_pts"]  == pytest.approx(3000.0 / MULTIPLIER, abs=0.01)
 
     def test_result_has_as_of_date_and_fetched_at(self):
         fetch_ts     = datetime(2026, 5, 22, 10, 30)
-        chain_df_raw = pd.DataFrame([_make_chain_row(1920.0)])
+        chain_df_raw = pd.DataFrame([_make_chain_row(s) for s in [1900.0, 1920.0, 1940.0]])
 
         mock_conn = MagicMock()
         mock_conn.__enter__ = MagicMock(return_value=mock_conn)
@@ -310,10 +319,12 @@ class TestGetLatestOptionChain:
         assert result["fetched_at"] == fetch_ts
 
     def test_strike_below_min_filtered_out(self):
-        """שורות עם strike < 100 מסוננות."""
+        """שורות עם strike < 100 מסוננות; שאר השורות (≥ _MIN_CHAIN_ROWS) נשארות."""
         chain_df_raw = pd.DataFrame([
-            _make_chain_row(50.0),    # ← יסונן
-            _make_chain_row(1920.0),  # ← יישאר
+            _make_chain_row(50.0),    # ← יסונן (strike < 100)
+            _make_chain_row(1900.0),
+            _make_chain_row(1920.0),
+            _make_chain_row(1940.0),
         ])
         fetch_ts = datetime(2026, 5, 22, 10, 0)
 
@@ -329,12 +340,13 @@ class TestGetLatestOptionChain:
         with patch("supabase_loader.pd.read_sql", return_value=chain_df_raw):
             result = get_latest_option_chain(expiry_date="2026-05-29", engine=mock_engine)
 
+        assert result is not None
         chain = result["expiries"][0]["chain"]
         assert (chain["strike"] >= 100.0).all()
-        assert len(chain) == 1
+        assert 50.0 not in chain["strike"].values
 
     def test_expiry_date_formatted_as_ddmmyyyy(self):
-        chain_df_raw = pd.DataFrame([_make_chain_row(1920.0)])
+        chain_df_raw = pd.DataFrame([_make_chain_row(s) for s in [1900.0, 1920.0, 1940.0]])
         fetch_ts     = datetime(2026, 5, 22, 9, 0)
 
         mock_conn = MagicMock()
@@ -353,7 +365,7 @@ class TestGetLatestOptionChain:
 
     def test_weekly_expiry_type_inferred(self):
         """2026-05-22 הוא יום שישי שאינו אחרון → שבועי."""
-        chain_df_raw = pd.DataFrame([_make_chain_row(1920.0)])
+        chain_df_raw = pd.DataFrame([_make_chain_row(s) for s in [1900.0, 1920.0, 1940.0]])
         chain_df_raw["drvtype"] = ""  # drvtype ריק → נסיק מהתאריך
         fetch_ts = datetime(2026, 5, 22, 9, 0)
 
@@ -374,6 +386,34 @@ class TestGetLatestOptionChain:
 
 # ─── get_sample_row ────────────────────────────────────────────────────
 
+def _make_sample_df_row(
+    lastrate_call: float = 100.0,
+    lastrate_put: float = 100.0,
+    expiry_date: str = "2026-05-29",
+) -> dict:
+    """עוזר: שורה לדוגמה בפורמט SQL של get_sample_row."""
+    return {
+        "expiry_date":              expiry_date,
+        "fetched_at":               datetime(2026, 5, 22, 10, 0),
+        "drvtype":                  "W",
+        "expirationprice_call":     4300.0,
+        "expirationprice_put":      4300.0,
+        "baserate_call":            None,
+        "lastrate_call":            lastrate_call,
+        "lastrate_put":             lastrate_put,
+        "highrate_call":            120.0,
+        "lowrate_call":             80.0,
+        "highrate_put":             120.0,
+        "lowrate_put":              80.0,
+        "delta_call":               52.0,
+        "delta_put":                -48.0,
+        "overallturnoverunits_call": 500,
+        "overallturnoverunits_put":  480,
+        "openpositions_call":        12000,
+        "openpositions_put":         11500,
+    }
+
+
 class TestGetSampleRow:
     def test_returns_none_without_engine(self, monkeypatch):
         monkeypatch.delenv("DATABASE_URL", raising=False)
@@ -391,130 +431,244 @@ class TestGetSampleRow:
             assert get_sample_row(engine=mock_engine) is None
 
     def test_returns_dict_with_raw_columns(self):
-        sample_df = pd.DataFrame([{
-            "expiry_date":             "2026-05-29",
-            "fetched_at":              datetime(2026, 5, 22, 10, 0),
-            "drvtype":                 "W",
-            "expirationprice_call":    1920,
-            "expirationprice_put":     1920,
-            "lastrate_call":           1050,
-            "lastrate_put":            980,
-            "highrate_call":           1100,
-            "lowrate_call":            980,
-            "highrate_put":            1020,
-            "lowrate_put":             940,
-            "delta_call":              52.0,
-            "delta_put":               48.0,
-            "overallturnoverunits_call": 500,
-            "overallturnoverunits_put":  480,
-            "openpositions_call":       12000,
-            "openpositions_put":        11500,
-        }])
+        """מחזיר dict עם ערכים גולמיים מה-DB."""
+        sample_df = pd.DataFrame([_make_sample_df_row(lastrate_call=100.0, lastrate_put=100.0)])
         mock_engine = MagicMock()
         with patch("supabase_loader.pd.read_sql", return_value=sample_df):
             result = get_sample_row(engine=mock_engine)
 
         assert result is not None
         assert isinstance(result, dict)
-        assert result["lastrate_call"] == 1050
-        assert result["expirationprice_call"] == 1920
+        assert result["lastrate_call"] == 100.0
+        assert result["expirationprice_call"] == 4300.0
 
-
-# ─── _load_one_expiry — zero-price filter & baserate ──────────────────
-
-class TestLoadOneExpiryFilters:
-    """בודק סינון שורות ללא מסחר ושימוש ב-baserate."""
-
-    def _make_mock_conn_for_expiry(self, fetch_ts, df_raw):
-        """mock connection המחזיר fetch_ts ואז df_raw ב-pd.read_sql."""
-        mock_conn = MagicMock()
-        mock_conn.execute.return_value.fetchone.return_value = (fetch_ts,)
-        return mock_conn
-
-    def test_zero_call_and_put_rows_are_removed(self):
-        """שורה שבה call=0 וגם put=0 מסוננת לפני נרמול."""
-        fetch_ts = datetime(2026, 5, 22, 10, 0)
-        rows = [
-            _make_chain_row(1900.0, call_price=0.0, put_price=0.0),   # יסונן
-            _make_chain_row(1920.0, call_price=10.0, put_price=0.0),  # נשאר
-        ]
-        df_raw = pd.DataFrame(rows)
-        mock_conn = MagicMock()
-        mock_conn.execute.return_value.fetchone.return_value = (fetch_ts,)
+    def test_parity_atm_selection(self):
+        """מחזיר את השורה שבה |call_nis - put_nis| מינימלי — השורה הכי קרובה ל-ATM."""
+        sample_df = pd.DataFrame([
+            # שורה OTM: call גבוה בהרבה מ-put
+            {**_make_sample_df_row(lastrate_call=500.0, lastrate_put=50.0),
+             "expirationprice_call": 4600.0, "expirationprice_put": 4600.0},
+            # שורה ATM: call ≈ put
+            {**_make_sample_df_row(lastrate_call=100.0, lastrate_put=100.0),
+             "expirationprice_call": 4300.0, "expirationprice_put": 4300.0},
+        ])
         mock_engine = MagicMock()
-
-        with patch("supabase_loader.pd.read_sql", return_value=df_raw):
-            result = _load_one_expiry(mock_engine, mock_conn, "2026-05-29")
+        with patch("supabase_loader.pd.read_sql", return_value=sample_df):
+            result = get_sample_row(engine=mock_engine)
 
         assert result is not None
-        chain_df = result[0]
-        assert len(chain_df) == 1
-        assert chain_df.iloc[0]["strike"] == pytest.approx(1920.0)
+        # הפונקציה צריכה להחזיר את שורת ה-ATM
+        assert result["expirationprice_call"] == pytest.approx(4300.0)
+
+
+# ─── _load_one_expiry — multi-layer filters ────────────────────────────
+
+def _mock_conn_fetchone(fetch_ts):
+    """mock connection עם fetchone שמחזיר fetch_ts."""
+    mock_conn = MagicMock()
+    mock_conn.execute.return_value.fetchone.return_value = (fetch_ts,)
+    return mock_conn
+
+
+class TestLoadOneExpiryFilters:
+    """בודק את כל שכבות הסינון ב-_load_one_expiry."""
+
+    _TS = datetime(2026, 5, 22, 10, 0)
+
+    # ── סינון 1: call=0 AND put=0 ──────────────────────────────────────
+
+    def test_zero_call_and_put_rows_are_removed(self):
+        """שורה שבה call=0 וגם put=0 מסוננת."""
+        rows = [
+            _make_chain_row(4200.0, call_price=0.0, put_price=0.0),   # יסונן
+            _make_chain_row(4300.0, call_price=10.0, put_price=10.0),
+            _make_chain_row(4400.0, call_price=10.0, put_price=10.0),
+            _make_chain_row(4500.0, call_price=10.0, put_price=10.0),
+        ]
+        df_raw = pd.DataFrame(rows)
+        with patch("supabase_loader.pd.read_sql", return_value=df_raw):
+            result = _load_one_expiry(MagicMock(), _mock_conn_fetchone(self._TS), "2026-05-29")
+
+        assert result is not None
+        assert 4200.0 not in result[0]["strike"].values
 
     def test_row_with_only_put_zero_is_kept(self):
         """שורה עם call > 0 נשארת גם אם put = 0."""
-        fetch_ts = datetime(2026, 5, 22, 10, 0)
-        df_raw = pd.DataFrame([_make_chain_row(1920.0, call_price=5.0, put_price=0.0)])
-        mock_conn = MagicMock()
-        mock_conn.execute.return_value.fetchone.return_value = (fetch_ts,)
-        mock_engine = MagicMock()
-
+        rows = [
+            _make_chain_row(4200.0, call_price=5.0, put_price=0.0),
+            _make_chain_row(4300.0, call_price=5.0, put_price=5.0),
+            _make_chain_row(4400.0, call_price=5.0, put_price=5.0),
+            _make_chain_row(4500.0, call_price=5.0, put_price=5.0),
+        ]
+        df_raw = pd.DataFrame(rows)
         with patch("supabase_loader.pd.read_sql", return_value=df_raw):
-            result = _load_one_expiry(mock_engine, mock_conn, "2026-05-29")
+            result = _load_one_expiry(MagicMock(), _mock_conn_fetchone(self._TS), "2026-05-29")
 
         assert result is not None
-        assert len(result[0]) == 1
+        assert 4200.0 in result[0]["strike"].values
 
     def test_returns_none_when_all_rows_are_zero(self):
-        """אם כל השורות הן 0/0 — מחזיר None."""
-        fetch_ts = datetime(2026, 5, 22, 10, 0)
-        df_raw = pd.DataFrame([
-            _make_chain_row(1900.0, call_price=0.0, put_price=0.0),
-            _make_chain_row(1920.0, call_price=0.0, put_price=0.0),
-        ])
-        mock_conn = MagicMock()
-        mock_conn.execute.return_value.fetchone.return_value = (fetch_ts,)
-        mock_engine = MagicMock()
-
+        """כל השורות 0/0 → None."""
+        rows = [_make_chain_row(4300.0 + i*100, call_price=0.0, put_price=0.0) for i in range(4)]
+        df_raw = pd.DataFrame(rows)
         with patch("supabase_loader.pd.read_sql", return_value=df_raw):
-            result = _load_one_expiry(mock_engine, mock_conn, "2026-05-29")
+            result = _load_one_expiry(MagicMock(), _mock_conn_fetchone(self._TS), "2026-05-29")
 
         assert result is None
 
-    def test_baserate_from_baserate_call_column(self):
-        """baserate נלקח מ-baserate_call כשהוא זמין."""
-        fetch_ts = datetime(2026, 5, 22, 10, 0)
-        df_raw = pd.DataFrame([_make_chain_row(1920.0, baserate_call=1915.0)])
-        mock_conn = MagicMock()
-        mock_conn.execute.return_value.fetchone.return_value = (fetch_ts,)
-        mock_engine = MagicMock()
+    # ── סינון 2: delta_call=0 AND delta_put=0 ──────────────────────────
 
-        with patch("supabase_loader.pd.read_sql", return_value=df_raw):
-            result = _load_one_expiry(mock_engine, mock_conn, "2026-05-29")
-
-        assert result is not None
-        baserate = result[3]
-        assert baserate == pytest.approx(1915.0, abs=0.01)
-
-    def test_baserate_falls_back_to_mean_strike_when_null(self):
-        """baserate_call=None → fallback לממוצע סטרייקים."""
-        fetch_ts = datetime(2026, 5, 22, 10, 0)
+    def test_zero_delta_rows_are_removed(self):
+        """שורה עם delta_call=0 וגם delta_put=0 מסוננת."""
         rows = [
-            _make_chain_row(1900.0, baserate_call=None),
-            _make_chain_row(1920.0, baserate_call=None),
+            _make_chain_row(4200.0, call_delta=0.0, put_delta=0.0),   # יסונן
+            _make_chain_row(4300.0),
+            _make_chain_row(4400.0),
+            _make_chain_row(4500.0),
         ]
         df_raw = pd.DataFrame(rows)
-        df_raw["baserate_call"] = None   # force None column
-        mock_conn = MagicMock()
-        mock_conn.execute.return_value.fetchone.return_value = (fetch_ts,)
-        mock_engine = MagicMock()
-
         with patch("supabase_loader.pd.read_sql", return_value=df_raw):
-            result = _load_one_expiry(mock_engine, mock_conn, "2026-05-29")
+            result = _load_one_expiry(MagicMock(), _mock_conn_fetchone(self._TS), "2026-05-29")
 
         assert result is not None
-        baserate = result[3]
-        assert baserate == pytest.approx(1910.0, abs=0.01)  # (1900+1920)/2
+        assert 4200.0 not in result[0]["strike"].values
+
+    def test_row_with_only_call_delta_zero_is_kept(self):
+        """שורה עם put_delta > 0 נשארת אפילו אם call_delta=0."""
+        rows = [
+            _make_chain_row(4200.0, call_delta=0.0, put_delta=45.0),  # נשאר
+            _make_chain_row(4300.0),
+            _make_chain_row(4400.0),
+            _make_chain_row(4500.0),
+        ]
+        df_raw = pd.DataFrame(rows)
+        with patch("supabase_loader.pd.read_sql", return_value=df_raw):
+            result = _load_one_expiry(MagicMock(), _mock_conn_fetchone(self._TS), "2026-05-29")
+
+        assert result is not None
+        assert 4200.0 in result[0]["strike"].values
+
+    # ── סינון 3: מחיר חריג > _MAX_PRICE_PTS נקודות ────────────────────
+
+    def test_price_outlier_row_is_removed(self):
+        """שורה עם call_price > 2000 נקודות (raw: > 100000 ₪) מסוננת."""
+        rows = [
+            _make_chain_row(4200.0, call_price=150000.0, put_price=50.0),  # 3000 pts → יסונן
+            _make_chain_row(4300.0),
+            _make_chain_row(4400.0),
+            _make_chain_row(4500.0),
+        ]
+        df_raw = pd.DataFrame(rows)
+        with patch("supabase_loader.pd.read_sql", return_value=df_raw):
+            result = _load_one_expiry(MagicMock(), _mock_conn_fetchone(self._TS), "2026-05-29")
+
+        assert result is not None
+        assert 4200.0 not in result[0]["strike"].values
+
+    def test_normal_price_row_not_removed(self):
+        """מחיר סביר (≤ 2000 נקודות) נשאר לאחר סינון outlier."""
+        rows = [
+            _make_chain_row(4300.0, call_price=500.0, put_price=500.0),  # 500 pts → נשאר
+            _make_chain_row(4400.0),
+            _make_chain_row(4500.0),
+            _make_chain_row(4600.0),
+        ]
+        df_raw = pd.DataFrame(rows)
+        with patch("supabase_loader.pd.read_sql", return_value=df_raw):
+            result = _load_one_expiry(MagicMock(), _mock_conn_fetchone(self._TS), "2026-05-29")
+
+        assert result is not None
+        assert 4300.0 in result[0]["strike"].values
+
+    # ── סינון 4: ±20% מ-ATM (put-call parity) ──────────────────────────
+
+    def test_atm_range_filter_removes_distant_strikes(self):
+        """סטרייק מחוץ ל-±20% מ-ATM מסונן."""
+        # ATM יזוהה ב-4300 (parity=0), ±20% = [3440, 5160]
+        # סטרייק 3000 < 3440 → יסונן
+        rows = [
+            _make_chain_row(3000.0, call_price=200.0, put_price=10.0),   # OTM רחוק → יסונן
+            _make_chain_row(4200.0, call_price=100.0, put_price=90.0),
+            _make_chain_row(4300.0, call_price=100.0, put_price=100.0),  # ATM (parity=0)
+            _make_chain_row(4400.0, call_price=90.0,  put_price=100.0),
+            _make_chain_row(4500.0, call_price=80.0,  put_price=110.0),
+        ]
+        df_raw = pd.DataFrame(rows)
+        with patch("supabase_loader.pd.read_sql", return_value=df_raw):
+            result = _load_one_expiry(MagicMock(), _mock_conn_fetchone(self._TS), "2026-05-29")
+
+        assert result is not None
+        chain = result[0]
+        assert 3000.0 not in chain["strike"].values
+        assert 4300.0 in chain["strike"].values
+
+    # ── סינון 5: פחות מ-_MIN_CHAIN_ROWS שורות → None ──────────────────
+
+    def test_returns_none_when_fewer_than_min_rows_after_atm_filter(self):
+        """פחות מ-3 שורות תקינות לאחר סינון ATM → None עם אזהרה."""
+        # ATM ב-4300 (parity=0), ±20% = [3440, 5160]
+        # רק 2 שורות בטווח → None
+        rows = [
+            _make_chain_row(3000.0, call_price=200.0, put_price=10.0),  # מחוץ לטווח
+            _make_chain_row(4200.0, call_price=100.0, put_price=90.0),  # בטווח
+            _make_chain_row(4300.0, call_price=100.0, put_price=100.0), # ATM — בטווח
+        ]
+        df_raw = pd.DataFrame(rows)
+        with patch("supabase_loader.pd.read_sql", return_value=df_raw):
+            import warnings
+            with warnings.catch_warnings(record=True) as w:
+                warnings.simplefilter("always")
+                result = _load_one_expiry(MagicMock(), _mock_conn_fetchone(self._TS), "2026-05-29")
+
+        assert result is None
+        assert any("לא תקינים" in str(warning.message) for warning in w)
+
+    # ── ATM level מ-put-call parity ────────────────────────────────────
+
+    def test_atm_level_from_parity(self):
+        """atm_level = index_estimate מ-find_atm: סטרייק שבו |call-put| מינימלי."""
+        # סטרייק 4300: call=put=100pts → parity=0 → ATM מדויק
+        # index_estimate = 4300 + (100-100) = 4300
+        rows = [
+            _make_chain_row(4100.0, call_price=200.0, put_price=50.0),  # parity גבוה
+            _make_chain_row(4300.0, call_price=100.0, put_price=100.0), # ATM
+            _make_chain_row(4500.0, call_price=50.0,  put_price=200.0), # parity גבוה
+        ]
+        df_raw = pd.DataFrame(rows)
+        with patch("supabase_loader.pd.read_sql", return_value=df_raw):
+            result = _load_one_expiry(MagicMock(), _mock_conn_fetchone(self._TS), "2026-05-29")
+
+        assert result is not None
+        atm_level = result[3]
+        # after _to_nis(100.0) = 5000₪; index_est = 4300 + 5000/50 - 5000/50 = 4300
+        assert atm_level == pytest.approx(4300.0, abs=1.0)
+
+
+# ─── _raw_to_option_pts ───────────────────────────────────────────────
+
+class TestRawToOptionPts:
+    """ממיר ערך גולמי DB לנקודות לצורך סינון outliers."""
+
+    def test_small_value_kept_as_points(self):
+        """2.0 (≤ 1000) → 2.0 נקודות."""
+        assert _raw_to_option_pts(2.0) == pytest.approx(2.0, abs=0.001)
+
+    def test_large_value_divided_by_multiplier(self):
+        """29123.0 (> 1000, ₪) → 29123/50 = 582.46 נקודות."""
+        assert _raw_to_option_pts(29123.0) == pytest.approx(582.46, abs=0.01)
+
+    def test_outlier_150000_exceeds_threshold(self):
+        """150000 ₪ = 3000 נקודות > _MAX_PRICE_PTS (2000) → ייסונן."""
+        pts = _raw_to_option_pts(150000.0)
+        assert pts > _MAX_PRICE_PTS
+
+    def test_29123_does_not_exceed_threshold(self):
+        """29123 ₪ = 582 נקודות < _MAX_PRICE_PTS — לא outlier לפי סף."""
+        pts = _raw_to_option_pts(29123.0)
+        assert pts < _MAX_PRICE_PTS
+
+    def test_zero_returns_zero(self):
+        assert _raw_to_option_pts(0.0) == pytest.approx(0.0, abs=0.001)
 
 
 # ─── _to_nis ──────────────────────────────────────────────────────────
@@ -575,9 +729,14 @@ class TestPriceConversion:
     """
 
     def _run_with_raw_price(self, raw_db_price: float) -> tuple:
-        """מחזיר (call_price_nis, call_pts) לאחר נרמול."""
-        fetch_ts     = datetime(2026, 5, 22, 10, 0)
-        chain_df_raw = pd.DataFrame([_make_chain_row(1920.0, call_price=raw_db_price)])
+        """מחזיר (call_price_nis, call_pts) לאחר נרמול עבור סטרייק 1920."""
+        fetch_ts = datetime(2026, 5, 22, 10, 0)
+        # 3 שורות: 1900 ו-1940 הן filler; 1920 עם המחיר הנבדק
+        chain_df_raw = pd.DataFrame([
+            _make_chain_row(1900.0),                             # filler standard
+            _make_chain_row(1920.0, call_price=raw_db_price),   # שורת הבדיקה
+            _make_chain_row(1940.0),                             # filler standard
+        ])
 
         mock_conn = MagicMock()
         mock_conn.__enter__ = MagicMock(return_value=mock_conn)
@@ -591,7 +750,11 @@ class TestPriceConversion:
         with patch("supabase_loader.pd.read_sql", return_value=chain_df_raw):
             result = get_latest_option_chain(expiry_date="2026-05-29", engine=mock_engine)
 
-        row = result["expiries"][0]["chain"].iloc[0]
+        assert result is not None, "צפוי result תקין עם 3 שורות"
+        chain = result["expiries"][0]["chain"]
+        target = chain[chain["strike"].round(0) == 1920.0]
+        assert not target.empty, "שורת 1920 חסרה מה-chain"
+        row = target.iloc[0]
         return float(row["call_price"]), float(row["call_pts"])
 
     def test_small_value_treated_as_points(self):
