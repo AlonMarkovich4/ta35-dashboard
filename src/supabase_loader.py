@@ -6,14 +6,13 @@ supabase_loader.py — קריאת שרשרת אופציות מ-Supabase (טבל�
 ### יחידות — DB vs options_parser
 
   עמודה DB (lastrate/highrate/lowrate)
-  ├─ ערך ≤ 1000 → כבר בנקודות  → × MULTIPLIER  → ₪  (call_price)
-  └─ ערך > 1000 → כבר בשקלים   → ללא המרה      → ₪  (call_price)
+  └─ תמיד בשקלים (₪)  →  ÷ MULTIPLIER  →  נקודות  (call_pts)
 
   עמודת delta (delta_call / delta_put)
   ├─ |δ| > 1   → סקלת אחוזים (0–100 / -100–0) → ÷ 100 → (-1, 1)
   └─ |δ| ≤ 1   → כבר דצימלי                   → ללא המרה
 
-  calc: call_pts = call_price / MULTIPLIER  (₪ ÷ 50 → נקודות)
+  calc: call_pts = call_price(₪) / MULTIPLIER  (₪ ÷ 50 → נקודות)
 
 פונקציות ציבוריות:
   has_db()                             → bool
@@ -33,11 +32,33 @@ from sqlalchemy import create_engine, text
 
 from options_parser import find_atm
 
-MULTIPLIER       = 50      # ₪ לנקודה — זהה ל-options_parser
+MULTIPLIER       = 50     # ₪ לנקודה — זהה ל-options_parser
 _MIN_STRIKE      = 100.0
-_MAX_PRICE_PTS   = 2000.0  # מחיר אופציה מקסימלי סביר בנקודות
-_ATM_RANGE_PCT   = 0.20    # ±20% מרמת ה-ATM — מסנן OTM/ITM עמוק
-_MIN_CHAIN_ROWS  = 3       # מינימום שורות תקינות כדי להחזיר שרשרת
+_MAX_PRICE_PTS   = 500.0  # מחיר מקסימלי סביר בנקודות (ATM ~30-50, OTM עמוק עד ~400)
+_ATM_RANGE_PCT   = 0.20   # ±20% מרמת ה-ATM — מסנן OTM/ITM עמוק
+_MIN_CHAIN_ROWS  = 3      # מינימום שורות תקינות כדי להחזיר שרשרת
+
+# ─── Debug logging — שנה ל-False כדי לכבות ────────────────────────────
+_DEBUG = True
+
+# ─── Debug helper ──────────────────────────────────────────────────────
+
+def _dbg(msg: str) -> None:
+    """
+    פולט הודעת דיאגנוסטיקה.
+
+    אם Streamlit פעיל — כותב ישירות לדף; אחרת פולט warnings.warn.
+    מכובה כאשר _DEBUG=False.
+    """
+    if not _DEBUG:
+        return
+    try:
+        import streamlit as st  # noqa: PLC0415
+        st.write(msg)
+    except Exception:
+        import warnings
+        warnings.warn(msg, stacklevel=3)
+
 
 # ─── DB connection ─────────────────────────────────────────────────────
 
@@ -62,15 +83,11 @@ def _make_engine(engine=None):
 
 def _to_nis(v: float) -> float:
     """
-    ממיר מחיר גולמי מה-DB ל-₪ לתאימות עם options_parser.
+    מחזיר את ערך ה-DB כפי שהוא — כל lastrate_* מאוחסן ב-₪.
 
-    ≤ 1000 → נקודות  → × MULTIPLIER → ₪
-    > 1000 → כבר ₪   → ללא המרה
+    call_pts = _to_nis(lastrate_call) / MULTIPLIER
     """
-    abs_v = abs(v)
-    if abs_v > 1000:
-        return float(v)           # already ₪
-    return float(v) * MULTIPLIER  # points → ₪
+    return float(v)
 
 
 def _to_decimal_delta(v: float) -> float:
@@ -97,15 +114,11 @@ def _norm_delta_series(s: pd.Series) -> pd.Series:
 
 def _raw_to_option_pts(v: float) -> float:
     """
-    ממיר ערך גולמי מה-DB לנקודות — לשימוש בסינון outliers לפני נרמול מלא.
+    ממיר ערך גולמי מה-DB (₪) לנקודות — לשימוש בסינון outliers.
 
-    ≤ 1000 → כבר בנקודות → ללא המרה
-    > 1000 → כבר ₪        → ÷ MULTIPLIER → נקודות
+    כל lastrate_* מאוחסן ב-₪ → ÷ MULTIPLIER → נקודות
     """
-    abs_v = abs(v)
-    if abs_v > 1000:
-        return abs_v / MULTIPLIER
-    return abs_v
+    return abs(float(v)) / MULTIPLIER
 
 
 # ─── Expiry type inference ─────────────────────────────────────────────
@@ -330,12 +343,22 @@ def _load_one_expiry(eng, conn, target: str):
         params={"exp": target, "fetch": fetch_ts},
     )
 
+    # ── לוג 0: לפני כל סינון ───────────────────────────────────────────
+    _dbg(f"---\n**🔍 [supabase_loader] פקיעה: `{target}` | fetch_ts: `{fetch_ts}`**")
+    _dbg(f"**שורות מה-DB (לפני סינון):** {len(df_raw)}")
+    if not df_raw.empty:
+        preview = df_raw[["strike", "call_price", "put_price", "call_delta", "put_delta"]].head(3).copy()
+        preview["call_pts"] = (pd.to_numeric(preview["call_price"], errors="coerce") / MULTIPLIER).round(2)
+        preview["put_pts"]  = (pd.to_numeric(preview["put_price"],  errors="coerce") / MULTIPLIER).round(2)
+        _dbg(f"**3 שורות ראשונות (raw ₪, ÷50=נק'):**\n```\n{preview.to_string(index=False)}\n```")
+
     if df_raw.empty:
         return None
 
     df_raw["strike"] = pd.to_numeric(df_raw["strike"], errors="coerce")
     df_raw = df_raw.dropna(subset=["strike"])
     df_raw = df_raw[df_raw["strike"] >= _MIN_STRIKE]
+    _dbg(f"**אחרי סינון strike < {_MIN_STRIKE}:** {len(df_raw)} שורות")
 
     if df_raw.empty:
         return None
@@ -343,7 +366,9 @@ def _load_one_expiry(eng, conn, target: str):
     # סינון 1: שורות ללא מסחר — גם call וגם put אפס
     call_raw = pd.to_numeric(df_raw["call_price"], errors="coerce").fillna(0.0)
     put_raw  = pd.to_numeric(df_raw["put_price"],  errors="coerce").fillna(0.0)
-    df_raw = df_raw[~((call_raw == 0.0) & (put_raw == 0.0))]
+    zero_mask = (call_raw == 0.0) & (put_raw == 0.0)
+    _dbg(f"**סינון 1 (call=0 AND put=0):** מסונן {zero_mask.sum()}, נשאר {(~zero_mask).sum()}")
+    df_raw = df_raw[~zero_mask]
 
     if df_raw.empty:
         return None
@@ -351,17 +376,31 @@ def _load_one_expiry(eng, conn, target: str):
     # סינון 2: שורות ללא דלתא — גם call_delta וגם put_delta אפס (אין מסחר אמיתי)
     cdelta_raw = pd.to_numeric(df_raw["call_delta"], errors="coerce").fillna(0.0)
     pdelta_raw = pd.to_numeric(df_raw["put_delta"],  errors="coerce").fillna(0.0)
-    df_raw = df_raw[~((cdelta_raw == 0.0) & (pdelta_raw == 0.0))]
+    delta_mask = (cdelta_raw == 0.0) & (pdelta_raw == 0.0)
+    _dbg(f"**סינון 2 (delta_call=0 AND delta_put=0):** מסונן {delta_mask.sum()}, נשאר {(~delta_mask).sum()}")
+    df_raw = df_raw[~delta_mask]
 
     if df_raw.empty:
         return None
 
     # סינון 3: ערכי מחיר חריגים — מעל _MAX_PRICE_PTS נקודות
-    call_raw_u = pd.to_numeric(df_raw["call_price"], errors="coerce").fillna(0.0)
-    put_raw_u  = pd.to_numeric(df_raw["put_price"],  errors="coerce").fillna(0.0)
+    call_raw_u   = pd.to_numeric(df_raw["call_price"], errors="coerce").fillna(0.0)
+    put_raw_u    = pd.to_numeric(df_raw["put_price"],  errors="coerce").fillna(0.0)
     call_pts_raw = call_raw_u.apply(_raw_to_option_pts)
     put_pts_raw  = put_raw_u.apply(_raw_to_option_pts)
-    df_raw = df_raw[~((call_pts_raw > _MAX_PRICE_PTS) | (put_pts_raw > _MAX_PRICE_PTS))]
+    outlier_mask = (call_pts_raw > _MAX_PRICE_PTS) | (put_pts_raw > _MAX_PRICE_PTS)
+    if outlier_mask.any():
+        removed = df_raw[outlier_mask][["strike"]].copy()
+        removed["call_pts"] = call_pts_raw[outlier_mask].round(1)
+        removed["put_pts"]  = put_pts_raw[outlier_mask].round(1)
+        _dbg(
+            f"**סינון 3 (מחיר>{_MAX_PRICE_PTS}נק'):** מסונן {outlier_mask.sum()}, "
+            f"נשאר {(~outlier_mask).sum()}\n"
+            f"שורות שהוסרו:\n```\n{removed.to_string(index=False)}\n```"
+        )
+    else:
+        _dbg(f"**סינון 3 (מחיר>{_MAX_PRICE_PTS}נק'):** אין חריגים, נשאר {len(df_raw)}")
+    df_raw = df_raw[~outlier_mask]
 
     if df_raw.empty:
         return None
@@ -396,11 +435,38 @@ def _load_one_expiry(eng, conn, target: str):
     atm_info = find_atm(df)
     if atm_info:
         atm_level = float(atm_info.get("index_estimate", atm_info.get("strike", df["strike"].mean())))
+        _dbg(
+            f"**ATM (put-call parity):** strike={atm_info.get('strike')}, "
+            f"index_estimate={atm_info.get('index_estimate')}, "
+            f"call={atm_info.get('call_price',0):.0f}₪ ({atm_info.get('call_pts',0):.1f}נק'), "
+            f"put={atm_info.get('put_price',0):.0f}₪ ({atm_info.get('put_pts',0):.1f}נק)"
+        )
     else:
         atm_level = float(df["strike"].mean())
+        _dbg(f"**ATM:** find_atm החזיר None → ממוצע סטרייקים = {atm_level:.0f}")
+
+    # 5 שורות הכי קרובות ל-ATM לפני סינון הטווח
+    df["_parity"] = (df["call_price"] - df["put_price"]).abs()
+    df["_dist"]   = (df["strike"] - atm_level).abs()
+    top5 = df.nsmallest(5, "_dist")[
+        ["strike", "call_price", "put_price", "_parity", "_dist"]
+    ].copy()
+    top5["call_pts"] = (top5["call_price"] / MULTIPLIER).round(2)
+    top5["put_pts"]  = (top5["put_price"]  / MULTIPLIER).round(2)
+    _dbg(
+        f"**5 שורות הכי קרובות ל-ATM ({atm_level:.0f}):**\n"
+        f"```\n{top5[['strike','call_price','call_pts','put_price','put_pts','_parity','_dist']].to_string(index=False)}\n```"
+    )
+    df = df.drop(columns=["_parity", "_dist"])
 
     # סינון 4: סטרייקים מחוץ ל-±_ATM_RANGE_PCT מרמת ה-ATM
-    df = df[((df["strike"] - atm_level).abs() / atm_level) <= _ATM_RANGE_PCT]
+    in_range = ((df["strike"] - atm_level).abs() / atm_level) <= _ATM_RANGE_PCT
+    _dbg(
+        f"**סינון 4 (±{int(_ATM_RANGE_PCT*100)}% מ-ATM {atm_level:.0f} "
+        f"→ [{atm_level*(1-_ATM_RANGE_PCT):.0f}, {atm_level*(1+_ATM_RANGE_PCT):.0f}]):** "
+        f"מסונן {(~in_range).sum()}, נשאר {in_range.sum()}"
+    )
+    df = df[in_range]
 
     if len(df) < _MIN_CHAIN_ROWS:
         import warnings
@@ -409,10 +475,12 @@ def _load_one_expiry(eng, conn, target: str):
             f"נותרו {len(df)} שורות בלבד (מינימום {_MIN_CHAIN_ROWS})",
             stacklevel=2,
         )
+        _dbg(f"⚠️ **מוחזר None** — פחות מ-{_MIN_CHAIN_ROWS} שורות ({len(df)})")
         return None
 
     df = df.reset_index(drop=True)
     df["call_pts"] = (df["call_price"] / MULTIPLIER).round(2)
     df["put_pts"]  = (df["put_price"]  / MULTIPLIER).round(2)
 
+    _dbg(f"✅ **תוצאה סופית:** {len(df)} שורות | ATM={atm_level:.0f}")
     return df, str(drvtype_val), fetch_ts, atm_level
