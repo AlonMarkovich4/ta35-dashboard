@@ -155,16 +155,12 @@ class TestInferExpiryType:
 
 # ─── get_available_expiries ────────────────────────────────────────────
 
-def _mock_conn_two_calls(first_result, second_result=None):
-    """עוזר: mock connection עם שתי קריאות execute עוקבות."""
+def _mock_conn_single(rows):
+    """עוזר: mock connection עם קריאת execute אחת."""
     mock_conn = MagicMock()
     mock_conn.__enter__ = MagicMock(return_value=mock_conn)
     mock_conn.__exit__  = MagicMock(return_value=False)
-    results = [MagicMock(), MagicMock()]
-    results[0].fetchall.return_value = first_result
-    if second_result is not None:
-        results[1].fetchall.return_value = second_result
-    mock_conn.execute.side_effect = results
+    mock_conn.execute.return_value.fetchall.return_value = rows
     return mock_conn
 
 
@@ -173,22 +169,17 @@ class TestGetAvailableExpiries:
         monkeypatch.delenv("DATABASE_URL", raising=False)
         assert get_available_expiries() == []
 
-    def test_returns_future_expiries(self):
-        """מחזיר רק פקיעות עתידיות כשיש."""
-        mock_conn = _mock_conn_two_calls(
-            first_result=[("2026-05-29",), ("2026-06-05",)],
-        )
+    def test_returns_expiries_ordered_by_fetched_at(self):
+        """מחזיר פקיעות ממוינות לפי MAX(fetched_at) DESC."""
+        mock_conn = _mock_conn_single([("2026-05-29",), ("2026-05-21",)])
         mock_engine = MagicMock()
         mock_engine.connect.return_value = mock_conn
         result = get_available_expiries(engine=mock_engine)
-        assert result == ["2026-05-29", "2026-06-05"]
+        assert result == ["2026-05-29", "2026-05-21"]
 
-    def test_fallback_to_nearest_past_when_no_future(self):
-        """אין פקיעות עתידיות → מחזיר הפקיעה האחרונה."""
-        mock_conn = _mock_conn_two_calls(
-            first_result=[],
-            second_result=[("2026-05-21",)],
-        )
+    def test_returns_past_expiry_on_weekend(self):
+        """בסוף שבוע — מחזיר את הפקיעה האחרונה (כבר עברה) ללא fallback."""
+        mock_conn = _mock_conn_single([("2026-05-21",)])
         mock_engine = MagicMock()
         mock_engine.connect.return_value = mock_conn
         result = get_available_expiries(engine=mock_engine)
@@ -200,9 +191,7 @@ class TestGetAvailableExpiries:
         assert get_available_expiries(engine=mock_engine) == []
 
     def test_filters_none_values(self):
-        mock_conn = _mock_conn_two_calls(
-            first_result=[(None,), ("2026-05-29",)],
-        )
+        mock_conn = _mock_conn_single([(None,), ("2026-05-29",)])
         mock_engine = MagicMock()
         mock_engine.connect.return_value = mock_conn
         result = get_available_expiries(engine=mock_engine)

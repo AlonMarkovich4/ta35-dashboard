@@ -33,8 +33,6 @@ from sqlalchemy import create_engine, text
 
 from options_parser import find_atm
 
-_TODAY = date.today  # callable — evaluated at call time, not import time
-
 MULTIPLIER       = 50      # ₪ לנקודה — זהה ל-options_parser
 _MIN_STRIKE      = 100.0
 _MAX_PRICE_PTS   = 2000.0  # מחיר אופציה מקסימלי סביר בנקודות
@@ -195,27 +193,19 @@ def get_available_expiries(engine=None) -> list[str]:
     """
     מחזיר רשימת תאריכי פקיעה זמינים מ-tase_putcall (YYYY-MM-DD).
 
-    מחזיר רק פקיעות עתידיות (expiry_date >= היום).
-    אם אין פקיעות עתידיות — מחזיר את הפקיעה הכי קרובה לתאריך הנוכחי (fallback).
+    ממוין לפי MAX(fetched_at) DESC — הפקיעה שנמשכה הכי לאחרונה מופיעה ראשונה.
+    כך בסוף שבוע מוצגת הפקיעה האחרונה שהייתה, וביום ראשון (כשהטבלה מתעדכנת)
+    מוצגת אוטומטית הפקיעה החדשה.
     מחזיר [] אם אין חיבור DB, הטבלה לא קיימת, או שגיאה.
     """
     eng = _make_engine(engine)
     if eng is None:
         return []
     try:
-        today_str = _TODAY().isoformat()
         with eng.connect() as conn:
             rows = conn.execute(text(
-                "SELECT DISTINCT expiry_date FROM tase_putcall"
-                " WHERE expiry_date >= :today ORDER BY expiry_date"
-            ), {"today": today_str}).fetchall()
-            future = [str(r[0]) for r in rows if r[0] is not None]
-            if future:
-                return future
-            # fallback — nearest past expiry
-            rows = conn.execute(text(
-                "SELECT DISTINCT expiry_date FROM tase_putcall"
-                " ORDER BY expiry_date DESC LIMIT 1"
+                "SELECT expiry_date FROM tase_putcall"
+                " GROUP BY expiry_date ORDER BY MAX(fetched_at) DESC"
             )).fetchall()
         return [str(r[0]) for r in rows if r[0] is not None]
     except Exception:
@@ -249,19 +239,11 @@ def _load_chains(eng, expiry_date: Optional[str]) -> Optional[dict]:
         if expiry_date:
             targets = [expiry_date]
         else:
-            today_str = _TODAY().isoformat()
             rows = conn.execute(text(
-                "SELECT DISTINCT expiry_date FROM tase_putcall"
-                " WHERE expiry_date >= :today ORDER BY expiry_date"
-            ), {"today": today_str}).fetchall()
+                "SELECT expiry_date FROM tase_putcall"
+                " GROUP BY expiry_date ORDER BY MAX(fetched_at) DESC"
+            )).fetchall()
             targets = [str(r[0]) for r in rows if r[0] is not None]
-            if not targets:
-                # fallback — nearest past expiry
-                rows = conn.execute(text(
-                    "SELECT DISTINCT expiry_date FROM tase_putcall"
-                    " ORDER BY expiry_date DESC LIMIT 1"
-                )).fetchall()
-                targets = [str(r[0]) for r in rows if r[0] is not None]
 
         if not targets:
             return None
