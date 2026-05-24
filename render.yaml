@@ -14,6 +14,8 @@ services:
       --server.port $PORT
       --server.address 0.0.0.0
       --server.headless true
+      --server.enableWebsocketCompression false
+      --server.enableCORS false
     envVars:
       - key: DATABASE_URL
         fromDatabase:
