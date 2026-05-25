@@ -93,6 +93,91 @@ if _HAS_DB:
                     f"{pd.to_datetime(_ft).strftime('%d/%m/%Y %H:%M')}"
                 )
 
+        with st.expander("📊 נתונים גולמיים מ-Supabase"):
+            if "chain_supabase" not in st.session_state:
+                st.info("טען נתונים מ-Supabase תחילה")
+            else:
+                _sb      = st.session_state["chain_supabase"]
+                _sb_exps = _sb.get("expiries", [])
+                if not _sb_exps:
+                    st.warning("אין פקיעות בנתונים שנטענו")
+                else:
+                    _sb_chain = _sb_exps[0]["chain"].copy()
+                    _sb_date  = _sb_exps[0].get("date", "")
+                    st.markdown(
+                        f"**פקיעה:** {_sb_date} &nbsp;|&nbsp; "
+                        f"**סה\"כ שורות:** {len(_sb_chain)}"
+                    )
+
+                    # בחר עמודות לתצוגה
+                    _raw_cols = [
+                        "strike", "call_pts", "put_pts",
+                        "call_delta", "put_delta",
+                        "call_price", "put_price",
+                    ]
+                    _tbl = _sb_chain[
+                        [c for c in _raw_cols if c in _sb_chain.columns]
+                    ].copy()
+
+                    # זיהוי ATM לפי put-call parity: min |call_price - put_price|
+                    if "call_price" in _tbl.columns and "put_price" in _tbl.columns:
+                        _both = (_tbl["call_price"] > 0) & (_tbl["put_price"] > 0)
+                        _src  = _tbl[_both] if _both.any() else _tbl
+                        _atm_idx = (_src["call_price"] - _src["put_price"]).abs().idxmin()
+                    else:
+                        _atm_idx = _tbl.index[len(_tbl) // 2]
+
+                    _atm_strike_disp = float(_tbl.loc[_atm_idx, "strike"])
+
+                    # שינוי שמות עמודות לתצוגה
+                    _tbl = _tbl.rename(columns={
+                        "strike":     "Strike",
+                        "call_pts":   "Call (נק')",
+                        "put_pts":    "Put (נק')",
+                        "call_delta": "δ Call",
+                        "put_delta":  "δ Put",
+                        "call_price": "Call (₪)",
+                        "put_price":  "Put (₪)",
+                    })
+
+                    # הדגשת שורת ATM בצבע ירוק
+                    def _hl_atm(row, atm_i=_atm_idx):
+                        if row.name == atm_i:
+                            return [
+                                "background-color:#0d2e1a; color:#4ade80; font-weight:700"
+                            ] * len(row)
+                        return [""] * len(row)
+
+                    _fmt = {k: v for k, v in {
+                        "Strike":     "{:,.0f}",
+                        "Call (נק')": "{:.1f}",
+                        "Put (נק')":  "{:.1f}",
+                        "δ Call":     "{:.3f}",
+                        "δ Put":      "{:.3f}",
+                        "Call (₪)":   "{:,.0f}",
+                        "Put (₪)":    "{:,.0f}",
+                    }.items() if k in _tbl.columns}
+
+                    st.dataframe(
+                        _tbl.style.apply(_hl_atm, axis=1).format(_fmt),
+                        hide_index=True,
+                        use_container_width=True,
+                    )
+
+                    # סיכום תחתון: ATM + מדד משוער
+                    _c_pts   = float(_sb_chain.loc[_atm_idx, "call_pts"]) \
+                               if "call_pts" in _sb_chain.columns else 0.0
+                    _p_pts   = float(_sb_chain.loc[_atm_idx, "put_pts"]) \
+                               if "put_pts"  in _sb_chain.columns else 0.0
+                    _idx_est = _atm_strike_disp + _c_pts - _p_pts
+                    st.info(
+                        f"🎯 **ATM Strike:** {_atm_strike_disp:,.0f}"
+                        f" &nbsp;|&nbsp; "
+                        f"📊 **מדד משוער:** {_idx_est:,.1f}"
+                        f" &nbsp;|&nbsp; "
+                        f"Call: {_c_pts:.1f} נק' &nbsp;|&nbsp; Put: {_p_pts:.1f} נק'"
+                    )
+
         with st.expander("🔍 אבחון — שורה גולמית מהDB"):
             _sample = get_sample_row()
             if _sample:
