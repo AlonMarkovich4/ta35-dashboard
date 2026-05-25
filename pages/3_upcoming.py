@@ -56,6 +56,13 @@ st.title("🎯 פקיעה קרובה — ניתוח שרשרת אופציות")
 st.markdown("ניתוח שרשרת Put/Call מהבורסה + המלצות אסטרטגיות לפקיעה הקרובה")
 
 
+# ─── Cached Supabase loader (TTL 10 min) ────────────────────────────
+@st.cache_data(ttl=600, show_spinner=False)
+def _load_chain_cached(expiry: str):
+    """טוען שרשרת פקיעה מ-Supabase ושומר בcache עד 10 דקות."""
+    return get_latest_option_chain(expiry)
+
+
 # ─── Source section ─────────────────────────────────────────────────
 st.subheader("1. מקור שרשרת אופציות")
 
@@ -74,30 +81,50 @@ if _HAS_DB:
                 format_func=lambda d: pd.to_datetime(d).strftime("%d/%m/%Y"),
                 key="sb_exp_select",
             )
-            if st.button("🔄 טען מ-Supabase", use_container_width=True):
-                with st.spinner("מביא נתונים מ-Supabase..."):
-                    _result = get_latest_option_chain(sel_exp)
-                if _result:
-                    st.session_state["chain_supabase"] = _result
-                    st.rerun()
-                else:
-                    st.error("❌ לא נמצאו נתונים ב-Supabase לפקיעה זו")
+
+            # ── רענון אוטומטי בטעינת הדף ──────────────────────────────
+            # מתעדכן אוטומטית כשהפקיעה משתנה או בטעינה הראשונה.
+            # _load_chain_cached מחזיר מה-cache אם נטען בשעה האחרונה (TTL=10min).
+            if (
+                "supabase_chain" not in st.session_state
+                or st.session_state.get("_supabase_chain_expiry") != sel_exp
+            ):
+                with st.spinner("טוען נתונים מ-Supabase..."):
+                    _auto = _load_chain_cached(sel_exp)
+                if _auto:
+                    st.session_state["supabase_chain"]         = _auto
+                    st.session_state["supabase_loaded_at"]     = pd.Timestamp.now()
+                    st.session_state["_supabase_chain_expiry"] = sel_exp
+
+            # ── כפתור רענון ידני + חותמת זמן ────────────────────────
+            _col_btn, _col_ts = st.columns([1, 2])
+            with _col_btn:
+                if st.button("🔄 רענן ידנית", use_container_width=True):
+                    _load_chain_cached.clear()
+                    with st.spinner("מרענן מ-Supabase..."):
+                        _manual = _load_chain_cached(sel_exp)
+                    if _manual:
+                        st.session_state["supabase_chain"]         = _manual
+                        st.session_state["supabase_loaded_at"]     = pd.Timestamp.now()
+                        st.session_state["_supabase_chain_expiry"] = sel_exp
+                        st.rerun()
+                    else:
+                        st.error("❌ לא נמצאו נתונים ב-Supabase לפקיעה זו")
+            with _col_ts:
+                if "supabase_loaded_at" in st.session_state:
+                    _lat = st.session_state["supabase_loaded_at"]
+                    st.caption(
+                        f"עודכן אוטומטית: "
+                        f"{pd.to_datetime(_lat).strftime('%H:%M')}"
+                    )
         else:
             st.info("אין נתונים ב-Supabase כרגע")
 
-        if "chain_supabase" in st.session_state:
-            _ft = st.session_state["chain_supabase"].get("fetched_at")
-            if _ft:
-                st.caption(
-                    f"עודכן לאחרונה: "
-                    f"{pd.to_datetime(_ft).strftime('%d/%m/%Y %H:%M')}"
-                )
-
         with st.expander("📊 נתונים גולמיים מ-Supabase"):
-            if "chain_supabase" not in st.session_state:
-                st.info("טען נתונים מ-Supabase תחילה")
+            if "supabase_chain" not in st.session_state:
+                st.info("טוען אוטומטית — המתן רגע")
             else:
-                _sb      = st.session_state["chain_supabase"]
+                _sb      = st.session_state["supabase_chain"]
                 _sb_exps = _sb.get("expiries", [])
                 if not _sb_exps:
                     st.warning("אין פקיעות בנתונים שנטענו")
@@ -245,9 +272,9 @@ if uploaded is not None:
             st.stop()
     parsed = st.session_state[cache_key]
 
-elif st.session_state.get("chain_supabase"):
-    # נתוני Supabase שנטענו בלחיצת כפתור
-    parsed = st.session_state["chain_supabase"]
+elif st.session_state.get("supabase_chain"):
+    # נתוני Supabase שנטענו אוטומטית או ידנית
+    parsed = st.session_state["supabase_chain"]
     _ft    = parsed.get("fetched_at")
     _ts    = pd.to_datetime(_ft).strftime("%d/%m/%Y %H:%M") if _ft else ""
     source_label = f"🌐 Supabase ({_ts})" if _ts else "🌐 Supabase"
