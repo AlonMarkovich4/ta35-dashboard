@@ -236,7 +236,7 @@ class TestGetLatestOptionChain:
         mock_conn.__exit__  = MagicMock(return_value=False)
         # targets query
         mock_conn.execute.return_value.fetchall.return_value = [("2026-05-29",)]
-        mock_conn.execute.return_value.fetchone.return_value = (fetch_ts,)
+        mock_conn.execute.return_value.fetchone.return_value = ("2026-05-22", "10:00", fetch_ts)
 
         mock_engine = MagicMock()
         mock_engine.connect.return_value = mock_conn
@@ -274,7 +274,7 @@ class TestGetLatestOptionChain:
         mock_conn.__enter__ = MagicMock(return_value=mock_conn)
         mock_conn.__exit__  = MagicMock(return_value=False)
         mock_conn.execute.return_value.fetchall.return_value = [("2026-05-29",)]
-        mock_conn.execute.return_value.fetchone.return_value = (fetch_ts,)
+        mock_conn.execute.return_value.fetchone.return_value = ("2026-05-22", "10:00", fetch_ts)
 
         mock_engine = MagicMock()
         mock_engine.connect.return_value = mock_conn
@@ -296,7 +296,7 @@ class TestGetLatestOptionChain:
         mock_conn.__enter__ = MagicMock(return_value=mock_conn)
         mock_conn.__exit__  = MagicMock(return_value=False)
         mock_conn.execute.return_value.fetchall.return_value = [("2026-05-29",)]
-        mock_conn.execute.return_value.fetchone.return_value = (fetch_ts,)
+        mock_conn.execute.return_value.fetchone.return_value = ("2026-05-22", "10:00", fetch_ts)
 
         mock_engine = MagicMock()
         mock_engine.connect.return_value = mock_conn
@@ -321,7 +321,7 @@ class TestGetLatestOptionChain:
         mock_conn.__enter__ = MagicMock(return_value=mock_conn)
         mock_conn.__exit__  = MagicMock(return_value=False)
         mock_conn.execute.return_value.fetchall.return_value = [("2026-05-29",)]
-        mock_conn.execute.return_value.fetchone.return_value = (fetch_ts,)
+        mock_conn.execute.return_value.fetchone.return_value = ("2026-05-22", "10:00", fetch_ts)
 
         mock_engine = MagicMock()
         mock_engine.connect.return_value = mock_conn
@@ -342,7 +342,7 @@ class TestGetLatestOptionChain:
         mock_conn.__enter__ = MagicMock(return_value=mock_conn)
         mock_conn.__exit__  = MagicMock(return_value=False)
         mock_conn.execute.return_value.fetchall.return_value = [("2026-05-29",)]
-        mock_conn.execute.return_value.fetchone.return_value = (fetch_ts,)
+        mock_conn.execute.return_value.fetchone.return_value = ("2026-05-22", "10:00", fetch_ts)
 
         mock_engine = MagicMock()
         mock_engine.connect.return_value = mock_conn
@@ -362,7 +362,7 @@ class TestGetLatestOptionChain:
         mock_conn.__enter__ = MagicMock(return_value=mock_conn)
         mock_conn.__exit__  = MagicMock(return_value=False)
         mock_conn.execute.return_value.fetchall.return_value = [("2026-05-22",)]
-        mock_conn.execute.return_value.fetchone.return_value = (fetch_ts,)
+        mock_conn.execute.return_value.fetchone.return_value = ("2026-05-22", "10:00", fetch_ts)
 
         mock_engine = MagicMock()
         mock_engine.connect.return_value = mock_conn
@@ -452,10 +452,10 @@ class TestGetSampleRow:
 
 # ─── _load_one_expiry — multi-layer filters ────────────────────────────
 
-def _mock_conn_fetchone(fetch_ts):
-    """mock connection עם fetchone שמחזיר fetch_ts."""
+def _mock_conn_fetchone(fetch_ts, fetch_date="2026-05-22", fetch_time="10:00"):
+    """mock connection עם fetchone שמחזיר (fetch_date, fetch_time, fetch_ts)."""
     mock_conn = MagicMock()
-    mock_conn.execute.return_value.fetchone.return_value = (fetch_ts,)
+    mock_conn.execute.return_value.fetchone.return_value = (fetch_date, fetch_time, fetch_ts)
     return mock_conn
 
 
@@ -632,6 +632,44 @@ class TestLoadOneExpiryFilters:
         # _to_nis(100.0) = 100.0₪ (identity); c_pts = 100/50 = 2.0; index_est = 4300 + 2.0 - 2.0 = 4300
         assert atm_level == pytest.approx(4300.0, abs=1.0)
 
+    def test_load_expiry_combines_multi_batch_fetch(self):
+        """
+        כאשר pipeline כותב שרשרת ב-3 batches עם fetched_at שונה אך fetch_date+fetch_time זהים,
+        _load_one_expiry צריך להחזיר את כל השורות מכל ה-batches — לא רק מה-batch האחרון.
+        """
+        # batch 1: סטרייקים נמוכים (OTM puts)
+        batch1 = [_make_chain_row(s, call_price=0.0, put_price=50.0)
+                  for s in [4100.0, 4200.0, 4300.0]]
+        # batch 2: סטרייקים ATM — כאן שני הצדדים פעילים
+        batch2 = [_make_chain_row(s, call_price=100.0, put_price=100.0)
+                  for s in [4400.0, 4450.0, 4500.0]]
+        # batch 3: סטרייקים גבוהים (OTM calls)
+        batch3 = [_make_chain_row(s, call_price=50.0, put_price=0.0)
+                  for s in [4600.0, 4700.0, 4800.0]]
+
+        # pd.read_sql מחזיר את כל 9 השורות (כאילו SQL שלף WHERE fetch_date+fetch_time)
+        all_rows = pd.DataFrame(batch1 + batch2 + batch3)
+
+        # fetchone מחזיר (fetch_date, fetch_time, max_fetched_at) — כמו הקוד המתוקן
+        mock_conn = _mock_conn_fetchone(
+            datetime(2026, 5, 27, 11, 38, 2),
+            fetch_date="2026-05-27",
+            fetch_time="14:37",
+        )
+
+        with patch("supabase_loader.pd.read_sql", return_value=all_rows):
+            result = _load_one_expiry(MagicMock(), mock_conn, "2026-05-29")
+
+        assert result is not None, "צפוי תוצאה תקינה כשכל ה-batches מאוחדים"
+        chain = result[0]
+        # כל 9 הסטרייקים צריכים להיות בטווח ה-ATM (4300–4800, ATM≈4450)
+        # לפחות 3 שורות צריכות לעבור את כל הסינונים
+        assert len(chain) >= 3, f"צפוי לפחות 3 שורות, קיבל {len(chain)}"
+        # וודא שסטרייקים מ-batch 2 (ATM) נמצאים בתוצאה
+        atm_strikes = set(chain["strike"].values)
+        assert any(s in atm_strikes for s in [4400.0, 4450.0, 4500.0]), \
+            f"סטרייקי ATM לא נמצאו ב-chain: {sorted(atm_strikes)}"
+
 
 # ─── _raw_to_option_pts ───────────────────────────────────────────────
 
@@ -731,7 +769,7 @@ class TestPriceConversion:
         mock_conn.__enter__ = MagicMock(return_value=mock_conn)
         mock_conn.__exit__  = MagicMock(return_value=False)
         mock_conn.execute.return_value.fetchall.return_value = [("2026-05-29",)]
-        mock_conn.execute.return_value.fetchone.return_value = (fetch_ts,)
+        mock_conn.execute.return_value.fetchone.return_value = ("2026-05-22", "10:00", fetch_ts)
 
         mock_engine = MagicMock()
         mock_engine.connect.return_value = mock_conn

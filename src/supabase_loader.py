@@ -307,17 +307,28 @@ def _load_one_expiry(eng, conn, target: str):
     מחזיר (DataFrame, drvtype, fetched_at, atm_level) או None אם הנתונים לא תקינים.
     None מוחזר גם אם נותרות פחות מ-_MIN_CHAIN_ROWS שורות לאחר הסינון.
     """
+    # fetch_date ו-fetch_time זהים לכל ה-batches של אותה משיכה (נכתבים במפורש ע"י ה-pipeline)
+    # בניגוד ל-fetched_at שמוגדר DEFAULT now() ומקבל ערך שונה לכל batch
     latest_row = conn.execute(
-        text("SELECT MAX(fetched_at) FROM tase_putcall WHERE expiry_date = :exp"),
+        text("""
+            SELECT fetch_date, fetch_time, MAX(fetched_at) AS max_fetched_at
+            FROM tase_putcall
+            WHERE expiry_date = :exp
+            GROUP BY fetch_date, fetch_time
+            ORDER BY MAX(fetched_at) DESC
+            LIMIT 1
+        """),
         {"exp": target},
     ).fetchone()
 
-    if not latest_row or latest_row[0] is None:
+    if not latest_row or latest_row[2] is None:
         return None
 
-    fetch_ts = latest_row[0]
+    fetch_date_val = latest_row[0]
+    fetch_time_val = latest_row[1]
+    fetch_ts       = latest_row[2]  # MAX(fetched_at) — לתצוגת "עודכן"
 
-    # שלב 1: קרא ערכים גולמיים מה-DB — ללא המרה ב-SQL
+    # שלב 1: קרא את כל ה-batches של המשיכה האחרונה (fetch_date + fetch_time זהים)
     df_raw = pd.read_sql(
         text("""
             SELECT
@@ -336,11 +347,13 @@ def _load_one_expiry(eng, conn, target: str):
                 lowrate_put     AS put_low,
                 drvtype
             FROM tase_putcall
-            WHERE expiry_date = :exp AND fetched_at = :fetch
+            WHERE expiry_date = :exp
+              AND fetch_date = :fdate
+              AND fetch_time = :ftime
             ORDER BY COALESCE(expirationprice_call, expirationprice_put)
         """),
         con=eng,
-        params={"exp": target, "fetch": fetch_ts},
+        params={"exp": target, "fdate": fetch_date_val, "ftime": fetch_time_val},
     )
 
     # ── לוג 0: לפני כל סינון ───────────────────────────────────────────
