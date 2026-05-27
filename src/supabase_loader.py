@@ -26,6 +26,7 @@ import calendar
 import os
 from datetime import date, timedelta
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 from sqlalchemy import create_engine, text
@@ -37,6 +38,7 @@ _MIN_STRIKE      = 100.0
 _MAX_PRICE_PTS   = 500.0  # מחיר מקסימלי סביר בנקודות (ATM ~30-50, OTM עמוק עד ~400)
 _ATM_RANGE_PCT   = 0.20   # ±20% מרמת ה-ATM — מסנן OTM/ITM עמוק
 _MIN_CHAIN_ROWS  = 3      # מינימום שורות תקינות כדי להחזיר שרשרת
+TZ_IL            = ZoneInfo("Asia/Jerusalem")
 
 # ─── Debug logging — שנה ל-False כדי לכבות ────────────────────────────
 _DEBUG = False
@@ -289,9 +291,9 @@ def _load_chains(eng, expiry_date: Optional[str]) -> Optional[dict]:
         return None
 
     try:
-        as_of_str = pd.to_datetime(latest_ts).strftime("%d/%m/%Y")
+        as_of_str = pd.to_datetime(latest_ts, utc=True).astimezone(TZ_IL).strftime("%d/%m/%Y %H:%M")
     except Exception:
-        as_of_str = str(latest_ts)[:10] if latest_ts else ""
+        as_of_str = str(latest_ts)[:16] if latest_ts else ""
 
     return {
         "as_of_date": as_of_str,

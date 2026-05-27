@@ -25,6 +25,7 @@ from options_parser import MULTIPLIER, find_atm, get_strategy_strikes, parse_put
 from payoff import build_payoff_fig, format_legs, strategy_legs_detail, strategy_summary
 from styles import inject_global_css
 from supabase_loader import (
+    TZ_IL,
     get_available_expiries,
     get_latest_option_chain,
     get_sample_row,
@@ -93,7 +94,7 @@ if _HAS_DB:
                     _auto = _load_chain_cached(sel_exp)
                 if _auto:
                     st.session_state["supabase_chain"]         = _auto
-                    st.session_state["supabase_loaded_at"]     = pd.Timestamp.now()
+                    st.session_state["supabase_loaded_at"]     = pd.Timestamp.now(tz=TZ_IL)
                     st.session_state["_supabase_chain_expiry"] = sel_exp
 
             # ── כפתור רענון ידני + חותמת זמן ────────────────────────
@@ -105,7 +106,7 @@ if _HAS_DB:
                         _manual = _load_chain_cached(sel_exp)
                     if _manual:
                         st.session_state["supabase_chain"]         = _manual
-                        st.session_state["supabase_loaded_at"]     = pd.Timestamp.now()
+                        st.session_state["supabase_loaded_at"]     = pd.Timestamp.now(tz=TZ_IL)
                         st.session_state["_supabase_chain_expiry"] = sel_exp
                         st.rerun()
                     else:
@@ -276,7 +277,7 @@ elif st.session_state.get("supabase_chain"):
     # נתוני Supabase שנטענו אוטומטית או ידנית
     parsed = st.session_state["supabase_chain"]
     _ft    = parsed.get("fetched_at")
-    _ts    = pd.to_datetime(_ft).strftime("%d/%m/%Y %H:%M") if _ft else ""
+    _ts    = pd.to_datetime(_ft, utc=True).astimezone(TZ_IL).strftime("%d/%m/%Y %H:%M") if _ft else ""
     source_label = f"🌐 Supabase ({_ts})" if _ts else "🌐 Supabase"
 
 elif _has_demo:

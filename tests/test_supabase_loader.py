@@ -304,7 +304,8 @@ class TestGetLatestOptionChain:
         with patch("supabase_loader.pd.read_sql", return_value=chain_df_raw):
             result = get_latest_option_chain(expiry_date="2026-05-29", engine=mock_engine)
 
-        assert result["as_of_date"] == "22/05/2026"
+        # as_of_date כולל שעה בשעון ישראל: 10:30 UTC → 13:30 EEST (UTC+3)
+        assert result["as_of_date"] == "22/05/2026 13:30"
         assert result["fetched_at"] == fetch_ts
 
     def test_strike_below_min_filtered_out(self):
