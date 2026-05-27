@@ -175,7 +175,16 @@ def get_sample_row(engine=None) -> Optional[dict]:
                     overallturnoverunits_call, overallturnoverunits_put,
                     openpositions_call,        openpositions_put
                 FROM tase_putcall
-                WHERE fetched_at = (SELECT MAX(fetched_at) FROM tase_putcall)
+                WHERE fetch_date = (
+                          SELECT fetch_date FROM tase_putcall
+                          GROUP BY fetch_date, fetch_time
+                          ORDER BY MAX(fetched_at) DESC LIMIT 1
+                      )
+                  AND fetch_time = (
+                          SELECT fetch_time FROM tase_putcall
+                          GROUP BY fetch_date, fetch_time
+                          ORDER BY MAX(fetched_at) DESC LIMIT 1
+                      )
                   AND (lastrate_call <> 0 OR lastrate_put <> 0)
             """),
             con=eng,
