@@ -297,6 +297,39 @@ class TestFindAtm:
         assert atm["call_pts"] == pytest.approx(1000 / MULTIPLIER)
         assert atm["put_pts"]  == pytest.approx(500  / MULTIPLIER)
 
+    def test_find_atm_fallback_uses_delta_decimal_scale(self):
+        """fallback branch: כשאין put_price, ATM נקבע לפי call_delta קרוב ל-0.5 (סקלה דצימלית)."""
+        chain = pd.DataFrame([
+            {"strike": 4300.0, "call_price": 5000.0, "put_price": 0.0,
+             "call_delta": 0.95, "put_delta": -0.05,
+             "call_oi": 0.0, "put_oi": 0.0, "call_volume": 0.0, "put_volume": 0.0,
+             "call_high": 0.0, "call_low": 0.0, "put_high": 0.0, "put_low": 0.0,
+             "call_pts": 100.0, "put_pts": 0.0},
+            {"strike": 4400.0, "call_price": 4000.0, "put_price": 0.0,
+             "call_delta": 0.85, "put_delta": -0.15,
+             "call_oi": 0.0, "put_oi": 0.0, "call_volume": 0.0, "put_volume": 0.0,
+             "call_high": 0.0, "call_low": 0.0, "put_high": 0.0, "put_low": 0.0,
+             "call_pts": 80.0, "put_pts": 0.0},
+            {"strike": 4490.0, "call_price": 1100.0, "put_price": 0.0,
+             "call_delta": 0.52, "put_delta": -0.48,  # ← הקרוב ביותר ל-0.5
+             "call_oi": 0.0, "put_oi": 0.0, "call_volume": 0.0, "put_volume": 0.0,
+             "call_high": 0.0, "call_low": 0.0, "put_high": 0.0, "put_low": 0.0,
+             "call_pts": 22.0, "put_pts": 0.0},
+            {"strike": 4600.0, "call_price":  200.0, "put_price": 0.0,
+             "call_delta": 0.25, "put_delta": -0.75,
+             "call_oi": 0.0, "put_oi": 0.0, "call_volume": 0.0, "put_volume": 0.0,
+             "call_high": 0.0, "call_low": 0.0, "put_high": 0.0, "put_low": 0.0,
+             "call_pts": 4.0, "put_pts": 0.0},
+            {"strike": 4700.0, "call_price":   50.0, "put_price": 0.0,
+             "call_delta": 0.08, "put_delta": -0.92,
+             "call_oi": 0.0, "put_oi": 0.0, "call_volume": 0.0, "put_volume": 0.0,
+             "call_high": 0.0, "call_low": 0.0, "put_high": 0.0, "put_low": 0.0,
+             "call_pts": 1.0, "put_pts": 0.0},
+        ])
+        result = find_atm(chain)
+        assert result != {}
+        assert result["strike"] == 4490.0
+
 
 # ─── get_strategy_strikes ─────────────────────────────────────────────
 

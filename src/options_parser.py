@@ -112,7 +112,8 @@ def find_atm(chain: pd.DataFrame) -> dict:
         active = chain[chain["call_price"] > 0].copy()
         if active.empty:
             return {}
-        active["parity_dist"] = (active["call_delta"] - 50).abs()
+        # call_delta מגיע בסקלה דצימלית (-1, 1) — ATM call delta ≈ 0.5
+        active["parity_dist"] = (active["call_delta"] - 0.5).abs()
     else:
         # כיוון put-call parity: |C - P| → 0 ב-ATM
         active["parity_dist"] = (active["call_price"] - active["put_price"]).abs()
