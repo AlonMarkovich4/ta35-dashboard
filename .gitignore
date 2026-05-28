@@ -8,6 +8,7 @@ database/ta35.db
 
 # Data files (uploaded manually, not version-controlled)
 data/uploads/*.csv
+!data/uploads/market_data.csv
 data/current/*.csv
 
 # Streamlit secrets
