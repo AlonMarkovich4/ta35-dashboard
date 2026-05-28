@@ -113,9 +113,10 @@ details {
     margin-bottom: 6px;
 }
 details summary {
-    padding: 8px 12px;
+    padding: 10px 14px;
     font-weight: 600;
-    color: var(--brand-blue);
+    color: #e8edf5;
+    font-size: 1.05rem;
 }
 </style>
 """
