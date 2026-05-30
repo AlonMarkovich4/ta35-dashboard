@@ -1,0 +1,358 @@
+"""
+paper_trading.py — מנוע פתיחה וסגירה של עסקאות Paper Trading.
+
+מודל מזומן:
+  entry_cost   = עלות/זיכוי בכניסה (חיובי=שולמה פרמיה, שלילי=התקבלה פרמיה)
+  open:   new_balance = balance - entry_cost
+  close:  new_balance = balance + payoff_at_close
+  pnl     = payoff_at_close - entry_cost
+
+פונקציות ציבוריות:
+  open_trades_for_expiry(expiry_date, chain, portfolios, engine=None)  → list[dict]
+  close_trades_for_expiry(expiry_date, close_index, engine=None)       → list[dict]
+"""
+from __future__ import annotations
+
+import json
+from datetime import date, datetime, timezone
+from typing import Optional
+
+import pandas as pd
+
+from options_parser import find_atm
+from payoff import (
+    MULTIPLIER,
+    strategy_legs_detail,
+    strategy_payoff_params,
+    strategy_summary,
+)
+from strategies import STRATEGIES
+from paper_db import (
+    close_trade,
+    get_open_trades_for_expiry,
+    get_portfolio,
+    get_trades,
+    insert_trade,
+    update_balance,
+)
+
+
+# ─── Date helpers ──────────────────────────────────────────────────────
+
+def _parse_date(d) -> Optional[date]:
+    """ממיר ערך לתאריך; מקבל date, datetime, YYYY-MM-DD, DD/MM/YYYY."""
+    if isinstance(d, datetime):
+        return d.date()
+    if isinstance(d, date):
+        return d
+    s = str(d).strip()
+    for fmt in ("%Y-%m-%d", "%d/%m/%Y"):
+        try:
+            return datetime.strptime(s, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def _find_chain_entry(chain: dict, expiry_date) -> Optional[dict]:
+    """מאתר את רשומת הפקיעה ב-chain dict לפי expiry_date."""
+    target = _parse_date(expiry_date)
+    if target is None:
+        return None
+    for entry in (chain or {}).get("expiries", []):
+        d = _parse_date(entry.get("date", ""))
+        if d == target:
+            return entry
+    return None
+
+
+# ─── Payoff helpers ────────────────────────────────────────────────────
+
+def _entry_cost_pts(strategy_id: int, params: dict) -> float:
+    """מחזיר עלות/זיכוי כניסה בנקודות (חיובי=תשלום, שלילי=קבלה).
+
+    Iron Condor (id=2): מחזיר ערך שלילי כי מתקבלת פרמיה.
+    """
+    if strategy_id == 2:
+        return -float(params.get("credit_pts", 0.0))
+    return float(params.get("cost_pts", 0.0))
+
+
+def _payoff_from_legs(legs: list[dict], close_index: float) -> float:
+    """חישוב payoff גולמי (ללא ניכוי עלות) בנקודת close_index לפי רגליים.
+
+    מחזיר ₪ — המשקל (qty) נלקח בחשבון, קנה=+, מכור=−.
+    """
+    total = 0.0
+    for leg in legs:
+        strike    = float(leg["strike"])
+        qty       = int(leg.get("qty", 1))
+        sign      = 1.0 if leg.get("action") == "קנה" else -1.0
+        option_type = leg.get("type", "")
+        if option_type == "Call":
+            intrinsic = max(close_index - strike, 0.0)
+        elif option_type == "Put":
+            intrinsic = max(strike - close_index, 0.0)
+        else:
+            intrinsic = 0.0
+        total += sign * qty * intrinsic * MULTIPLIER
+    return total
+
+
+# ─── Snapshot builder ──────────────────────────────────────────────────
+
+def _build_snapshot(
+    expiry_date,
+    expiry_entry: dict,
+    atm: dict,
+    chain_df: pd.DataFrame,
+    engine,
+) -> dict:
+    """בונה market_snapshot_json עם כל מצב השוק; חסרים → None ולא נכשל."""
+    snap: dict = {
+        "atm_level":   atm.get("index_estimate", atm.get("strike")),
+        "atm_strike":  atm.get("strike"),
+        "expiry_type": expiry_entry.get("expiry_type", "שבועי"),
+    }
+
+    exp_dt = _parse_date(expiry_date)
+    today  = date.today()
+    snap["days_to_expiry"] = (exp_dt - today).days if exp_dt else None
+    snap["day_of_week"]    = exp_dt.weekday()      if exp_dt else None
+
+    try:
+        snap["chain"] = json.loads(
+            chain_df.to_json(orient="records", force_ascii=False)
+        )
+    except Exception:
+        snap["chain"] = None
+
+    # תנועת פקיעה אחרונה מנתונים היסטוריים
+    try:
+        from data_loader import load_expiry_data          # noqa: PLC0415
+        from context_analyzer import get_recent_move       # noqa: PLC0415
+        df_hist = load_expiry_data()
+        snap["recent_move"] = get_recent_move(
+            df_hist, pd.Timestamp(str(expiry_date))
+        )
+    except Exception:
+        snap["recent_move"] = None
+
+    # ציון סיכון מאירועים
+    try:
+        from events import compute_risk_score              # noqa: PLC0415
+        risk = compute_risk_score(exp_dt or expiry_date, engine)
+        snap["risk_score"]    = risk.get("score")
+        snap["risk_level"]    = risk.get("level")
+        snap["nearby_events"] = risk.get("nearby_events", [])
+    except Exception:
+        snap["risk_score"]    = None
+        snap["risk_level"]    = None
+        snap["nearby_events"] = []
+
+    return snap
+
+
+# ─── Skipped-trade helper ──────────────────────────────────────────────
+
+def _insert_skipped(
+    portfolio_id: int,
+    strategy_id: int,
+    exp_dt: Optional[date],
+    atm: dict,
+    snapshot: dict,
+    engine,
+) -> None:
+    """מכניס רשומת עסקה עם status='skipped' לתיעוד ה-snapshot."""
+    try:
+        insert_trade(
+            {
+                "portfolio_id":         portfolio_id,
+                "strategy_id":          strategy_id,
+                "strategy_name":        STRATEGIES[strategy_id].name,
+                "expiry_date":          exp_dt,
+                "opened_at":            datetime.now(tz=timezone.utc),
+                "entry_index":          round(float(atm.get("index_estimate", atm.get("strike", 0))), 2),
+                "entry_cost":           0.0,
+                "legs_json":            [],
+                "max_profit":           None,
+                "max_loss":             None,
+                "status":               "skipped",
+                "closed_at":            None,
+                "close_index":          None,
+                "pnl":                  None,
+                "pnl_pct":              None,
+                "market_snapshot_json": snapshot,
+            },
+            engine=engine,
+        )
+    except Exception:
+        pass
+
+
+# ─── Public API ────────────────────────────────────────────────────────
+
+def open_trades_for_expiry(
+    expiry_date,
+    chain: dict,
+    portfolios: list[dict],
+    engine=None,
+) -> list[dict]:
+    """פותחת עסקה לכל אחת מ-6 האסטרטגיות בכל תיק.
+
+    מחזיר רשימת תוצאות עם status לכל (portfolio_id, strategy_id).
+    """
+    if not portfolios:
+        return []
+
+    expiry_entry = _find_chain_entry(chain, expiry_date)
+    if expiry_entry is None:
+        return []
+
+    chain_df = expiry_entry["chain"]
+    atm      = find_atm(chain_df)
+    if not atm:
+        return []
+
+    snapshot = _build_snapshot(expiry_date, expiry_entry, atm, chain_df, engine)
+    exp_dt   = _parse_date(expiry_date)
+    results: list[dict] = []
+
+    for portfolio in portfolios:
+        portfolio_id    = portfolio["id"]
+        current_balance = float(portfolio.get("current_balance", 0.0))
+
+        # שאילתה אחת לכל תיק — מניעת כפילויות
+        existing = get_trades(
+            portfolio_id=portfolio_id,
+            expiry_date=str(exp_dt),
+            engine=engine,
+        )
+        existing_sids = {t.get("strategy_id") for t in existing}
+
+        for strategy_id in range(1, 7):
+            # ─── מניעת כפילות ───────────────────────────────────────
+            if strategy_id in existing_sids:
+                results.append({
+                    "portfolio_id": portfolio_id,
+                    "strategy_id":  strategy_id,
+                    "status":       "duplicate",
+                })
+                continue
+
+            try:
+                params   = strategy_payoff_params(strategy_id, atm, chain_df)
+                cost_pts = _entry_cost_pts(strategy_id, params)
+
+                # ─── בדיקת תקינות מחיר ──────────────────────────────
+                if not params or abs(cost_pts) < 0.001:
+                    snap_skip = {**snapshot, "skip_reason": "missing price data"}
+                    _insert_skipped(portfolio_id, strategy_id, exp_dt, atm, snap_skip, engine)
+                    results.append({
+                        "portfolio_id": portfolio_id,
+                        "strategy_id":  strategy_id,
+                        "status":       "skipped",
+                    })
+                    continue
+
+                entry_cost = round(cost_pts * MULTIPLIER, 2)
+                legs       = strategy_legs_detail(strategy_id, atm, chain_df)
+                summary    = strategy_summary(strategy_id, atm, chain_df)
+
+                inserted = insert_trade(
+                    {
+                        "portfolio_id":         portfolio_id,
+                        "strategy_id":          strategy_id,
+                        "strategy_name":        STRATEGIES[strategy_id].name,
+                        "expiry_date":          exp_dt,
+                        "opened_at":            datetime.now(tz=timezone.utc),
+                        "entry_index":          round(float(atm.get("index_estimate", atm["strike"])), 2),
+                        "entry_cost":           entry_cost,
+                        "legs_json":            legs,
+                        "max_profit":           summary.get("max_profit_nis"),
+                        "max_loss":             summary.get("max_loss_nis"),
+                        "status":               "open",
+                        "closed_at":            None,
+                        "close_index":          None,
+                        "pnl":                  None,
+                        "pnl_pct":              None,
+                        "market_snapshot_json": snapshot,
+                    },
+                    engine=engine,
+                )
+
+                if inserted is None:
+                    results.append({
+                        "portfolio_id": portfolio_id,
+                        "strategy_id":  strategy_id,
+                        "status":       "db_error",
+                    })
+                    continue
+
+                # ─── עדכון יתרה ─────────────────────────────────────
+                new_balance = round(current_balance - entry_cost, 4)
+                update_balance(portfolio_id, new_balance, engine=engine)
+                current_balance = new_balance
+
+                results.append({**inserted, "new_balance": new_balance})
+
+            except Exception:
+                results.append({
+                    "portfolio_id": portfolio_id,
+                    "strategy_id":  strategy_id,
+                    "status":       "error",
+                })
+
+    return results
+
+
+def close_trades_for_expiry(
+    expiry_date,
+    close_index: float,
+    engine=None,
+) -> list[dict]:
+    """סוגרת את כל העסקאות הפתוחות לפקיעה לפי מחיר הנעילה.
+
+    מחשב payoff גולמי מהרגליים, PnL, ומעדכן יתרת תיק.
+    """
+    open_trades = get_open_trades_for_expiry(expiry_date, engine=engine)
+    results: list[dict] = []
+
+    for trade in open_trades:
+        try:
+            legs       = trade.get("legs_json") or []
+            payoff     = _payoff_from_legs(legs, float(close_index))
+            entry_cost = float(trade.get("entry_cost") or 0.0)
+
+            pnl     = round(payoff - entry_cost, 2)
+            pnl_pct = (
+                round(pnl / abs(entry_cost), 4)
+                if abs(entry_cost) > 0.001
+                else None
+            )
+
+            trade_id     = trade["id"]
+            portfolio_id = trade["portfolio_id"]
+
+            ok = close_trade(trade_id, float(close_index), pnl, pnl_pct, engine=engine)
+
+            if ok:
+                portfolio = get_portfolio(portfolio_id, engine=engine)
+                if portfolio:
+                    new_bal = round(float(portfolio["current_balance"]) + payoff, 4)
+                    update_balance(portfolio_id, new_bal, engine=engine)
+
+            results.append({
+                "trade_id":      trade_id,
+                "strategy_id":   trade.get("strategy_id"),
+                "strategy_name": trade.get("strategy_name"),
+                "payoff":        round(payoff, 2),
+                "pnl":           pnl,
+                "pnl_pct":       pnl_pct,
+                "status":        "closed" if ok else "error",
+            })
+
+        except Exception:
+            results.append({"trade_id": trade.get("id"), "status": "error"})
+
+    return results
