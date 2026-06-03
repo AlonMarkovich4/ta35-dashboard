@@ -1,11 +1,14 @@
 """
 paper_trading.py — מנוע פתיחה וסגירה של עסקאות Paper Trading.
 
-מודל מזומן:
-  entry_cost   = עלות/זיכוי בכניסה (חיובי=שולמה פרמיה, שלילי=התקבלה פרמיה)
-  open:   new_balance = balance - entry_cost
-  close:  new_balance = balance + payoff_at_close
-  pnl     = payoff_at_close - entry_cost
+מודל מזומן (כולל עמלות):
+  entry_cost        = עלות/זיכוי בכניסה (חיובי=שולמה פרמיה, שלילי=התקבלה פרמיה)
+  entry_commission  = num_legs × commission_per_leg (מהתיק)
+  exit_commission   = num_legs × commission_per_leg (בסגירה)
+
+  open:   new_balance = balance - entry_cost - entry_commission
+  close:  new_balance = balance + payoff_at_close - exit_commission
+  pnl     = payoff_at_close - entry_cost - entry_commission - exit_commission
 
 פונקציות ציבוריות:
   open_trades_for_expiry(expiry_date, chain, portfolios, engine=None)  → list[dict]
@@ -183,6 +186,9 @@ def _insert_skipped(
                 "pnl":                  None,
                 "pnl_pct":              None,
                 "market_snapshot_json": snapshot,
+                "num_legs":             0,
+                "entry_commission":     0.0,
+                "exit_commission":      None,
             },
             engine=engine,
         )
@@ -219,8 +225,10 @@ def open_trades_for_expiry(
     results: list[dict] = []
 
     for portfolio in portfolios:
-        portfolio_id    = portfolio["id"]
-        current_balance = float(portfolio.get("current_balance", 0.0))
+        portfolio_id       = portfolio["id"]
+        current_balance    = float(portfolio.get("current_balance", 0.0))
+        _cpv = portfolio.get("commission_per_leg")
+        commission_per_leg = float(_cpv if _cpv is not None else 2.5)
 
         # שאילתה אחת לכל תיק — מניעת כפילויות
         existing = get_trades(
@@ -259,6 +267,10 @@ def open_trades_for_expiry(
                 legs       = strategy_legs_detail(strategy_id, atm, chain_df)
                 summary    = strategy_summary(strategy_id, atm, chain_df)
 
+                # ─── עמלת כניסה ─────────────────────────────────────
+                num_legs         = len(legs)
+                entry_commission = round(num_legs * commission_per_leg, 2)
+
                 inserted = insert_trade(
                     {
                         "portfolio_id":         portfolio_id,
@@ -277,6 +289,9 @@ def open_trades_for_expiry(
                         "pnl":                  None,
                         "pnl_pct":              None,
                         "market_snapshot_json": snapshot,
+                        "num_legs":             num_legs,
+                        "entry_commission":     entry_commission,
+                        "exit_commission":      None,
                     },
                     engine=engine,
                 )
@@ -289,8 +304,8 @@ def open_trades_for_expiry(
                     })
                     continue
 
-                # ─── עדכון יתרה ─────────────────────────────────────
-                new_balance = round(current_balance - entry_cost, 4)
+                # ─── עדכון יתרה (פרמיה + עמלת כניסה) ───────────────
+                new_balance = round(current_balance - entry_cost - entry_commission, 4)
                 update_balance(portfolio_id, new_balance, engine=engine)
                 current_balance = new_balance
 
@@ -320,36 +335,46 @@ def close_trades_for_expiry(
 
     for trade in open_trades:
         try:
-            legs       = trade.get("legs_json") or []
-            payoff     = _payoff_from_legs(legs, float(close_index))
-            entry_cost = float(trade.get("entry_cost") or 0.0)
+            legs             = trade.get("legs_json") or []
+            payoff           = _payoff_from_legs(legs, float(close_index))
+            entry_cost       = float(trade.get("entry_cost") or 0.0)
+            entry_commission = float(trade.get("entry_commission") or 0.0)
+            num_legs         = int(trade.get("num_legs") or len(legs))
 
-            pnl     = round(payoff - entry_cost, 2)
+            trade_id     = trade["id"]
+            portfolio_id = trade["portfolio_id"]
+
+            # ─── עמלת יציאה מהתיק ────────────────────────────────────
+            portfolio          = get_portfolio(portfolio_id, engine=engine)
+            _cpv = (portfolio or {}).get("commission_per_leg")
+            commission_per_leg = float(_cpv if _cpv is not None else 2.5)
+            exit_commission    = round(num_legs * commission_per_leg, 2)
+
+            pnl     = round(payoff - entry_cost - entry_commission - exit_commission, 2)
             pnl_pct = (
                 round(pnl / abs(entry_cost), 4)
                 if abs(entry_cost) > 0.001
                 else None
             )
 
-            trade_id     = trade["id"]
-            portfolio_id = trade["portfolio_id"]
+            ok = close_trade(
+                trade_id, float(close_index), pnl, pnl_pct,
+                exit_commission, engine=engine,
+            )
 
-            ok = close_trade(trade_id, float(close_index), pnl, pnl_pct, engine=engine)
-
-            if ok:
-                portfolio = get_portfolio(portfolio_id, engine=engine)
-                if portfolio:
-                    new_bal = round(float(portfolio["current_balance"]) + payoff, 4)
-                    update_balance(portfolio_id, new_bal, engine=engine)
+            if ok and portfolio:
+                new_bal = round(float(portfolio["current_balance"]) + payoff - exit_commission, 4)
+                update_balance(portfolio_id, new_bal, engine=engine)
 
             results.append({
-                "trade_id":      trade_id,
-                "strategy_id":   trade.get("strategy_id"),
-                "strategy_name": trade.get("strategy_name"),
-                "payoff":        round(payoff, 2),
-                "pnl":           pnl,
-                "pnl_pct":       pnl_pct,
-                "status":        "closed" if ok else "error",
+                "trade_id":       trade_id,
+                "strategy_id":    trade.get("strategy_id"),
+                "strategy_name":  trade.get("strategy_name"),
+                "payoff":         round(payoff, 2),
+                "exit_commission": exit_commission,
+                "pnl":            pnl,
+                "pnl_pct":        pnl_pct,
+                "status":         "closed" if ok else "error",
             })
 
         except Exception:

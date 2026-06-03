@@ -193,12 +193,13 @@ class TestCreatePortfolio:
 
     def test_returns_dict_on_success(self):
         row = _make_row(id=1, name="Test", initial_balance=10000,
-                        current_balance=10000, is_active=True)
+                        current_balance=10000, commission_per_leg=2.5, is_active=True)
         eng = _mock_engine(fetchone=row)
-        result = create_portfolio("Test", 10000, engine=eng)
+        result = create_portfolio("Test", 10000, commission_per_leg=2.5, engine=eng)
         assert result is not None
         assert result["id"] == 1
         assert result["name"] == "Test"
+        assert result["commission_per_leg"] == 2.5
 
     def test_returns_none_on_db_error(self):
         eng = MagicMock()
@@ -209,13 +210,24 @@ class TestCreatePortfolio:
         eng = _mock_engine(fetchone=None)
         assert create_portfolio("Test", 10000, engine=eng) is None
 
+    def test_default_commission_is_2_5(self):
+        """ברירת מחדל של עמלה: 2.5₪."""
+        conn = _mock_conn(fetchone=_make_row(id=1, name="T", initial_balance=1000,
+                                             current_balance=1000, commission_per_leg=2.5,
+                                             is_active=True))
+        eng = MagicMock()
+        eng.connect.return_value = conn
+        create_portfolio("T", 1000, engine=eng)
+        params = conn.execute.call_args[0][1]
+        assert params["commission_per_leg"] == pytest.approx(2.5)
+
     def test_commit_called(self):
         row = _make_row(id=1, name="X", initial_balance=5000,
-                        current_balance=5000, is_active=True)
+                        current_balance=5000, commission_per_leg=1.0, is_active=True)
         conn = _mock_conn(fetchone=row)
         eng  = MagicMock()
         eng.connect.return_value = conn
-        create_portfolio("X", 5000, engine=eng)
+        create_portfolio("X", 5000, commission_per_leg=1.0, engine=eng)
         conn.commit.assert_called_once()
 
 
@@ -315,6 +327,9 @@ _SAMPLE_TRADE = {
     "pnl":                   None,
     "pnl_pct":               None,
     "market_snapshot_json":  {"index": 4300.0, "note": "פקיעה בדיקה"},
+    "num_legs":              2,
+    "entry_commission":      5.0,
+    "exit_commission":       None,
 }
 
 
@@ -500,40 +515,51 @@ class TestGetOpenTradesForExpiry:
 class TestCloseTrade:
     def test_returns_false_without_engine(self, monkeypatch):
         monkeypatch.delenv("DATABASE_URL", raising=False)
-        assert close_trade(1, 4310.0, 150.0, 7.5) is False
+        assert close_trade(1, 4310.0, 150.0, 7.5, exit_commission=5.0) is False
 
     def test_returns_true_on_success(self):
         eng = _mock_engine()
-        assert close_trade(1, 4310.0, 150.0, 7.5, engine=eng) is True
+        assert close_trade(1, 4310.0, 150.0, 7.5, exit_commission=5.0, engine=eng) is True
 
     def test_returns_false_on_db_error(self):
         eng = MagicMock()
         eng.connect.side_effect = Exception("update failed")
-        assert close_trade(1, 4310.0, 150.0, 7.5, engine=eng) is False
+        assert close_trade(1, 4310.0, 150.0, 7.5, exit_commission=5.0, engine=eng) is False
 
     def test_commit_called(self):
         conn = _mock_conn()
         eng  = MagicMock()
         eng.connect.return_value = conn
-        close_trade(1, 4310.0, 150.0, 7.5, engine=eng)
+        close_trade(1, 4310.0, 150.0, 7.5, exit_commission=5.0, engine=eng)
         conn.commit.assert_called_once()
 
     def test_sql_sets_closed_status(self):
         conn = _mock_conn()
         eng  = MagicMock()
         eng.connect.return_value = conn
-        close_trade(42, 4310.0, 150.0, 7.5, engine=eng)
+        close_trade(42, 4310.0, 150.0, 7.5, exit_commission=5.0, engine=eng)
         sql_text = str(conn.execute.call_args[0][0])
         assert "closed" in sql_text
         assert "closed_at" in sql_text
+        assert "exit_commission" in sql_text
 
     def test_correct_params_passed_to_execute(self):
         conn = _mock_conn()
         eng  = MagicMock()
         eng.connect.return_value = conn
-        close_trade(42, 4310.0, 150.0, 7.5, engine=eng)
+        close_trade(42, 4310.0, 150.0, 7.5, exit_commission=10.0, engine=eng)
         params = conn.execute.call_args[0][1]
-        assert params["id"]          == 42
-        assert params["close_index"] == 4310.0
-        assert params["pnl"]         == 150.0
-        assert params["pnl_pct"]     == 7.5
+        assert params["id"]              == 42
+        assert params["close_index"]     == 4310.0
+        assert params["pnl"]             == 150.0
+        assert params["pnl_pct"]         == 7.5
+        assert params["exit_commission"] == 10.0
+
+    def test_default_exit_commission_is_zero(self):
+        """exit_commission ברירת מחדל = 0.0."""
+        conn = _mock_conn()
+        eng  = MagicMock()
+        eng.connect.return_value = conn
+        close_trade(1, 4300.0, 100.0, 0.5, engine=eng)
+        params = conn.execute.call_args[0][1]
+        assert params["exit_commission"] == pytest.approx(0.0)

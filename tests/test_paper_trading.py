@@ -88,8 +88,10 @@ def _make_chain_dict(
     }
 
 
-def _make_portfolio(portfolio_id: int = 1, balance: float = 100_000.0) -> dict:
-    return {"id": portfolio_id, "name": "תיק בדיקה", "current_balance": balance, "is_active": True}
+def _make_portfolio(portfolio_id: int = 1, balance: float = 100_000.0,
+                    commission_per_leg: float = 0.0) -> dict:
+    return {"id": portfolio_id, "name": "תיק בדיקה", "current_balance": balance,
+            "is_active": True, "commission_per_leg": commission_per_leg}
 
 
 def _make_inserted_trade(portfolio_id: int = 1, strategy_id: int = 1) -> dict:
@@ -506,13 +508,16 @@ def _make_open_trade(
             {"action": "קנה", "type": "Put",  "strike": 4300.0, "qty": 1},
         ]
     return {
-        "id":            trade_id,
-        "portfolio_id":  portfolio_id,
-        "strategy_id":   strategy_id,
-        "strategy_name": "Long Straddle",
-        "entry_cost":    entry_cost,
-        "legs_json":     legs,
-        "status":        "open",
+        "id":               trade_id,
+        "portfolio_id":     portfolio_id,
+        "strategy_id":      strategy_id,
+        "strategy_name":    "Long Straddle",
+        "entry_cost":       entry_cost,
+        "legs_json":        legs,
+        "status":           "open",
+        "num_legs":         len(legs),
+        "entry_commission": 0.0,
+        "exit_commission":  None,
     }
 
 
@@ -658,6 +663,7 @@ class TestCloseBalanceUpdate:
 
         with patch("paper_trading.get_open_trades_for_expiry", return_value=[trade]), \
              patch("paper_trading.close_trade", return_value=False), \
+             patch("paper_trading.get_portfolio", return_value=_make_portfolio()), \
              patch("paper_trading.update_balance") as mock_upd:
 
             close_trades_for_expiry(_EXPIRY, 4300.0, engine=MagicMock())
@@ -671,7 +677,7 @@ class TestCloseBalanceUpdate:
 
         call_count = {"n": 0}
 
-        def fake_close(tid, close_idx, pnl, pnl_pct, engine=None):
+        def fake_close(tid, close_idx, pnl, pnl_pct, exit_commission=0.0, engine=None):
             if tid == 1:
                 raise RuntimeError("crash")
             call_count["n"] += 1

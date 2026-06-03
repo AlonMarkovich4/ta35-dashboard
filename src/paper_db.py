@@ -5,15 +5,15 @@ paper_db.py — שכבת DB לתיקי Paper Trading.
 מתחבר דרך DATABASE_URL (אותו pattern כמו supabase_loader.py).
 
 פונקציות ציבוריות:
-  has_paper_db()                                              → bool
-  create_portfolio(name, initial_balance, engine=None)        → dict | None
-  get_portfolios(engine=None)                                 → list[dict]
-  get_portfolio(portfolio_id, engine=None)                    → dict | None
-  update_balance(portfolio_id, new_balance, engine=None)      → bool
-  insert_trade(trade, engine=None)                            → dict | None
-  get_trades(portfolio_id, status, expiry_date, engine=None)  → list[dict]
-  get_open_trades_for_expiry(expiry_date, engine=None)        → list[dict]
-  close_trade(trade_id, close_index, pnl, pnl_pct, engine)   → bool
+  has_paper_db()                                                        → bool
+  create_portfolio(name, initial_balance, commission_per_leg, engine)   → dict | None
+  get_portfolios(engine=None)                                           → list[dict]
+  get_portfolio(portfolio_id, engine=None)                              → dict | None
+  update_balance(portfolio_id, new_balance, engine=None)                → bool
+  insert_trade(trade, engine=None)                                      → dict | None
+  get_trades(portfolio_id, status, expiry_date, engine=None)            → list[dict]
+  get_open_trades_for_expiry(expiry_date, engine=None)                  → list[dict]
+  close_trade(trade_id, close_index, pnl, pnl_pct, exit_commission, engine) → bool
 """
 from __future__ import annotations
 
@@ -82,6 +82,7 @@ def _row_to_dict(row) -> dict:
 def create_portfolio(
     name: str,
     initial_balance: float,
+    commission_per_leg: float = 2.5,
     engine=None,
 ) -> Optional[dict]:
     """יוצר תיק paper trading חדש ומחזיר אותו כ-dict; None בכישלון."""
@@ -92,11 +93,16 @@ def create_portfolio(
         with eng.connect() as conn:
             row = conn.execute(
                 text("""
-                    INSERT INTO paper_portfolios (name, initial_balance, current_balance, is_active)
-                    VALUES (:name, :initial_balance, :initial_balance, TRUE)
+                    INSERT INTO paper_portfolios
+                        (name, initial_balance, current_balance, commission_per_leg, is_active)
+                    VALUES (:name, :initial_balance, :initial_balance, :commission_per_leg, TRUE)
                     RETURNING *
                 """),
-                {"name": name, "initial_balance": initial_balance},
+                {
+                    "name":               name,
+                    "initial_balance":    initial_balance,
+                    "commission_per_leg": commission_per_leg,
+                },
             ).fetchone()
             conn.commit()
         return dict(row._mapping) if row else None
@@ -180,13 +186,15 @@ def insert_trade(trade: dict, engine=None) -> Optional[dict]:
                         portfolio_id, strategy_id, strategy_name, expiry_date,
                         opened_at, entry_index, entry_cost, legs_json,
                         max_profit, max_loss, status,
-                        closed_at, close_index, pnl, pnl_pct, market_snapshot_json
+                        closed_at, close_index, pnl, pnl_pct, market_snapshot_json,
+                        num_legs, entry_commission, exit_commission
                     ) VALUES (
                         :portfolio_id, :strategy_id, :strategy_name, :expiry_date,
                         :opened_at, :entry_index, :entry_cost, CAST(:legs_json AS JSONB),
                         :max_profit, :max_loss, :status,
                         :closed_at, :close_index, :pnl, :pnl_pct,
-                        CAST(:market_snapshot_json AS JSONB)
+                        CAST(:market_snapshot_json AS JSONB),
+                        :num_legs, :entry_commission, :exit_commission
                     )
                     RETURNING *
                 """),
@@ -257,9 +265,10 @@ def close_trade(
     close_index: float,
     pnl: float,
     pnl_pct: float,
+    exit_commission: float = 0.0,
     engine=None,
 ) -> bool:
-    """סוגר עסקה: מעדכן status='closed', closed_at=NOW(), close_index, pnl, pnl_pct.
+    """סוגר עסקה: מעדכן status='closed', closed_at=NOW(), close_index, pnl, pnl_pct, exit_commission.
 
     מחזיר False בכישלון.
     """
@@ -271,18 +280,20 @@ def close_trade(
             conn.execute(
                 text("""
                     UPDATE paper_trades
-                    SET status      = 'closed',
-                        closed_at   = NOW(),
-                        close_index = :close_index,
-                        pnl         = :pnl,
-                        pnl_pct     = :pnl_pct
+                    SET status          = 'closed',
+                        closed_at       = NOW(),
+                        close_index     = :close_index,
+                        pnl             = :pnl,
+                        pnl_pct         = :pnl_pct,
+                        exit_commission = :exit_commission
                     WHERE id = :id
                 """),
                 {
-                    "id":          trade_id,
-                    "close_index": close_index,
-                    "pnl":         pnl,
-                    "pnl_pct":     pnl_pct,
+                    "id":              trade_id,
+                    "close_index":     close_index,
+                    "pnl":             pnl,
+                    "pnl_pct":         pnl_pct,
+                    "exit_commission": exit_commission,
                 },
             )
             conn.commit()
