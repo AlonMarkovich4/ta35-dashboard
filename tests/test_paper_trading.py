@@ -20,8 +20,11 @@ from payoff import MULTIPLIER
 from paper_trading import (
     _entry_cost_pts,
     _find_chain_entry,
+    _norm_ts,
     _parse_date,
     _payoff_from_legs,
+    build_equity_curve,
+    build_track_record,
     close_trades_for_expiry,
     open_trades_for_expiry,
 )
@@ -784,3 +787,213 @@ class TestIronCondorFullCycle:
         assert r["pnl"]    < 0,   f"pnl מ-close_trades ({r['pnl']:+.0f}₪) חייב להיות שלילי"
         assert captured.get("final_balance", initial_balance) < initial_balance, \
             f"יתרה סופית ({captured.get('final_balance'):,.0f}₪) חייבת להיות מתחת ל-100,000₪"
+
+
+# ─── _norm_ts ──────────────────────────────────────────────────────────
+
+class TestNormTs:
+    def test_datetime_returned_as_is(self):
+        dt = datetime(2026, 5, 29, 10, 0)
+        assert _norm_ts(dt) is dt
+
+    def test_iso_string_parsed(self):
+        result = _norm_ts("2026-05-29T10:00:00")
+        assert isinstance(result, datetime)
+        assert result.year == 2026 and result.month == 5 and result.day == 29
+
+    def test_zulu_string_parsed(self):
+        result = _norm_ts("2026-05-29T10:00:00Z")
+        assert isinstance(result, datetime)
+
+    def test_pandas_timestamp(self):
+        import pandas as pd
+        ts = pd.Timestamp("2026-05-29 10:00:00")
+        result = _norm_ts(ts)
+        assert isinstance(result, datetime)
+        assert result.year == 2026
+
+
+# ─── build_equity_curve ────────────────────────────────────────────────
+
+def _closed_trade(trade_id: int, pnl: float, closed_at: datetime,
+                  strategy_name: str = "Bull Call Spread") -> dict:
+    return {
+        "id": trade_id, "status": "closed", "pnl": pnl,
+        "closed_at": closed_at, "strategy_name": strategy_name,
+    }
+
+
+class TestBuildEquityCurve:
+    def test_empty_trades_returns_empty(self):
+        assert build_equity_curve([], 100_000) == []
+
+    def test_no_closed_trades_returns_empty(self):
+        trades = [
+            {"id": 1, "status": "open",    "pnl": None,   "closed_at": None},
+            {"id": 2, "status": "skipped", "pnl": None,   "closed_at": None},
+        ]
+        assert build_equity_curve(trades, 100_000) == []
+
+    def test_trade_missing_pnl_excluded(self):
+        trades = [{"id": 1, "status": "closed", "pnl": None, "closed_at": datetime(2026, 5, 29, 10)}]
+        assert build_equity_curve(trades, 100_000) == []
+
+    def test_trade_missing_closed_at_excluded(self):
+        trades = [{"id": 1, "status": "closed", "pnl": 500.0, "closed_at": None}]
+        assert build_equity_curve(trades, 100_000) == []
+
+    def test_single_closed_trade_accumulates(self):
+        trades = [_closed_trade(1, 500.0, datetime(2026, 5, 29, 10, 0))]
+        result = build_equity_curve(trades, 100_000)
+        assert len(result) == 1
+        assert result[0]["balance"] == pytest.approx(100_500.0)
+        assert result[0]["ts"] == datetime(2026, 5, 29, 10, 0)
+
+    def test_multiple_trades_accumulate_correctly(self):
+        trades = [
+            _closed_trade(1,  500.0, datetime(2026, 5, 22, 10)),
+            _closed_trade(2, -200.0, datetime(2026, 5, 29, 10)),
+            _closed_trade(3,  800.0, datetime(2026, 6,  5, 10)),
+        ]
+        result = build_equity_curve(trades, 100_000)
+        assert len(result) == 3
+        assert result[0]["balance"] == pytest.approx(100_500.0)   # +500
+        assert result[1]["balance"] == pytest.approx(100_300.0)   # -200
+        assert result[2]["balance"] == pytest.approx(101_100.0)   # +800
+
+    def test_sorted_chronologically(self):
+        """מבטיח שהנקודות ממוינות לפי closed_at גם אם הקלט לא מסודר."""
+        trades = [
+            _closed_trade(3, 100.0, datetime(2026, 6,  5, 10)),
+            _closed_trade(1, 200.0, datetime(2026, 5, 22, 10)),
+            _closed_trade(2, -50.0, datetime(2026, 5, 29, 10)),
+        ]
+        result = build_equity_curve(trades, 100_000)
+        assert result[0]["ts"] == datetime(2026, 5, 22, 10)
+        assert result[1]["ts"] == datetime(2026, 5, 29, 10)
+        assert result[2]["ts"] == datetime(2026, 6,  5, 10)
+
+    def test_open_trades_excluded(self):
+        """עסקאות פתוחות לא נכללות בעקומה."""
+        trades = [
+            _closed_trade(1, 500.0, datetime(2026, 5, 22, 10)),
+            {"id": 2, "status": "open", "pnl": 999.0, "closed_at": datetime(2026, 5, 23, 10)},
+        ]
+        result = build_equity_curve(trades, 100_000)
+        assert len(result) == 1
+        assert result[0]["balance"] == pytest.approx(100_500.0)
+
+    def test_string_timestamp_normalized(self):
+        """closed_at כ-string מטופל נכון."""
+        trades = [{"id": 1, "status": "closed", "pnl": 300.0,
+                   "closed_at": "2026-05-29T10:00:00"}]
+        result = build_equity_curve(trades, 100_000)
+        assert len(result) == 1
+        assert isinstance(result[0]["ts"], datetime)
+        assert result[0]["balance"] == pytest.approx(100_300.0)
+
+    def test_negative_pnl_decreases_balance(self):
+        trades = [_closed_trade(1, -1500.0, datetime(2026, 5, 29, 10))]
+        result = build_equity_curve(trades, 100_000)
+        assert result[0]["balance"] == pytest.approx(98_500.0)
+
+    def test_mixed_open_closed_skipped(self):
+        trades = [
+            _closed_trade(1, 200.0, datetime(2026, 5, 20, 10)),
+            {"id": 2, "status": "open",    "pnl": None,   "closed_at": None},
+            {"id": 3, "status": "skipped", "pnl": None,   "closed_at": None},
+            _closed_trade(4, -100.0, datetime(2026, 5, 27, 10)),
+        ]
+        result = build_equity_curve(trades, 50_000)
+        assert len(result) == 2
+        assert result[0]["balance"] == pytest.approx(50_200.0)
+        assert result[1]["balance"] == pytest.approx(50_100.0)
+
+
+# ─── build_track_record ────────────────────────────────────────────────
+
+class TestBuildTrackRecord:
+    def test_empty_trades_returns_empty(self):
+        assert build_track_record([]) == []
+
+    def test_no_closed_trades_returns_empty(self):
+        trades = [
+            {"status": "open",    "strategy_name": "Bull Call Spread", "pnl": None},
+            {"status": "skipped", "strategy_name": "Long Straddle",    "pnl": None},
+        ]
+        assert build_track_record(trades) == []
+
+    def test_single_strategy_win(self):
+        trades = [
+            {"status": "closed", "strategy_name": "Bull Call Spread", "pnl": 500.0},
+            {"status": "closed", "strategy_name": "Bull Call Spread", "pnl": -200.0},
+            {"status": "closed", "strategy_name": "Bull Call Spread", "pnl": 300.0},
+        ]
+        result = build_track_record(trades)
+        assert len(result) == 1
+        r = result[0]
+        assert r["strategy_name"] == "Bull Call Spread"
+        assert r["total"]         == 3
+        assert r["wins"]          == 2
+        assert r["win_rate"]      == pytest.approx(2 / 3, abs=1e-3)
+        assert r["total_pnl"]     == pytest.approx(600.0)
+        assert r["avg_pnl"]       == pytest.approx(200.0)
+
+    def test_multiple_strategies_sorted_by_total_pnl_desc(self):
+        trades = [
+            {"status": "closed", "strategy_name": "Bull Call Spread",  "pnl": 100.0},
+            {"status": "closed", "strategy_name": "Long Straddle",      "pnl": 500.0},
+            {"status": "closed", "strategy_name": "Short Iron Condor",  "pnl": -50.0},
+        ]
+        result = build_track_record(trades)
+        assert result[0]["strategy_name"] == "Long Straddle"      # 500
+        assert result[1]["strategy_name"] == "Bull Call Spread"   # 100
+        assert result[2]["strategy_name"] == "Short Iron Condor"  # -50
+
+    def test_none_pnl_excluded_from_stats(self):
+        trades = [
+            {"status": "closed", "strategy_name": "Long Straddle", "pnl": 500.0},
+            {"status": "closed", "strategy_name": "Long Straddle", "pnl": None},
+        ]
+        result = build_track_record(trades)
+        assert len(result) == 1
+        r = result[0]
+        assert r["total"]     == 2     # 2 עסקאות סגורות
+        assert r["total_pnl"] == pytest.approx(500.0)  # רק זו שיש לה pnl
+        assert r["wins"]      == 1
+
+    def test_none_strategy_name_fallback(self):
+        trades = [{"status": "closed", "strategy_name": None, "pnl": 100.0}]
+        result = build_track_record(trades)
+        assert result[0]["strategy_name"] == "לא ידוע"
+
+    def test_win_rate_all_wins(self):
+        trades = [
+            {"status": "closed", "strategy_name": "X", "pnl": 100.0},
+            {"status": "closed", "strategy_name": "X", "pnl": 200.0},
+        ]
+        result = build_track_record(trades)
+        assert result[0]["win_rate"] == pytest.approx(1.0)
+
+    def test_win_rate_all_losses(self):
+        trades = [
+            {"status": "closed", "strategy_name": "X", "pnl": -100.0},
+            {"status": "closed", "strategy_name": "X", "pnl": -200.0},
+        ]
+        result = build_track_record(trades)
+        assert result[0]["win_rate"] == pytest.approx(0.0)
+        assert result[0]["wins"]     == 0
+
+    def test_open_trades_not_included(self):
+        trades = [
+            {"status": "closed", "strategy_name": "Bull Call Spread", "pnl": 100.0},
+            {"status": "open",   "strategy_name": "Bull Call Spread", "pnl": None},
+        ]
+        result = build_track_record(trades)
+        assert result[0]["total"] == 1
+
+    def test_zero_pnl_not_counted_as_win(self):
+        trades = [{"status": "closed", "strategy_name": "X", "pnl": 0.0}]
+        result = build_track_record(trades)
+        assert result[0]["wins"]     == 0
+        assert result[0]["win_rate"] == pytest.approx(0.0)

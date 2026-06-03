@@ -2,57 +2,427 @@
 דף Paper Trading — ניהול תיקי דמו
 """
 import sys
+from datetime import timedelta
 from pathlib import Path
 
+import pandas as pd
+import plotly.graph_objects as go
 import streamlit as st
 
 _SRC = Path(__file__).parent.parent / "src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from paper_db import create_portfolio, get_portfolios, get_trades, has_paper_db
+from paper_db import (
+    create_portfolio,
+    get_portfolio,
+    get_portfolios,
+    get_trades,
+    has_paper_db,
+)
+from paper_trading import build_equity_curve, build_track_record
 from styles import inject_global_css
+
+# ─── Plotly dark theme constants (זהה ל-payoff.py) ──────────────────
+_DARK_BG  = "#0e1117"
+_PLOT_BG  = "#111827"
+_GRID     = "#1e2d45"
+_AXIS     = "#7a9ab8"
+_GREEN    = "#27ae60"
+_RED      = "#e74c3c"
+_GOLD     = "#c9a84c"
+_BLUE     = "#4a9fd4"
+
+_STATUS_HE = {"open": "פתוח", "closed": "סגור", "skipped": "דולג"}
 
 st.set_page_config(
     page_title="תיקי דמו — TA-35",
     page_icon="📊",
     layout="wide",
 )
-
 inject_global_css()
 
-# ─── כותרת + disclaimer בולט ────────────────────────────────────────
-st.title("📊 תיקי דמו")
-st.markdown(
-    """
-    <div style='background:#1a2744; border:2px solid #c9a84c; border-radius:8px;
-                padding:12px 18px; margin-bottom:16px; text-align:right'>
-    ⚠️ <strong style='color:#c9a84c'>כלי מחקר בלבד — לא ייעוץ השקעות</strong><br>
-    <span style='color:#c8d6e8; font-size:0.9rem'>
-    כל הנתונים והתוצאות הן סימולציה היסטורית בלבד. אין להסתמך עליהם לצורך מסחר אמיתי.
-    </span>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
 
-# ─── בדיקת DB ───────────────────────────────────────────────────────
+# ════════════════════════════════════════════════════════════════════════
+#  Helper renderers
+# ════════════════════════════════════════════════════════════════════════
+
+def _disclaimer_banner() -> None:
+    st.markdown(
+        """
+        <div style='background:#1a2744;border:2px solid #c9a84c;border-radius:8px;
+                    padding:10px 16px;margin-bottom:14px;text-align:right'>
+        ⚠️ <strong style='color:#c9a84c'>כלי מחקר בלבד — לא ייעוץ השקעות</strong>
+        <span style='color:#c8d6e8;font-size:0.88rem'>
+         — כל הנתונים הם סימולציה היסטורית בלבד.
+        </span></div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _pnl_color(v: float) -> str:
+    return _GREEN if v > 0 else (_RED if v < 0 else _AXIS)
+
+
+def _sign(v: float) -> str:
+    return "+" if v > 0 else ""
+
+
+# ════════════════════════════════════════════════════════════════════════
+#  Portfolio detail view
+# ════════════════════════════════════════════════════════════════════════
+
+def _render_summary_cards(
+    trades: list[dict],
+    initial: float,
+    current: float,
+    commission: float,
+) -> None:
+    """שורת כרטיסי סיכום (5 עמודות)."""
+    pnl      = current - initial
+    pnl_pct  = (pnl / initial * 100) if initial > 0 else 0.0
+    total_t  = len(trades)
+    closed   = [t for t in trades if t.get("status") == "closed"]
+    wins     = sum(1 for t in closed if (t.get("pnl") or 0) > 0)
+    win_rate = (wins / len(closed) * 100) if closed else None
+
+    sign = _sign(pnl)
+
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("שווי נוכחי", f"₪{current:,.0f}")
+    c2.metric(
+        "תשואה כוללת",
+        f"{sign}₪{abs(pnl):,.0f}",
+        delta=f"{sign}{pnl_pct:.1f}%",
+        delta_color="normal",
+    )
+    c3.metric("עסקאות סה״כ", total_t)
+    c4.metric(
+        "Win Rate בפועל",
+        f"{win_rate:.0f}%" if win_rate is not None else "—",
+        help=f"{wins} רווחיות מתוך {len(closed)} סגורות",
+    )
+    c5.metric("עמלה לרגל", f"₪{commission:.1f}")
+
+
+def _render_equity_curve(trades: list[dict], initial: float) -> None:
+    """גרף עקומת שווי תיק (Plotly, dark theme)."""
+    curve = build_equity_curve(trades, initial)
+
+    fig = go.Figure()
+
+    if not curve:
+        # קו ישר ב-initial_balance עם הערה
+        fig.add_trace(go.Scatter(
+            x=[0, 1], y=[initial, initial],
+            mode="lines",
+            line=dict(color=_GOLD, width=2, dash="dot"),
+            name=f"הון התחלתי ₪{initial:,.0f}",
+        ))
+        fig.add_annotation(
+            text="טרם נסגרו עסקאות",
+            xref="paper", yref="paper", x=0.5, y=0.5,
+            showarrow=False,
+            font=dict(color=_AXIS, size=15),
+        )
+    else:
+        # נקודת פתיחה — יום לפני הסגירה הראשונה
+        start_ts = curve[0]["ts"] - timedelta(days=1)
+        xs = [start_ts] + [p["ts"] for p in curve]
+        ys = [initial]  + [p["balance"] for p in curve]
+
+        final_color = _GREEN if ys[-1] >= initial else _RED
+        fill_color  = (
+            "rgba(39,174,96,0.15)"  if ys[-1] >= initial
+            else "rgba(231,76,60,0.15)"
+        )
+
+        # baseline (invisible) — target for fill
+        fig.add_trace(go.Scatter(
+            x=xs, y=[initial] * len(xs),
+            mode="lines",
+            line=dict(color=_GOLD, width=1.5, dash="dot"),
+            showlegend=True,
+            name=f"הון התחלתי ₪{initial:,.0f}",
+            hoverinfo="skip",
+        ))
+
+        # equity curve עם fill לקו הבסיס
+        fig.add_trace(go.Scatter(
+            x=xs, y=ys,
+            mode="lines+markers",
+            line=dict(color=_BLUE, width=2.5),
+            marker=dict(size=7, color=_GOLD, symbol="circle"),
+            fill="tonexty",
+            fillcolor=fill_color,
+            name="שווי תיק",
+            hovertemplate="תאריך: %{x|%d/%m/%Y %H:%M}<br>שווי: ₪%{y:,.0f}<extra></extra>",
+        ))
+
+        # סמן יתרה סופית
+        fig.add_annotation(
+            x=xs[-1], y=ys[-1],
+            text=f"₪{ys[-1]:,.0f}",
+            showarrow=True, arrowhead=2,
+            arrowcolor=final_color,
+            font=dict(color=final_color, size=13),
+            bgcolor="rgba(0,0,0,0.6)",
+            bordercolor=final_color,
+            ax=0, ay=-36,
+        )
+
+    fig.update_layout(
+        paper_bgcolor=_DARK_BG,
+        plot_bgcolor=_PLOT_BG,
+        font=dict(color="#c8d6e8", family="Arial", size=12),
+        height=340,
+        margin=dict(t=30, b=50, l=80, r=25),
+        xaxis=dict(
+            title="תאריך סגירה",
+            gridcolor=_GRID, linecolor=_GRID, zeroline=False, color=_AXIS,
+        ),
+        yaxis=dict(
+            title='שווי תיק (₪)',
+            tickformat=",.0f",
+            gridcolor=_GRID, linecolor=_GRID, zeroline=False, color=_AXIS,
+        ),
+        legend=dict(
+            bgcolor="rgba(0,0,0,0)",
+            font=dict(color="#c8d6e8", size=11),
+            orientation="h", yanchor="bottom", y=1.02,
+        ),
+        hovermode="x unified",
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def _render_trade_table(trades: list[dict]) -> None:
+    """טבלת עסקאות עם סינון לפי סטטוס."""
+    if not trades:
+        st.info("עדיין אין עסקאות בתיק זה — יתחילו להיפתח אוטומטית בימי שני.")
+        return
+
+    status_opts = {"הכל": None, "פתוח": "open", "סגור": "closed", "דולג": "skipped"}
+    chosen_label = st.radio(
+        "סינון לפי סטטוס:", list(status_opts.keys()),
+        horizontal=True, index=0,
+    )
+    status_filter = status_opts[chosen_label]
+    filtered = trades if status_filter is None else [
+        t for t in trades if t.get("status") == status_filter
+    ]
+
+    if not filtered:
+        st.info("אין עסקאות התואמות את הסינון.")
+        return
+
+    rows = []
+    for t in filtered:
+        ec   = t.get("entry_commission") or 0
+        xc   = t.get("exit_commission")  or 0
+        pnl  = t.get("pnl")
+        pnlp = t.get("pnl_pct")
+        rows.append({
+            "אסטרטגיה":     t.get("strategy_name") or "—",
+            "פקיעה":         str(t.get("expiry_date") or "—"),
+            "סטטוס":         _STATUS_HE.get(t.get("status", ""), t.get("status", "—")),
+            "עלות כניסה (₪)": t.get("entry_cost"),
+            "עמלות (₪)":     round(ec + xc, 2),
+            "PnL (₪)":       pnl,
+            "PnL%":          f"{pnlp*100:+.1f}%" if pnlp is not None else "—",
+        })
+
+    df = pd.DataFrame(rows)
+
+    def _color_pnl(v):
+        if v is None or not isinstance(v, (int, float)):
+            return ""
+        return f"color: {_GREEN}" if v > 0 else (f"color: {_RED}" if v < 0 else "")
+
+    styled = (
+        df.style
+        .applymap(_color_pnl, subset=["PnL (₪)"])
+        .format(
+            {
+                "עלות כניסה (₪)": lambda v: f"₪{v:,.0f}" if v is not None else "—",
+                "עמלות (₪)":     lambda v: f"₪{v:,.1f}" if v is not None else "—",
+                "PnL (₪)":       lambda v: f"₪{v:+,.0f}" if v is not None else "—",
+            }
+        )
+    )
+    st.dataframe(styled, use_container_width=True, hide_index=True)
+
+
+def _render_track_record(trades: list[dict]) -> None:
+    """טבלת ביצועים מרוכזת לפי אסטרטגיה."""
+    record = build_track_record(trades)
+    if not record:
+        st.info("עדיין אין עסקאות סגורות לניתוח.")
+        return
+
+    rows = []
+    for r in record:
+        sign = _sign(r["total_pnl"])
+        rows.append({
+            "אסטרטגיה":      r["strategy_name"],
+            "עסקאות":         r["total"],
+            "רווחיות":        r["wins"],
+            "Win Rate":       f"{r['win_rate']*100:.0f}%",
+            "סה״כ PnL (₪)":  r["total_pnl"],
+            "ממוצע PnL (₪)": r["avg_pnl"],
+        })
+
+    df = pd.DataFrame(rows)
+
+    def _color_total(v):
+        if not isinstance(v, (int, float)):
+            return ""
+        return f"color: {_GREEN}" if v > 0 else (f"color: {_RED}" if v < 0 else "")
+
+    styled = (
+        df.style
+        .applymap(_color_total, subset=["סה״כ PnL (₪)", "ממוצע PnL (₪)"])
+        .format({
+            "סה״כ PnL (₪)":  lambda v: f"₪{v:+,.0f}",
+            "ממוצע PnL (₪)": lambda v: f"₪{v:+,.0f}",
+        })
+    )
+    st.dataframe(styled, use_container_width=True, hide_index=True)
+
+
+def _render_portfolio_detail(pid: int) -> None:
+    """תצוגה מלאה של תיק בודד."""
+    # ── כפתור חזרה ──────────────────────────────────────────────────
+    if st.button("← חזור לרשת התיקים"):
+        st.session_state["selected_portfolio_id"] = None
+        st.rerun()
+
+    # ── טעינת נתונים ────────────────────────────────────────────────
+    try:
+        portfolio = get_portfolio(pid)
+    except Exception:
+        st.error("❌ שגיאה בטעינת נתוני התיק.")
+        return
+
+    if portfolio is None:
+        st.error(f"תיק #{pid} לא נמצא.")
+        return
+
+    try:
+        trades = get_trades(portfolio_id=pid)
+    except Exception:
+        trades = []
+        st.warning("⚠️ שגיאה בטעינת עסקאות — מוצגים נתוני תיק בלבד.")
+
+    name       = portfolio.get("name") or f"תיק #{pid}"
+    initial    = float(portfolio.get("initial_balance") or 0)
+    current    = float(portfolio.get("current_balance") or 0)
+    _cpv       = portfolio.get("commission_per_leg")
+    commission = float(_cpv if _cpv is not None else 2.5)
+
+    # ── כותרת ───────────────────────────────────────────────────────
+    st.markdown(f"## 📁 {name}")
+    _disclaimer_banner()
+
+    # ── כרטיסי סיכום ────────────────────────────────────────────────
+    st.markdown("---")
+    _render_summary_cards(trades, initial, current, commission)
+
+    # ── עקומת שווי ──────────────────────────────────────────────────
+    st.markdown("### 📈 עקומת שווי התיק")
+    _render_equity_curve(trades, initial)
+
+    # ── טבלת עסקאות ─────────────────────────────────────────────────
+    st.markdown("### 📋 עסקאות")
+    _render_trade_table(sorted(trades, key=lambda t: str(t.get("opened_at") or ""), reverse=True))
+
+    # ── Track record ─────────────────────────────────────────────────
+    st.markdown("### 🏆 Track Record לפי אסטרטגיה")
+    _render_track_record(trades)
+
+    # ── Footer ───────────────────────────────────────────────────────
+    st.divider()
+    st.caption("⚠️ כלי מחקר בלבד — לא ייעוץ השקעות. כל הנתונים הם סימולציה היסטורית.")
+
+
+# ════════════════════════════════════════════════════════════════════════
+#  Portfolio card (list view)
+# ════════════════════════════════════════════════════════════════════════
+
+def _portfolio_card(p: dict) -> None:
+    """מציג כרטיס HTML של תיק + כפתור פתיחה."""
+    pid        = p["id"]
+    name       = p.get("name") or f"תיק #{pid}"
+    initial    = float(p.get("initial_balance") or 0)
+    current    = float(p.get("current_balance") or 0)
+    _cpv       = p.get("commission_per_leg")
+    commission = float(_cpv if _cpv is not None else 2.5)
+
+    pnl       = current - initial
+    pnl_pct   = (pnl / initial * 100) if initial > 0 else 0.0
+    pnl_color = _pnl_color(pnl)
+    sign      = _sign(pnl)
+
+    trades       = get_trades(portfolio_id=pid)
+    open_count   = sum(1 for t in trades if t.get("status") == "open")
+    closed_count = sum(1 for t in trades if t.get("status") == "closed")
+
+    st.markdown(
+        f"""
+        <div style='background:#1a2744;border:1px solid #2a3d6b;border-radius:12px;
+                    padding:18px;margin-bottom:8px;border-top:3px solid #c9a84c'>
+          <div style='font-size:1.1rem;font-weight:700;color:#e0e6f0;margin-bottom:12px'>
+            {name}
+          </div>
+          <div style='display:flex;justify-content:space-between;margin-bottom:6px'>
+            <span style='color:#7a9ab8;font-size:0.85rem'>שווי נוכחי</span>
+            <span style='color:#e0e6f0;font-weight:600'>₪{current:,.0f}</span>
+          </div>
+          <div style='display:flex;justify-content:space-between;margin-bottom:6px'>
+            <span style='color:#7a9ab8;font-size:0.85rem'>שווי התחלתי</span>
+            <span style='color:#c8d6e8'>₪{initial:,.0f}</span>
+          </div>
+          <div style='display:flex;justify-content:space-between;margin-bottom:6px'>
+            <span style='color:#7a9ab8;font-size:0.85rem'>תשואה</span>
+            <span style='color:{pnl_color};font-weight:700'>
+              {sign}₪{abs(pnl):,.0f}&nbsp;({sign}{pnl_pct:.1f}%)
+            </span>
+          </div>
+          <div style='display:flex;justify-content:space-between;margin-bottom:6px'>
+            <span style='color:#7a9ab8;font-size:0.85rem'>עסקאות פתוחות / סגורות</span>
+            <span style='color:#c8d6e8'>{open_count} / {closed_count}</span>
+          </div>
+          <div style='display:flex;justify-content:space-between;margin-bottom:14px'>
+            <span style='color:#7a9ab8;font-size:0.85rem'>עמלה לרגל</span>
+            <span style='color:#c9a84c'>₪{commission:.1f}</span>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    if st.button("פתח →", key=f"open_p_{pid}"):
+        st.session_state["selected_portfolio_id"] = pid
+        st.rerun()
+
+
+# ════════════════════════════════════════════════════════════════════════
+#  Page entry point
+# ════════════════════════════════════════════════════════════════════════
+
+st.title("📊 תיקי דמו")
+_disclaimer_banner()
+
 if not has_paper_db():
     st.warning("⚠️ DATABASE_URL לא מוגדר — paper trading אינו זמין בסביבה זו.")
     st.stop()
 
-# ─── Session state ───────────────────────────────────────────────────
 if "selected_portfolio_id" not in st.session_state:
     st.session_state["selected_portfolio_id"] = None
 
-# ─── תצוגת תיק נבחר (placeholder) ──────────────────────────────────
+# ─── תצוגה פנימית ───────────────────────────────────────────────────
 if st.session_state["selected_portfolio_id"] is not None:
-    pid = st.session_state["selected_portfolio_id"]
-    if st.button("← חזור לכל התיקים"):
-        st.session_state["selected_portfolio_id"] = None
-        st.rerun()
-    st.subheader(f"📁 תצוגה מפורטת — תיק #{pid}")
-    st.info("תצוגת עסקאות מפורטת תיבנה בשלב הבא.")
+    _render_portfolio_detail(st.session_state["selected_portfolio_id"])
     st.stop()
 
 # ─── טופס יצירת תיק ─────────────────────────────────────────────────
@@ -66,24 +436,21 @@ with st.expander("➕ צור תיק חדש", expanded=False):
                 "הון התחלתי (₪)", min_value=1_000.0, value=100_000.0, step=1_000.0
             )
         with col3:
-            p_comm = st.number_input(
-                "עמלה לכל רגל (₪)", min_value=0.0, value=2.5, step=0.5
-            )
-        submitted = st.form_submit_button("✅ צור תיק")
-        if submitted:
+            p_comm = st.number_input("עמלה לכל רגל (₪)", min_value=0.0, value=2.5, step=0.5)
+        if st.form_submit_button("✅ צור תיק"):
             if not p_name.strip():
                 st.error("נא להזין שם לתיק.")
             else:
-                result = create_portfolio(p_name.strip(), p_balance, p_comm)
-                if result:
+                res = create_portfolio(p_name.strip(), p_balance, p_comm)
+                if res:
                     st.success(
-                        f"✅ תיק «{result['name']}» נוצר (הון: ₪{p_balance:,.0f} | עמלה: ₪{p_comm:.1f}/רגל)"
+                        f"✅ תיק «{res['name']}» נוצר (הון: ₪{p_balance:,.0f} | עמלה: ₪{p_comm:.1f}/רגל)"
                     )
                     st.rerun()
                 else:
                     st.error("❌ שגיאה ביצירת התיק — בדוק חיבור DB.")
 
-# ─── טעינת תיקים ────────────────────────────────────────────────────
+# ─── רשת תיקים ──────────────────────────────────────────────────────
 portfolios = get_portfolios()
 
 if not portfolios:
@@ -92,66 +459,7 @@ if not portfolios:
 
 st.markdown(f"### תיקים פעילים ({len(portfolios)})")
 
-# ─── כרטיסי תיקים ───────────────────────────────────────────────────
-
 _COLS = 3
-
-
-def _portfolio_card(p: dict) -> None:
-    """מציג כרטיס HTML של תיק + כפתור פתיחה."""
-    pid        = p["id"]
-    name       = p.get("name") or f"תיק #{pid}"
-    initial    = float(p.get("initial_balance") or 0)
-    current    = float(p.get("current_balance") or 0)
-    commission = float(p.get("commission_per_leg") or 2.5)
-
-    pnl     = current - initial
-    pnl_pct = (pnl / initial * 100) if initial > 0 else 0.0
-    pnl_color = "#27ae60" if pnl >= 0 else "#e74c3c"
-    sign      = "+" if pnl >= 0 else ""
-
-    trades       = get_trades(portfolio_id=pid)
-    open_count   = sum(1 for t in trades if t.get("status") == "open")
-    closed_count = sum(1 for t in trades if t.get("status") == "closed")
-
-    st.markdown(
-        f"""
-        <div style='background:#1a2744; border:1px solid #2a3d6b; border-radius:12px;
-                    padding:18px; margin-bottom:8px; border-top:3px solid #c9a84c'>
-          <div style='font-size:1.1rem; font-weight:700; color:#e0e6f0; margin-bottom:12px'>
-            {name}
-          </div>
-          <div style='display:flex; justify-content:space-between; margin-bottom:6px'>
-            <span style='color:#7a9ab8; font-size:0.85rem'>שווי נוכחי</span>
-            <span style='color:#e0e6f0; font-weight:600'>₪{current:,.0f}</span>
-          </div>
-          <div style='display:flex; justify-content:space-between; margin-bottom:6px'>
-            <span style='color:#7a9ab8; font-size:0.85rem'>שווי התחלתי</span>
-            <span style='color:#c8d6e8'>₪{initial:,.0f}</span>
-          </div>
-          <div style='display:flex; justify-content:space-between; margin-bottom:6px'>
-            <span style='color:#7a9ab8; font-size:0.85rem'>תשואה</span>
-            <span style='color:{pnl_color}; font-weight:700'>
-              {sign}₪{pnl:,.0f}&nbsp;({sign}{pnl_pct:.1f}%)
-            </span>
-          </div>
-          <div style='display:flex; justify-content:space-between; margin-bottom:6px'>
-            <span style='color:#7a9ab8; font-size:0.85rem'>עסקאות פתוחות / סגורות</span>
-            <span style='color:#c8d6e8'>{open_count} / {closed_count}</span>
-          </div>
-          <div style='display:flex; justify-content:space-between; margin-bottom:14px'>
-            <span style='color:#7a9ab8; font-size:0.85rem'>עמלה לרגל</span>
-            <span style='color:#c9a84c'>₪{commission:.1f}</span>
-          </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-    if st.button("פתח →", key=f"open_p_{pid}"):
-        st.session_state["selected_portfolio_id"] = pid
-        st.rerun()
-
-
 for row_start in range(0, len(portfolios), _COLS):
     cols = st.columns(_COLS)
     for col_idx, col in enumerate(cols):
@@ -161,6 +469,5 @@ for row_start in range(0, len(portfolios), _COLS):
         with col:
             _portfolio_card(portfolios[idx])
 
-# ─── Disclaimer footer ───────────────────────────────────────────────
 st.divider()
 st.caption("⚠️ כלי מחקר בלבד — לא ייעוץ השקעות. כל הנתונים הם סימולציה היסטורית.")

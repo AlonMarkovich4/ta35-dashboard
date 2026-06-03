@@ -13,10 +13,13 @@ paper_trading.py — מנוע פתיחה וסגירה של עסקאות Paper Tr
 פונקציות ציבוריות:
   open_trades_for_expiry(expiry_date, chain, portfolios, engine=None)  → list[dict]
   close_trades_for_expiry(expiry_date, close_index, engine=None)       → list[dict]
+  build_equity_curve(trades, initial_balance)                          → list[dict]
+  build_track_record(trades)                                           → list[dict]
 """
 from __future__ import annotations
 
 import json
+from collections import defaultdict
 from datetime import date, datetime, timezone
 from typing import Optional
 
@@ -381,3 +384,77 @@ def close_trades_for_expiry(
             results.append({"trade_id": trade.get("id"), "status": "error"})
 
     return results
+
+
+# ─── Analytics helpers ─────────────────────────────────────────────────
+
+def _norm_ts(ts) -> datetime:
+    """ממיר ערך timestamp מכל פורמט ל-datetime."""
+    if isinstance(ts, datetime):
+        return ts
+    if isinstance(ts, str):
+        return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    if hasattr(ts, "to_pydatetime"):
+        return ts.to_pydatetime()
+    return datetime.fromtimestamp(float(ts), tz=timezone.utc)
+
+
+def build_equity_curve(
+    trades: list[dict],
+    initial_balance: float,
+) -> list[dict]:
+    """בונה עקומת שווי תיק מעסקאות סגורות.
+
+    מחזיר list[{"ts": datetime, "balance": float}] ממוין כרונולוגית.
+    כל נקודה מייצגת את היתרה המצטברת אחרי סגירת עסקה.
+    מחזיר [] אם אין עסקאות סגורות תקינות.
+    """
+    valid = [
+        t for t in trades
+        if t.get("status") == "closed"
+        and t.get("pnl") is not None
+        and t.get("closed_at") is not None
+    ]
+    if not valid:
+        return []
+
+    valid_sorted = sorted(valid, key=lambda t: _norm_ts(t["closed_at"]))
+
+    points: list[dict] = []
+    balance = initial_balance
+    for t in valid_sorted:
+        balance = round(balance + float(t["pnl"]), 2)
+        points.append({"ts": _norm_ts(t["closed_at"]), "balance": balance})
+
+    return points
+
+
+def build_track_record(trades: list[dict]) -> list[dict]:
+    """מרכז ביצועים לפי אסטרטגיה מעסקאות סגורות.
+
+    מחזיר list[dict] ממוין לפי total_pnl יורד, שדות:
+      strategy_name, total, wins, win_rate, total_pnl, avg_pnl
+    """
+    groups: dict[str, list] = defaultdict(list)
+    for t in trades:
+        if t.get("status") == "closed":
+            name = t.get("strategy_name") or "לא ידוע"
+            groups[name].append(t)
+
+    rows = []
+    for name, group in groups.items():
+        pnls = [float(t["pnl"]) for t in group if t.get("pnl") is not None]
+        n         = len(pnls)
+        wins      = sum(1 for p in pnls if p > 0)
+        total_pnl = round(sum(pnls), 2) if pnls else 0.0
+        avg_pnl   = round(total_pnl / n, 2) if n > 0 else 0.0
+        rows.append({
+            "strategy_name": name,
+            "total":         len(group),
+            "wins":          wins,
+            "win_rate":      round(wins / n, 4) if n > 0 else 0.0,
+            "total_pnl":     total_pnl,
+            "avg_pnl":       avg_pnl,
+        })
+
+    return sorted(rows, key=lambda r: r["total_pnl"], reverse=True)
