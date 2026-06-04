@@ -94,16 +94,24 @@ h1, h2, h3, p, label, .stMarkdown {
     color: var(--brand-blue);
 }
 
-/* ── Rounded metric / info cards ── */
+/* ── Metric cards — dark theme ── */
 [data-testid="stMetric"] {
-    background: #f0f4fa;
+    background: #1a2744;
     border-radius: 10px;
-    padding: 12px;
+    padding: 14px 12px;
     border-top: 3px solid var(--brand-gold);
 }
-[data-testid="stMetricValue"] {
-    color: var(--brand-blue);
+[data-testid="stMetricLabel"] > div {
+    color: #c8d6e8 !important;
+    font-size: 0.85rem;
+}
+[data-testid="stMetricValue"] > div {
+    color: #e0e6f0 !important;
     font-weight: 700;
+}
+/* delta: שמור על ירוק/אדום של Streamlit — רק הבטח קריאות */
+[data-testid="stMetricDelta"] > div {
+    font-weight: 600;
 }
 
 /* ── Expanders ── */
