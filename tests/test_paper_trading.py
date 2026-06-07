@@ -26,6 +26,7 @@ from paper_trading import (
     build_equity_curve,
     build_track_record,
     close_trades_for_expiry,
+    compute_balance,
     open_trades_for_expiry,
 )
 
@@ -285,31 +286,34 @@ class TestOpenTradesNoEngine:
 
 
 class TestOpenTradesBalanceSign:
-    """בדיקת הכלל המרכזי: קנייה מורידה יתרה, Iron Condor מעלה."""
+    """בדיקת הכלל המרכזי: קנייה מורידה יתרה, Iron Condor מעלה.
+
+    בארכיטקטורה החדשה אין עדכון balance ידני — היתרה נגזרת מהעסקאות.
+    לכן הבדיקות בודקות את סימן ה-entry_cost שנכתב, ואת ההשפעה דרך compute_balance.
+    """
 
     def _run_all(self, initial_balance: float = 100_000.0):
-        """מריץ פתיחת 6 עסקאות; מחזיר (entry_costs_by_sid, balance_sequence)."""
+        """מריץ פתיחת 6 עסקאות; מחזיר (entry_costs_by_sid, inserted_trades)."""
         portfolio = _make_portfolio(balance=initial_balance)
         entry_costs: dict[int, float] = {}
-        balance_seq: list[float] = []
+        inserted: list[dict] = []
 
         def fake_insert(trade, engine=None):
             sid = trade["strategy_id"]
             entry_costs[sid] = trade["entry_cost"]
-            return {"id": 10 + sid, "portfolio_id": 1, "strategy_id": sid,
-                    "status": "open", "entry_cost": trade["entry_cost"], "legs_json": []}
-
-        def fake_update(pid, bal, engine=None):
-            balance_seq.append(bal)
-            return True
+            row = {"id": 10 + sid, "portfolio_id": 1, "strategy_id": sid,
+                   "status": "open", "entry_cost": trade["entry_cost"],
+                   "entry_commission": trade.get("entry_commission", 0.0),
+                   "legs_json": []}
+            inserted.append(row)
+            return row
 
         with patch("paper_trading.get_trades", return_value=[]), \
              patch("paper_trading.insert_trade", side_effect=fake_insert), \
-             patch("paper_trading.update_balance", side_effect=fake_update), \
              patch("paper_trading._build_snapshot", return_value={}):
             open_trades_for_expiry(_EXPIRY, _CHAIN, [portfolio], engine=MagicMock())
 
-        return entry_costs, balance_seq
+        return entry_costs, inserted
 
     def test_buy_strategy_entry_cost_positive(self):
         """Bull Call Spread — entry_cost > 0 (משלמים פרמיה)."""
@@ -323,18 +327,24 @@ class TestOpenTradesBalanceSign:
         assert 2 in costs, "אסטרטגיה 2 לא הוכנסה"
         assert costs[2] < 0, f"Iron Condor entry_cost צריך להיות שלילי, קיבל {costs[2]}"
 
-    def test_iron_condor_balance_step_increases(self):
-        """אחרי כניסת Iron Condor — היתרה עולה (entry_cost שלילי מנוכה)."""
-        costs, balance_seq = self._run_all()
-        if 2 not in costs or not balance_seq:
+    def test_iron_condor_raises_derived_balance(self):
+        """Iron Condor (entry_cost שלילי) → היתרה הנגזרת *עולה* מעל ההתחלתית."""
+        costs, _ = self._run_all()
+        if 2 not in costs:
             pytest.skip("Iron Condor לא הוכנס")
-        # מצא את מיקום ה-update עבור אסטרטגיה 2 — היא השנייה בסדר
-        # Balance לפני = 100000 - sum(costs[1..n] for n<2)
-        prev = 100_000.0
-        if 1 in costs:
-            prev -= costs[1]
-        expected_after_ic = prev - costs[2]  # costs[2] < 0 → expected > prev
-        assert expected_after_ic > prev
+        portfolio = {"initial_balance": 100_000.0}
+        # עסקת IC בודדת פתוחה, ללא עמלה → balance = 100000 - entry_cost (שלילי) > 100000
+        ic_trade = {"status": "open", "entry_cost": costs[2], "entry_commission": 0.0}
+        assert compute_balance(portfolio, [ic_trade]) > 100_000.0
+
+    def test_buy_strategy_lowers_derived_balance(self):
+        """Bull Call Spread (entry_cost חיובי) → היתרה הנגזרת *יורדת*."""
+        costs, _ = self._run_all()
+        if 1 not in costs:
+            pytest.skip("BCS לא הוכנס")
+        portfolio = {"initial_balance": 100_000.0}
+        bcs_trade = {"status": "open", "entry_cost": costs[1], "entry_commission": 0.0}
+        assert compute_balance(portfolio, [bcs_trade]) < 100_000.0
 
     def test_straddle_entry_cost_positive(self):
         """Long Straddle — entry_cost > 0."""
@@ -357,7 +367,6 @@ class TestOpenTradesDuplicate:
 
         with patch("paper_trading.get_trades", return_value=existing), \
              patch("paper_trading.insert_trade") as mock_insert, \
-             patch("paper_trading.update_balance"), \
              patch("paper_trading._build_snapshot", return_value={}):
 
             results = open_trades_for_expiry(_EXPIRY, _CHAIN, [portfolio], engine=MagicMock())
@@ -382,7 +391,6 @@ class TestOpenTradesDuplicate:
 
         with patch("paper_trading.get_trades", return_value=existing), \
              patch("paper_trading.insert_trade", side_effect=fake_insert), \
-             patch("paper_trading.update_balance", return_value=True), \
              patch("paper_trading._build_snapshot", return_value={}):
 
             open_trades_for_expiry(_EXPIRY, _CHAIN, [portfolio], engine=MagicMock())
@@ -407,7 +415,6 @@ class TestOpenTradesZeroCost:
         with patch("paper_trading.get_trades", return_value=[]), \
              patch("paper_trading.strategy_payoff_params", return_value={"cost_pts": 0.0}), \
              patch("paper_trading.insert_trade", side_effect=fake_insert), \
-             patch("paper_trading.update_balance", return_value=True), \
              patch("paper_trading._build_snapshot", return_value={}):
 
             results = open_trades_for_expiry(_EXPIRY, _CHAIN, [portfolio], engine=MagicMock())
@@ -415,19 +422,14 @@ class TestOpenTradesZeroCost:
         assert all(s == "skipped" for s in inserted_statuses)
         assert all(r["status"] == "skipped" for r in results)
 
-    def test_zero_cost_balance_not_updated(self):
-        """כאשר cost=0 → update_balance לא נקרא."""
-        portfolio = _make_portfolio()
-
-        with patch("paper_trading.get_trades", return_value=[]), \
-             patch("paper_trading.strategy_payoff_params", return_value={"cost_pts": 0.0}), \
-             patch("paper_trading.insert_trade", return_value={"id": 1, "status": "skipped"}), \
-             patch("paper_trading.update_balance") as mock_upd, \
-             patch("paper_trading._build_snapshot", return_value={}):
-
-            open_trades_for_expiry(_EXPIRY, _CHAIN, [portfolio], engine=MagicMock())
-
-        mock_upd.assert_not_called()
+    def test_skipped_trades_do_not_affect_balance(self):
+        """עסקאות skipped (cost=0) אינן משפיעות על היתרה הנגזרת."""
+        portfolio = {"initial_balance": 100_000.0}
+        trades = [
+            {"status": "skipped", "entry_cost": 0.0, "entry_commission": 0.0},
+            {"status": "skipped", "entry_cost": 0.0, "entry_commission": 0.0},
+        ]
+        assert compute_balance(portfolio, trades) == pytest.approx(100_000.0)
 
 
 class TestOpenTradesDbError:
@@ -437,14 +439,12 @@ class TestOpenTradesDbError:
 
         with patch("paper_trading.get_trades", return_value=[]), \
              patch("paper_trading.insert_trade", return_value=None), \
-             patch("paper_trading.update_balance") as mock_upd, \
              patch("paper_trading._build_snapshot", return_value={}):
 
             results = open_trades_for_expiry(_EXPIRY, _CHAIN, [portfolio], engine=MagicMock())
 
         errors = [r for r in results if r.get("status") == "db_error"]
         assert len(errors) > 0
-        mock_upd.assert_not_called()
 
     def test_one_strategy_exception_does_not_stop_others(self):
         """שגיאה באסטרטגיה 1 לא מפסיקה את 2–6."""
@@ -462,7 +462,6 @@ class TestOpenTradesDbError:
              patch("paper_trading.insert_trade", return_value={"id": 1, "status": "open",
                                                                "portfolio_id": 1, "strategy_id": 1,
                                                                "entry_cost": 500.0, "legs_json": []}), \
-             patch("paper_trading.update_balance", return_value=True), \
              patch("paper_trading._build_snapshot", return_value={}):
 
             results = open_trades_for_expiry(_EXPIRY, _CHAIN, [portfolio], engine=MagicMock())
@@ -487,13 +486,113 @@ class TestOpenTradesMultiPortfolio:
 
         with patch("paper_trading.get_trades", return_value=[]), \
              patch("paper_trading.insert_trade", side_effect=fake_insert), \
-             patch("paper_trading.update_balance", return_value=True), \
              patch("paper_trading._build_snapshot", return_value={}):
 
             open_trades_for_expiry(_EXPIRY, _CHAIN, portfolios, engine=MagicMock())
 
         assert 1 in portfolio_ids_inserted
         assert 2 in portfolio_ids_inserted
+
+
+# ─── compute_balance — מקור אמת אחד ליתרה ──────────────────────────────
+
+class TestComputeBalance:
+    """היתרה נגזרת מהעסקאות בלבד; חוסנת לכל סוגי הסטטוסים."""
+
+    _PF = {"id": 1, "initial_balance": 100_000.0}
+
+    def test_no_trades_returns_initial(self):
+        assert compute_balance(self._PF, []) == pytest.approx(100_000.0)
+
+    def test_none_trades_returns_initial(self):
+        assert compute_balance(self._PF, None) == pytest.approx(100_000.0)
+
+    def test_empty_portfolio_returns_zero(self):
+        assert compute_balance({}, []) == pytest.approx(0.0)
+        assert compute_balance(None, []) == pytest.approx(0.0)
+
+    def test_only_open_buy_lowers_balance(self):
+        """עסקת קנייה פתוחה: balance = initial − (entry_cost + commission)."""
+        trades = [{"status": "open", "entry_cost": 500.0, "entry_commission": 5.0}]
+        assert compute_balance(self._PF, trades) == pytest.approx(100_000.0 - 505.0)
+
+    def test_only_open_iron_condor_raises_balance(self):
+        """Iron Condor פתוח (entry_cost שלילי = credit): balance עולה.
+        balance = 100000 − (−685 + 10) = 100000 + 675 = 100675."""
+        trades = [{"status": "open", "entry_cost": -685.0, "entry_commission": 10.0}]
+        assert compute_balance(self._PF, trades) == pytest.approx(100_675.0)
+
+    def test_only_closed_uses_pnl(self):
+        """עסקה סגורה: נספר ה-pnl בלבד (כולל כבר עלויות+עמלות)."""
+        trades = [{"status": "closed", "pnl": 1_200.0,
+                   "entry_cost": 500.0, "entry_commission": 5.0}]
+        # רק pnl נספר — לא מנכים שוב את entry_cost (אין כפילות)
+        assert compute_balance(self._PF, trades) == pytest.approx(101_200.0)
+
+    def test_closed_loss_decreases_balance(self):
+        trades = [{"status": "closed", "pnl": -1_500.0}]
+        assert compute_balance(self._PF, trades) == pytest.approx(98_500.0)
+
+    def test_mixed_open_and_closed(self):
+        """מעורב: open מנכה עלות+עמלה, closed מוסיף pnl."""
+        trades = [
+            {"status": "open",   "entry_cost": 500.0,  "entry_commission": 5.0},   # −505
+            {"status": "open",   "entry_cost": -685.0, "entry_commission": 10.0},  # +675
+            {"status": "closed", "pnl": 800.0},                                    # +800
+            {"status": "closed", "pnl": -300.0},                                   # −300
+        ]
+        # 100000 − 505 + 675 + 800 − 300 = 100670
+        assert compute_balance(self._PF, trades) == pytest.approx(100_670.0)
+
+    def test_skipped_trades_ignored(self):
+        trades = [
+            {"status": "skipped", "entry_cost": 0.0,  "entry_commission": 0.0},
+            {"status": "open",    "entry_cost": 200.0, "entry_commission": 2.5},
+        ]
+        assert compute_balance(self._PF, trades) == pytest.approx(100_000.0 - 202.5)
+
+    def test_db_error_and_error_statuses_ignored(self):
+        """סטטוסים שאינם open/closed (db_error/error) אינם משפיעים."""
+        trades = [
+            {"status": "db_error", "entry_cost": 9_999.0, "entry_commission": 99.0},
+            {"status": "error",    "entry_cost": 9_999.0, "entry_commission": 99.0},
+        ]
+        assert compute_balance(self._PF, trades) == pytest.approx(100_000.0)
+
+    def test_none_values_treated_as_zero(self):
+        trades = [
+            {"status": "open",   "entry_cost": None, "entry_commission": None},
+            {"status": "closed", "pnl": None},
+        ]
+        assert compute_balance(self._PF, trades) == pytest.approx(100_000.0)
+
+    def test_regression_lost_balance_update_12_06(self):
+        """שחזור הבאג של 12/06: בעבר עסקה נכתבה אך עדכון ה-balance 'אבד'
+        (update_balance נכשל בשקט) → היתרה נופחה ב-4,813₪.
+
+        בארכיטקטורה החדשה אין שלב עדכון balance — היתרה נגזרת מהעסקאות,
+        לכן גם אם כתיבה כלשהי הייתה נכשלת, היתרה המחושבת תמיד נכונה.
+
+        הנתונים האמיתיים של 'תיק ראשי' (5 עסקאות open):
+          BCS        entry_cost= 731  comm= 5
+          IC         entry_cost=-685  comm=10
+          CallBfly   entry_cost= 275  comm= 7.5
+          PutBfly    entry_cost= 274  comm= 7.5
+          Straddle   entry_cost=4808  comm= 5
+        Σ entry_cost = 5403 ; Σ comm = 35 ; סה"כ צריכה = 5438
+        balance נכון = 100000 − 5438 = 94562  (לא 99375 שנרשם בעבר!)
+        """
+        trades = [
+            {"status": "open", "strategy_name": "Bull Call Spread",   "entry_cost":  731.0, "entry_commission":  5.0},
+            {"status": "open", "strategy_name": "Short Iron Condor",  "entry_cost": -685.0, "entry_commission": 10.0},
+            {"status": "open", "strategy_name": "Long Call Butterfly","entry_cost":  275.0, "entry_commission":  7.5},
+            {"status": "open", "strategy_name": "Long Put Butterfly", "entry_cost":  274.0, "entry_commission":  7.5},
+            {"status": "open", "strategy_name": "Long Straddle",      "entry_cost": 4808.0, "entry_commission":  5.0},
+        ]
+        balance = compute_balance(self._PF, trades)
+        assert balance == pytest.approx(94_562.0), (
+            f"היתרה הנגזרת חייבת להיות 94,562₪ (לא 99,375 השבור), קיבל {balance:,.2f}"
+        )
 
 
 # ─── close_trades_for_expiry ──────────────────────────────────────────
@@ -535,22 +634,15 @@ class TestClosePnlCalculation:
     """בדיקות חישוב PnL נכון לשני סוגי עסקאות."""
 
     def _run_close(self, trade: dict, close_index: float, portfolio_balance: float = 90_000.0):
-        captured = {}
-
-        def fake_update(pid, bal, engine=None):
-            captured["new_balance"] = bal
-            return True
-
         portfolio = _make_portfolio(portfolio_id=trade["portfolio_id"], balance=portfolio_balance)
 
         with patch("paper_trading.get_open_trades_for_expiry", return_value=[trade]), \
              patch("paper_trading.close_trade", return_value=True), \
-             patch("paper_trading.get_portfolio", return_value=portfolio), \
-             patch("paper_trading.update_balance", side_effect=fake_update):
+             patch("paper_trading.get_portfolio", return_value=portfolio):
 
             results = close_trades_for_expiry(_EXPIRY, close_index, engine=MagicMock())
 
-        return results, captured
+        return results, {}
 
     def test_straddle_profitable_upward_move(self):
         """Straddle (קנה Call + Put @ 4300), עלות 5000₪, נעילה 4500.
@@ -634,44 +726,44 @@ class TestClosePnlCalculation:
         assert results[0]["pnl_pct"] is None
 
 
-class TestCloseBalanceUpdate:
-    def test_buy_strategy_balance_updated_with_payoff(self):
-        """יתרה לאחר סגירה: balance + payoff_at_close."""
+class TestCloseDerivedBalance:
+    """לאחר סגירה היתרה נגזרת מה-pnl (compute_balance) — אין עדכון balance ישיר."""
+
+    def test_buy_strategy_balance_reflects_pnl_after_close(self):
+        """יתרה אחרי סגירה = initial + pnl של העסקה הסגורה (דרך compute_balance)."""
         legs = [
             {"action": "קנה", "type": "Call", "strike": 4300.0, "qty": 1},
             {"action": "קנה", "type": "Put",  "strike": 4300.0, "qty": 1},
         ]
         trade = _make_open_trade(entry_cost=5000.0, legs=legs)
-        initial_balance = 95_000.0
-
-        captured = {}
-
-        def fake_update(pid, bal, engine=None):
-            captured["new_balance"] = bal
-            return True
+        initial_balance = 100_000.0
 
         with patch("paper_trading.get_open_trades_for_expiry", return_value=[trade]), \
              patch("paper_trading.close_trade", return_value=True), \
-             patch("paper_trading.get_portfolio", return_value=_make_portfolio(balance=initial_balance)), \
-             patch("paper_trading.update_balance", side_effect=fake_update):
+             patch("paper_trading.get_portfolio", return_value=_make_portfolio(balance=initial_balance)):
 
-            close_trades_for_expiry(_EXPIRY, 4500.0, engine=MagicMock())
+            results = close_trades_for_expiry(_EXPIRY, 4500.0, engine=MagicMock())
 
-        payoff = (4500.0 - 4300.0) * MULTIPLIER  # 10_000
-        assert captured["new_balance"] == pytest.approx(initial_balance + payoff)
+        # payoff = (4500-4300)*50 = 10000; pnl = 10000 - 5000 (entry) - 0 - 0 = 5000
+        r = results[0]
+        assert r["pnl"] == pytest.approx(5_000.0)
 
-    def test_balance_not_updated_when_close_trade_fails(self):
-        """אם close_trade נכשל → update_balance לא נקרא."""
+        # היתרה הנגזרת אחרי הסגירה (אותה עסקה, עכשיו closed עם ה-pnl)
+        closed = {"status": "closed", "pnl": r["pnl"]}
+        balance = compute_balance({"initial_balance": initial_balance}, [closed])
+        assert balance == pytest.approx(initial_balance + 5_000.0)
+
+    def test_failed_close_marked_error(self):
+        """אם close_trade נכשל → העסקה מסומנת 'error' (נשארת פתוחה בפועל)."""
         trade = _make_open_trade()
 
         with patch("paper_trading.get_open_trades_for_expiry", return_value=[trade]), \
              patch("paper_trading.close_trade", return_value=False), \
-             patch("paper_trading.get_portfolio", return_value=_make_portfolio()), \
-             patch("paper_trading.update_balance") as mock_upd:
+             patch("paper_trading.get_portfolio", return_value=_make_portfolio()):
 
-            close_trades_for_expiry(_EXPIRY, 4300.0, engine=MagicMock())
+            results = close_trades_for_expiry(_EXPIRY, 4300.0, engine=MagicMock())
 
-        mock_upd.assert_not_called()
+        assert results[0]["status"] == "error"
 
     def test_error_in_one_trade_does_not_stop_others(self):
         """שגיאה בעסקה 1 לא עוצרת עסקה 2."""
@@ -688,8 +780,7 @@ class TestCloseBalanceUpdate:
 
         with patch("paper_trading.get_open_trades_for_expiry", return_value=[trade1, trade2]), \
              patch("paper_trading.close_trade", side_effect=fake_close), \
-             patch("paper_trading.get_portfolio", return_value=_make_portfolio()), \
-             patch("paper_trading.update_balance", return_value=True):
+             patch("paper_trading.get_portfolio", return_value=_make_portfolio()):
 
             results = close_trades_for_expiry(_EXPIRY, 4300.0, engine=MagicMock())
 
@@ -766,17 +857,11 @@ class TestIronCondorFullCycle:
         trade = _make_open_trade(
             strategy_id=2, entry_cost=entry_cost, legs=legs
         )
-        captured = {}
-
-        def fake_update(pid, bal, engine=None):
-            captured["final_balance"] = bal
-            return True
 
         with patch("paper_trading.get_open_trades_for_expiry", return_value=[trade]), \
              patch("paper_trading.close_trade", return_value=True), \
              patch("paper_trading.get_portfolio",
-                   return_value=_make_portfolio(balance=balance_after_open)), \
-             patch("paper_trading.update_balance", side_effect=fake_update):
+                   return_value=_make_portfolio(balance=balance_after_open)):
 
             results = close_trades_for_expiry(_EXPIRY, close_index, engine=MagicMock())
 
@@ -785,8 +870,12 @@ class TestIronCondorFullCycle:
         assert r["status"] == "closed"
         assert r["payoff"] == pytest.approx(payoff)
         assert r["pnl"]    < 0,   f"pnl מ-close_trades ({r['pnl']:+.0f}₪) חייב להיות שלילי"
-        assert captured.get("final_balance", initial_balance) < initial_balance, \
-            f"יתרה סופית ({captured.get('final_balance'):,.0f}₪) חייבת להיות מתחת ל-100,000₪"
+
+        # ── היתרה הנגזרת אחרי הסגירה — חייבת להיות מתחת ל-100,000 ──
+        closed_trade  = {"status": "closed", "pnl": r["pnl"]}
+        final_balance = compute_balance({"initial_balance": initial_balance}, [closed_trade])
+        assert final_balance < initial_balance, \
+            f"יתרה סופית נגזרת ({final_balance:,.0f}₪) חייבת להיות מתחת ל-100,000₪"
 
 
 # ─── _norm_ts ──────────────────────────────────────────────────────────

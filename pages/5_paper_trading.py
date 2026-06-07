@@ -23,6 +23,7 @@ from paper_db import (
 from paper_trading import (
     build_equity_curve,
     build_track_record,
+    compute_balance,
     open_trades_for_expiry,
 )
 from supabase_loader import get_available_expiries, get_latest_option_chain
@@ -322,7 +323,8 @@ def _render_portfolio_detail(pid: int) -> None:
 
     name       = portfolio.get("name") or f"תיק #{pid}"
     initial    = float(portfolio.get("initial_balance") or 0)
-    current    = float(portfolio.get("current_balance") or 0)
+    # היתרה נגזרת מהעסקאות — מקור אמת אחד (לא נקראת מ-current_balance שב-DB).
+    current    = compute_balance(portfolio, trades)
     _cpv       = portfolio.get("commission_per_leg")
     commission = float(_cpv if _cpv is not None else 2.5)
 
@@ -360,18 +362,19 @@ def _portfolio_card(p: dict) -> None:
     pid        = p["id"]
     name       = p.get("name") or f"תיק #{pid}"
     initial    = float(p.get("initial_balance") or 0)
-    current    = float(p.get("current_balance") or 0)
     _cpv       = p.get("commission_per_leg")
     commission = float(_cpv if _cpv is not None else 2.5)
-
-    pnl       = current - initial
-    pnl_pct   = (pnl / initial * 100) if initial > 0 else 0.0
-    pnl_color = _pnl_color(pnl)
-    sign      = _sign(pnl)
 
     trades       = get_trades(portfolio_id=pid)
     open_count   = sum(1 for t in trades if t.get("status") == "open")
     closed_count = sum(1 for t in trades if t.get("status") == "closed")
+
+    # היתרה נגזרת מהעסקאות — מקור אמת אחד (לא נקראת מ-current_balance שב-DB).
+    current   = compute_balance(p, trades)
+    pnl       = current - initial
+    pnl_pct   = (pnl / initial * 100) if initial > 0 else 0.0
+    pnl_color = _pnl_color(pnl)
+    sign      = _sign(pnl)
 
     st.markdown(
         f"""

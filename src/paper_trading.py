@@ -6,11 +6,18 @@ paper_trading.py — מנוע פתיחה וסגירה של עסקאות Paper Tr
   entry_commission  = num_legs × commission_per_leg (מהתיק)
   exit_commission   = num_legs × commission_per_leg (בסגירה)
 
-  open:   new_balance = balance - entry_cost - entry_commission
-  close:  new_balance = balance + payoff_at_close - exit_commission
   pnl     = payoff_at_close - entry_cost - entry_commission - exit_commission
 
+מקור אמת אחד ליתרה (single source of truth):
+  היתרה אינה נשמרת כשדה נפרד אלא *נגזרת תמיד* מהעסקאות דרך compute_balance():
+    balance = initial_balance
+              − Σ(entry_cost + entry_commission)  של עסקאות פתוחות
+              + Σ(pnl)                            של עסקאות סגורות
+  עסקה סגורה: ה-pnl כבר כולל את כל העלויות והעמלות → נספר רק ה-pnl (ללא כפילות).
+  כך אי-אפשר שהיתרה תצא מסנכרון אם כתיבה כלשהי תיכשל.
+
 פונקציות ציבוריות:
+  compute_balance(portfolio, trades)                                   → float
   open_trades_for_expiry(expiry_date, chain, portfolios, engine=None)  → list[dict]
   close_trades_for_expiry(expiry_date, close_index, engine=None)       → list[dict]
   build_equity_curve(trades, initial_balance)                          → list[dict]
@@ -39,7 +46,6 @@ from paper_db import (
     get_portfolio,
     get_trades,
     insert_trade,
-    update_balance,
 )
 
 
@@ -201,6 +207,32 @@ def _insert_skipped(
 
 # ─── Public API ────────────────────────────────────────────────────────
 
+def compute_balance(portfolio: dict, trades: list[dict]) -> float:
+    """מחשב את יתרת התיק כנגזרת מהעסקאות — מקור האמת היחיד ליתרה.
+
+    הנוסחה:
+        balance = initial_balance
+                  − Σ(entry_cost + entry_commission)  של עסקאות פתוחות
+                  + Σ(pnl)                            של עסקאות סגורות
+
+    עסקה סגורה: ה-pnl כבר מגלם את כל העלויות והעמלות (כניסה + יציאה),
+    לכן עבורה נספר ה-pnl בלבד — לא מנכים שוב את עלות הכניסה (אין כפילות).
+    עסקאות בסטטוס אחר (skipped/db_error/error) אינן משפיעות על היתרה.
+    ערכי None מטופלים כ-0. מחזיר 0.0 אם portfolio ריק.
+    """
+    initial = float((portfolio or {}).get("initial_balance") or 0.0)
+    balance = initial
+    for t in (trades or []):
+        status = t.get("status")
+        if status == "open":
+            entry_cost       = float(t.get("entry_cost") or 0.0)
+            entry_commission = float(t.get("entry_commission") or 0.0)
+            balance -= entry_cost + entry_commission
+        elif status == "closed":
+            balance += float(t.get("pnl") or 0.0)
+    return round(balance, 4)
+
+
 def open_trades_for_expiry(
     expiry_date,
     chain: dict,
@@ -229,7 +261,6 @@ def open_trades_for_expiry(
 
     for portfolio in portfolios:
         portfolio_id       = portfolio["id"]
-        current_balance    = float(portfolio.get("current_balance", 0.0))
         _cpv = portfolio.get("commission_per_leg")
         commission_per_leg = float(_cpv if _cpv is not None else 2.5)
 
@@ -307,12 +338,8 @@ def open_trades_for_expiry(
                     })
                     continue
 
-                # ─── עדכון יתרה (פרמיה + עמלת כניסה) ───────────────
-                new_balance = round(current_balance - entry_cost - entry_commission, 4)
-                update_balance(portfolio_id, new_balance, engine=engine)
-                current_balance = new_balance
-
-                results.append({**inserted, "new_balance": new_balance})
+                # היתרה אינה מעודכנת כאן — היא נגזרת מהעסקאות (compute_balance).
+                results.append(inserted)
 
             except Exception:
                 results.append({
@@ -331,7 +358,8 @@ def close_trades_for_expiry(
 ) -> list[dict]:
     """סוגרת את כל העסקאות הפתוחות לפקיעה לפי מחיר הנעילה.
 
-    מחשב payoff גולמי מהרגליים, PnL, ומעדכן יתרת תיק.
+    מחשב payoff גולמי מהרגליים ו-PnL, ושומר אותם בעסקה (status='closed').
+    היתרה אינה מעודכנת ישירות — היא נגזרת מה-pnl דרך compute_balance.
     """
     open_trades = get_open_trades_for_expiry(expiry_date, engine=engine)
     results: list[dict] = []
@@ -365,9 +393,8 @@ def close_trades_for_expiry(
                 exit_commission, engine=engine,
             )
 
-            if ok and portfolio:
-                new_bal = round(float(portfolio["current_balance"]) + payoff - exit_commission, 4)
-                update_balance(portfolio_id, new_bal, engine=engine)
+            # היתרה אינה מעודכנת כאן — היא נגזרת מהעסקאות (compute_balance).
+            # ה-pnl נשמר בעסקה (close_trade) ומשם compute_balance גוזר את היתרה.
 
             results.append({
                 "trade_id":       trade_id,
