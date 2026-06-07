@@ -2,7 +2,7 @@
 דף Paper Trading — ניהול תיקי דמו
 """
 import sys
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -20,7 +20,12 @@ from paper_db import (
     get_trades,
     has_paper_db,
 )
-from paper_trading import build_equity_curve, build_track_record
+from paper_trading import (
+    build_equity_curve,
+    build_track_record,
+    open_trades_for_expiry,
+)
+from supabase_loader import get_available_expiries, get_latest_option_chain
 from styles import inject_global_css
 
 # ─── Plotly dark theme constants (זהה ל-payoff.py) ──────────────────
@@ -407,6 +412,163 @@ def _portfolio_card(p: dict) -> None:
 
 
 # ════════════════════════════════════════════════════════════════════════
+#  Manual actions (testing) — open trades for current expiries
+# ════════════════════════════════════════════════════════════════════════
+
+_STATUS_SUMMARY_HE = {
+    "open":      "נפתחו",
+    "skipped":   "דולגו — אין נתוני מחיר",
+    "duplicate": "כפילות — כבר קיימות",
+    "error":     "שגיאות",
+    "db_error":  "שגיאות DB",
+}
+
+
+def _run_manual_open(expiries: list[str], portfolios: list[dict]) -> dict:
+    """מריץ פתיחת עסקאות לכל הפקיעות הזמינות בכל התיקים הפעילים.
+
+    לכל פקיעה: טוען שרשרת (get_latest_option_chain) וקורא ל-open_trades_for_expiry.
+    אם טעינת שרשרת או הפתיחה נכשלות לפקיעה — מדווח ומדלג בלי לקרוס.
+    מחזיר dict סיכום מובנה לשמירה ב-session_state ולתצוגה אחרי rerun.
+    """
+    pid_to_name = {p["id"]: (p.get("name") or f"תיק #{p['id']}") for p in portfolios}
+    summary: dict = {
+        "ran_at":   datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
+        "expiries": [],
+    }
+
+    for expiry in expiries:
+        exp_rec: dict = {
+            "expiry":       expiry,
+            "chain_error":  None,
+            "counts":       {},
+            "by_portfolio": {},
+        }
+
+        # ── טעינת שרשרת — כישלון מדווח ומדלג ──────────────────────────
+        try:
+            chain = get_latest_option_chain(expiry)
+        except Exception as exc:  # noqa: BLE001
+            exp_rec["chain_error"] = f"חריגה בטעינת השרשרת: {exc}"
+            summary["expiries"].append(exp_rec)
+            continue
+
+        if not chain:
+            exp_rec["chain_error"] = (
+                "לא נטענה שרשרת אופציות (נתונים חסרים או לא תקינים)."
+            )
+            summary["expiries"].append(exp_rec)
+            continue
+
+        # ── פתיחת עסקאות — engine=None ⇐ ייווצר מ-DATABASE_URL ─────────
+        try:
+            results = open_trades_for_expiry(expiry, chain, portfolios)
+        except Exception as exc:  # noqa: BLE001
+            exp_rec["chain_error"] = f"חריגה בפתיחת עסקאות: {exc}"
+            summary["expiries"].append(exp_rec)
+            continue
+
+        # ── ספירת תוצאות לפי סטטוס + פירוט לכל תיק ─────────────────────
+        counts: dict = {}
+        by_pf: dict = {}
+        for r in results:
+            status = r.get("status", "error")
+            pid    = r.get("portfolio_id")
+            counts[status] = counts.get(status, 0) + 1
+            if pid is not None:
+                name = pid_to_name.get(pid, f"תיק #{pid}")
+                by_pf.setdefault(pid, {"name": name, "counts": {}})
+                by_pf[pid]["counts"][status] = by_pf[pid]["counts"].get(status, 0) + 1
+
+        exp_rec["counts"]       = counts
+        exp_rec["by_portfolio"] = by_pf
+        summary["expiries"].append(exp_rec)
+
+    return summary
+
+
+def _render_manual_summary(summary: dict) -> None:
+    """מציג סיכום ברור של ההרצה הידנית האחרונה (success/warning לפי התוצאה)."""
+    st.markdown(f"#### 📋 תוצאות ההרצה האחרונה — {summary.get('ran_at', '')}")
+
+    for exp_rec in summary.get("expiries", []):
+        expiry = exp_rec["expiry"]
+
+        if exp_rec.get("chain_error"):
+            st.warning(f"⚠️ פקיעה {expiry}: {exp_rec['chain_error']} — דולגה.")
+            continue
+
+        counts = exp_rec.get("counts", {})
+        opened = counts.get("open", 0)
+        total  = sum(counts.values())
+        parts  = [
+            f"{_STATUS_SUMMARY_HE.get(k, k)}: {v}"
+            for k, v in counts.items() if v
+        ]
+        line = f"פקיעה {expiry} — {total} ניסיונות | " + " · ".join(parts)
+
+        if opened > 0:
+            st.success("✅ " + line)
+        else:
+            st.warning("⚠️ " + line)
+
+        # ── פירוט לכל תיק ──────────────────────────────────────────────
+        for info in exp_rec.get("by_portfolio", {}).values():
+            pf_parts = [
+                f"{_STATUS_SUMMARY_HE.get(k, k)}: {v}"
+                for k, v in info["counts"].items() if v
+            ]
+            st.caption(f"• {info['name']}: " + " · ".join(pf_parts))
+
+
+def _render_manual_actions(portfolios: list[dict]) -> None:
+    """אזור פעולות ידניות לבדיקה — פתיחת עסקאות לפקיעות הזמינות.
+
+    אינו פותח עסקאות אוטומטית — דורש לחיצה מפורשת על כפתור האישור.
+    """
+    st.markdown("### 🔧 פעולות ידניות (בדיקה)")
+
+    # ── תוצאות הרצה קודמת (נשמרות מעבר ל-rerun) ───────────────────────
+    last_summary = st.session_state.get("manual_open_summary")
+    if last_summary:
+        _render_manual_summary(last_summary)
+        if st.button("✖️ נקה תוצאות", key="clear_manual_summary"):
+            st.session_state["manual_open_summary"] = None
+            st.rerun()
+
+    with st.expander("📂 פתח עסקאות לפקיעות השבוע", expanded=False):
+        st.info(
+            "פעולה זו פותחת עסקאות וירטואליות בפועל ומעדכנת את יתרת התיקים — "
+            "לבדיקה בלבד."
+        )
+
+        expiries = get_available_expiries()
+        if not expiries:
+            st.warning("אין פקיעות זמינות כרגע (טבלת tase_putcall ריקה או לא נגישה).")
+            return
+
+        st.markdown("**פקיעות זמינות כרגע:**")
+        for e in expiries:
+            st.markdown(f"- `{e}`")
+
+        st.markdown(f"**ייפתח עבור {len(portfolios)} תיקים פעילים:**")
+        for p in portfolios:
+            pname = p.get("name") or f"תיק #{p['id']}"
+            st.markdown(f"- {pname}")
+
+        st.caption(
+            "לכל תיק ייפתחו עד 6 אסטרטגיות לכל פקיעה. "
+            "עסקאות שכבר קיימות יסומנו ככפילות וידולגו."
+        )
+
+        if st.button("▶️ פתח עסקאות עכשיו", key="confirm_manual_open", type="primary"):
+            with st.spinner("פותח עסקאות..."):
+                summary = _run_manual_open(expiries, portfolios)
+            st.session_state["manual_open_summary"] = summary
+            st.rerun()
+
+
+# ════════════════════════════════════════════════════════════════════════
 #  Page entry point
 # ════════════════════════════════════════════════════════════════════════
 
@@ -468,6 +630,10 @@ for row_start in range(0, len(portfolios), _COLS):
             break
         with col:
             _portfolio_card(portfolios[idx])
+
+# ─── פעולות ידניות (בדיקה) ──────────────────────────────────────────
+st.divider()
+_render_manual_actions(portfolios)
 
 st.divider()
 st.caption("⚠️ כלי מחקר בלבד — לא ייעוץ השקעות. כל הנתונים הם סימולציה היסטורית.")
