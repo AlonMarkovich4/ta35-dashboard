@@ -264,7 +264,7 @@ def _render_trade_table(trades: list[dict]) -> None:
 
     styled = (
         df.style
-        .applymap(_color_pnl, subset=["PnL (₪)"])
+        .map(_color_pnl, subset=["PnL (₪)"])
         .format(
             {
                 "עלות כניסה (₪)": lambda v: f"₪{v:,.0f}" if v is not None else "—",
@@ -304,7 +304,7 @@ def _render_track_record(trades: list[dict]) -> None:
 
     styled = (
         df.style
-        .applymap(_color_total, subset=["סה״כ PnL (₪)", "ממוצע PnL (₪)"])
+        .map(_color_total, subset=["סה״כ PnL (₪)", "ממוצע PnL (₪)"])
         .format({
             "סה״כ PnL (₪)":  lambda v: f"₪{v:+,.0f}",
             "ממוצע PnL (₪)": lambda v: f"₪{v:+,.0f}",
