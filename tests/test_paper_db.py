@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from datetime import date, datetime
 from unittest.mock import MagicMock, call, patch
@@ -102,6 +103,15 @@ class TestMakeEngine:
             _make_engine()
             called_url = mock_ce.call_args[0][0]
             assert called_url.startswith("postgresql://")
+
+    def test_pool_pre_ping_enabled(self, monkeypatch):
+        """עמידות מול ה-pooler: create_engine נקרא עם pool_pre_ping=True."""
+        monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@host/db")
+        with patch("paper_db.create_engine") as mock_ce:
+            mock_ce.return_value = MagicMock()
+            _make_engine()
+            kwargs = mock_ce.call_args.kwargs
+            assert kwargs.get("pool_pre_ping") is True
 
 
 # ─── _dumps / _loads ───────────────────────────────────────────────────
@@ -528,6 +538,17 @@ class TestInsertTrade:
         assert result is not None
         assert result["legs_json"] == [{"strike": 4300}]
         assert result["market_snapshot_json"] == {"index": 4300.0}
+
+    def test_logs_warning_on_failure_but_returns_none(self, caplog):
+        """כשל insert: מתעד warning עם פרטי החריגה, אך עדיין מחזיר None (ללא שינוי ערך)."""
+        eng = MagicMock()
+        eng.connect.side_effect = Exception("insert boom")
+        with caplog.at_level(logging.WARNING, logger="paper_db"):
+            result = insert_trade(_SAMPLE_TRADE, engine=eng)
+        assert result is None
+        msgs = " ".join(r.getMessage() for r in caplog.records)
+        assert "insert_trade" in msgs
+        assert "insert boom" in msgs   # הסיבה האמיתית מופיעה בלוג
 
 
 # ─── get_trades ────────────────────────────────────────────────────────

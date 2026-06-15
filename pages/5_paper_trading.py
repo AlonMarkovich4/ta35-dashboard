@@ -14,6 +14,7 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from paper_db import (
+    _make_engine,
     create_portfolio,
     get_portfolio,
     get_portfolios,
@@ -464,52 +465,60 @@ def _run_manual_open(expiries: list[str], portfolios: list[dict]) -> dict:
         "expiries": [],
     }
 
-    for expiry in expiries:
-        exp_rec: dict = {
-            "expiry":       expiry,
-            "chain_error":  None,
-            "counts":       {},
-            "by_portfolio": {},
-        }
+    # engine אחד לכל ההרצה (חוצה כל הפקיעות) — נסגר ב-finally כדי לנקות את ה-pool
+    # ולא להשאיר חיבורים פתוחים מול ה-Supabase pooler.
+    engine = _make_engine()
+    try:
+        for expiry in expiries:
+            exp_rec: dict = {
+                "expiry":       expiry,
+                "chain_error":  None,
+                "counts":       {},
+                "by_portfolio": {},
+            }
 
-        # ── טעינת שרשרת — כישלון מדווח ומדלג ──────────────────────────
-        try:
-            chain = get_latest_option_chain(expiry)
-        except Exception as exc:  # noqa: BLE001
-            exp_rec["chain_error"] = f"חריגה בטעינת השרשרת: {exc}"
+            # ── טעינת שרשרת — כישלון מדווח ומדלג ──────────────────────────
+            try:
+                chain = get_latest_option_chain(expiry, engine=engine)
+            except Exception as exc:  # noqa: BLE001
+                exp_rec["chain_error"] = f"חריגה בטעינת השרשרת: {exc}"
+                summary["expiries"].append(exp_rec)
+                continue
+
+            if not chain:
+                exp_rec["chain_error"] = (
+                    "לא נטענה שרשרת אופציות (נתונים חסרים או לא תקינים)."
+                )
+                summary["expiries"].append(exp_rec)
+                continue
+
+            # ── פתיחת עסקאות — engine משותף לכל ההרצה ─────────────────────
+            try:
+                results = open_trades_for_expiry(expiry, chain, portfolios, engine=engine)
+            except Exception as exc:  # noqa: BLE001
+                exp_rec["chain_error"] = f"חריגה בפתיחת עסקאות: {exc}"
+                summary["expiries"].append(exp_rec)
+                continue
+
+            # ── ספירת תוצאות לפי סטטוס + פירוט לכל תיק ─────────────────────
+            counts: dict = {}
+            by_pf: dict = {}
+            for r in results:
+                status = r.get("status", "error")
+                pid    = r.get("portfolio_id")
+                counts[status] = counts.get(status, 0) + 1
+                if pid is not None:
+                    name = pid_to_name.get(pid, f"תיק #{pid}")
+                    by_pf.setdefault(pid, {"name": name, "counts": {}})
+                    by_pf[pid]["counts"][status] = by_pf[pid]["counts"].get(status, 0) + 1
+
+            exp_rec["counts"]       = counts
+            exp_rec["by_portfolio"] = by_pf
             summary["expiries"].append(exp_rec)
-            continue
-
-        if not chain:
-            exp_rec["chain_error"] = (
-                "לא נטענה שרשרת אופציות (נתונים חסרים או לא תקינים)."
-            )
-            summary["expiries"].append(exp_rec)
-            continue
-
-        # ── פתיחת עסקאות — engine=None ⇐ ייווצר מ-DATABASE_URL ─────────
-        try:
-            results = open_trades_for_expiry(expiry, chain, portfolios)
-        except Exception as exc:  # noqa: BLE001
-            exp_rec["chain_error"] = f"חריגה בפתיחת עסקאות: {exc}"
-            summary["expiries"].append(exp_rec)
-            continue
-
-        # ── ספירת תוצאות לפי סטטוס + פירוט לכל תיק ─────────────────────
-        counts: dict = {}
-        by_pf: dict = {}
-        for r in results:
-            status = r.get("status", "error")
-            pid    = r.get("portfolio_id")
-            counts[status] = counts.get(status, 0) + 1
-            if pid is not None:
-                name = pid_to_name.get(pid, f"תיק #{pid}")
-                by_pf.setdefault(pid, {"name": name, "counts": {}})
-                by_pf[pid]["counts"][status] = by_pf[pid]["counts"].get(status, 0) + 1
-
-        exp_rec["counts"]       = counts
-        exp_rec["by_portfolio"] = by_pf
-        summary["expiries"].append(exp_rec)
+    finally:
+        # _make_engine מחזיר None אם DATABASE_URL לא מוגדר — הגנה לפני dispose
+        if engine is not None:
+            engine.dispose()
 
     return summary
 

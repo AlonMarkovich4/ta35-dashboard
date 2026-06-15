@@ -608,6 +608,66 @@ class TestOpenTradesStrategySubset:
         assert inserted == [2]
 
 
+# ─── engine יחיד משותף (תיקון ה-pooler) ────────────────────────────────
+
+class TestSharesSingleEngine:
+    """engine נוצר פעם אחת ומועבר לכל הקריאות הפנימיות — לא pool חדש בכל insert."""
+
+    def test_open_creates_engine_once_and_shares_it(self):
+        sentinel = object()
+        seen: list = []
+
+        def fake_get_trades(portfolio_id=None, status=None, expiry_date=None, engine=None):
+            seen.append(engine)
+            return []
+
+        def fake_insert(trade, engine=None):
+            seen.append(engine)
+            return {"id": 1, **trade, "legs_json": trade.get("legs_json", []),
+                    "market_snapshot_json": None}
+
+        portfolios = [_make_portfolio(1), _make_portfolio(2)]
+
+        with patch("paper_trading._make_engine", return_value=sentinel) as mk, \
+             patch("paper_trading.get_trades", side_effect=fake_get_trades), \
+             patch("paper_trading.insert_trade", side_effect=fake_insert), \
+             patch("paper_trading._build_snapshot", return_value={}):
+            open_trades_for_expiry(_EXPIRY, _CHAIN, portfolios, engine=None)
+
+        # engine נוצר פעם אחת בלבד (ולא פעם לכל insert/שאילתה)
+        assert mk.call_count == 1
+        # כל הקריאות הפנימיות (get_trades + insert_trade) קיבלו בדיוק את אותו engine
+        assert seen, "לא בוצעו קריאות DB פנימיות"
+        assert all(e is sentinel for e in seen)
+
+    def test_close_creates_engine_once_and_shares_it(self):
+        sentinel = object()
+        seen: list = []
+        trade = _make_open_trade(trade_id=1)
+
+        def fake_get_open(expiry_date, engine=None):
+            seen.append(engine)
+            return [trade]
+
+        def fake_get_portfolio(pid, engine=None):
+            seen.append(engine)
+            return _make_portfolio()
+
+        def fake_close(tid, ci, pnl, pnl_pct, exit_commission=0.0, engine=None):
+            seen.append(engine)
+            return True
+
+        with patch("paper_trading._make_engine", return_value=sentinel) as mk, \
+             patch("paper_trading.get_open_trades_for_expiry", side_effect=fake_get_open), \
+             patch("paper_trading.get_portfolio", side_effect=fake_get_portfolio), \
+             patch("paper_trading.close_trade", side_effect=fake_close):
+            close_trades_for_expiry(_EXPIRY, 4300.0, engine=None)
+
+        assert mk.call_count == 1
+        assert seen, "לא בוצעו קריאות DB פנימיות"
+        assert all(e is sentinel for e in seen)
+
+
 # ─── compute_balance — מקור אמת אחד ליתרה ──────────────────────────────
 
 class TestComputeBalance:

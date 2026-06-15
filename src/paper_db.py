@@ -18,10 +18,13 @@ paper_db.py — שכבת DB לתיקי Paper Trading.
 from __future__ import annotations
 
 import json
+import logging
 import os
 from typing import Optional
 
 from sqlalchemy import create_engine, text
+
+logger = logging.getLogger(__name__)
 
 
 # רשימת מזהי כל האסטרטגיות — ברירת מחדל לתיק שמריץ את כולן.
@@ -36,7 +39,11 @@ def has_paper_db() -> bool:
 
 
 def _make_engine(engine=None):
-    """מחזיר engine קיים או יוצר חדש מ-DATABASE_URL; None אם לא מוגדר."""
+    """מחזיר engine קיים או יוצר חדש מ-DATABASE_URL; None אם לא מוגדר.
+
+    pool_pre_ping — בודק שהחיבור חי לפני שימוש (עמידות מול ה-Supabase pooler,
+    שעלול לסגור חיבורים בצד השרת). pool_recycle — ממחזר חיבורים ישנים מ-30 דק'.
+    """
     if engine is not None:
         return engine
     db_url = os.getenv("DATABASE_URL", "")
@@ -44,7 +51,9 @@ def _make_engine(engine=None):
         return None
     if db_url.startswith("postgres://"):
         db_url = db_url.replace("postgres://", "postgresql://", 1)
-    return create_engine(db_url, echo=False)
+    return create_engine(
+        db_url, echo=False, pool_pre_ping=True, pool_recycle=1800,
+    )
 
 
 # ─── JSONB helpers ─────────────────────────────────────────────────────
@@ -248,7 +257,13 @@ def insert_trade(trade: dict, engine=None) -> Optional[dict]:
             ).fetchone()
             conn.commit()
         return _row_to_dict(row) if row else None
-    except Exception:
+    except Exception as exc:
+        # חושפים את הסיבה האמיתית ללוגים (Render) במקום לנחש — הערך המוחזר נשאר None.
+        logger.warning(
+            "insert_trade נכשל (portfolio_id=%s, strategy_id=%s): %s",
+            trade.get("portfolio_id"), trade.get("strategy_id"), exc,
+            exc_info=True,
+        )
         return None
 
 

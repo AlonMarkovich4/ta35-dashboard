@@ -41,6 +41,7 @@ from payoff import (
 )
 from strategies import STRATEGIES
 from paper_db import (
+    _make_engine,
     close_trade,
     get_open_trades_for_expiry,
     get_portfolio,
@@ -282,7 +283,11 @@ def open_trades_for_expiry(
     if not atm:
         return []
 
-    snapshot = _build_snapshot(expiry_date, expiry_entry, atm, chain_df, engine)
+    # engine אחד משותף לכל השאילתות/ההכנסות בריצה — מונע יצירת pool חדש בכל קריאה
+    # (מצטבר מול ה-Supabase pooler וגורם לכשלי-חיבור שנבלעים כ-db_error).
+    eng = _make_engine(engine)
+
+    snapshot = _build_snapshot(expiry_date, expiry_entry, atm, chain_df, eng)
     exp_dt   = _parse_date(expiry_date)
     results: list[dict] = []
 
@@ -295,7 +300,7 @@ def open_trades_for_expiry(
         existing = get_trades(
             portfolio_id=portfolio_id,
             expiry_date=str(exp_dt),
-            engine=engine,
+            engine=eng,
         )
         existing_sids = {t.get("strategy_id") for t in existing}
 
@@ -317,7 +322,7 @@ def open_trades_for_expiry(
                 # ─── בדיקת תקינות מחיר ──────────────────────────────
                 if not params or abs(cost_pts) < 0.001:
                     snap_skip = {**snapshot, "skip_reason": "missing price data"}
-                    _insert_skipped(portfolio_id, strategy_id, exp_dt, atm, snap_skip, engine)
+                    _insert_skipped(portfolio_id, strategy_id, exp_dt, atm, snap_skip, eng)
                     results.append({
                         "portfolio_id": portfolio_id,
                         "strategy_id":  strategy_id,
@@ -355,7 +360,7 @@ def open_trades_for_expiry(
                         "entry_commission":     entry_commission,
                         "exit_commission":      None,
                     },
-                    engine=engine,
+                    engine=eng,
                 )
 
                 if inserted is None:
@@ -389,7 +394,10 @@ def close_trades_for_expiry(
     מחשב payoff גולמי מהרגליים ו-PnL, ושומר אותם בעסקה (status='closed').
     היתרה אינה מעודכנת ישירות — היא נגזרת מה-pnl דרך compute_balance.
     """
-    open_trades = get_open_trades_for_expiry(expiry_date, engine=engine)
+    # engine אחד משותף לכל הסגירות — מונע יצירת pool חדש בכל קריאה.
+    eng = _make_engine(engine)
+
+    open_trades = get_open_trades_for_expiry(expiry_date, engine=eng)
     results: list[dict] = []
 
     for trade in open_trades:
@@ -404,7 +412,7 @@ def close_trades_for_expiry(
             portfolio_id = trade["portfolio_id"]
 
             # ─── עמלת יציאה מהתיק ────────────────────────────────────
-            portfolio          = get_portfolio(portfolio_id, engine=engine)
+            portfolio          = get_portfolio(portfolio_id, engine=eng)
             _cpv = (portfolio or {}).get("commission_per_leg")
             commission_per_leg = float(_cpv if _cpv is not None else 2.5)
             exit_commission    = round(num_legs * commission_per_leg, 2)
@@ -418,7 +426,7 @@ def close_trades_for_expiry(
 
             ok = close_trade(
                 trade_id, float(close_index), pnl, pnl_pct,
-                exit_commission, engine=engine,
+                exit_commission, engine=eng,
             )
 
             # היתרה אינה מעודכנת כאן — היא נגזרת מהעסקאות (compute_balance).
