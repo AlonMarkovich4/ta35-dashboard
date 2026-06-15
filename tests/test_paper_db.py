@@ -20,6 +20,7 @@ from paper_db import (
     _dumps,
     _loads,
     _make_engine,
+    _parse_strategy_ids,
     _row_to_dict,
     close_trade,
     create_portfolio,
@@ -151,6 +152,51 @@ class TestLoads:
         assert result == {"שם": "ערך"}
 
 
+# ─── _parse_strategy_ids ───────────────────────────────────────────────
+
+class TestParseStrategyIds:
+    _DEFAULT = [1, 2, 3, 4, 5, 6]
+
+    def test_none_returns_default(self):
+        assert _parse_strategy_ids(None) == self._DEFAULT
+
+    def test_list_of_ints_passthrough(self):
+        assert _parse_strategy_ids([2, 3]) == [2, 3]
+
+    def test_single_element(self):
+        assert _parse_strategy_ids([2]) == [2]
+
+    def test_json_string_parsed(self):
+        assert _parse_strategy_ids("[2, 3]") == [2, 3]
+
+    def test_list_of_strings_coerced_to_int(self):
+        assert _parse_strategy_ids(["1", "2"]) == [1, 2]
+
+    def test_empty_list_returns_default(self):
+        assert _parse_strategy_ids([]) == self._DEFAULT
+
+    def test_empty_json_string_returns_default(self):
+        assert _parse_strategy_ids("[]") == self._DEFAULT
+
+    def test_invalid_string_returns_default(self):
+        assert _parse_strategy_ids("not json") == self._DEFAULT
+
+    def test_non_list_scalar_returns_default(self):
+        assert _parse_strategy_ids(5) == self._DEFAULT
+
+    def test_duplicates_removed_order_preserved(self):
+        assert _parse_strategy_ids([2, 2, 3]) == [2, 3]
+
+    def test_non_numeric_elements_skipped(self):
+        assert _parse_strategy_ids([1, "x", 3]) == [1, 3]
+
+    def test_default_is_a_fresh_copy(self):
+        """החזרת ברירת המחדל אינה משתפת רפרנס שניתן לשנות בטעות."""
+        a = _parse_strategy_ids(None)
+        a.append(99)
+        assert _parse_strategy_ids(None) == self._DEFAULT
+
+
 # ─── _row_to_dict ──────────────────────────────────────────────────────
 
 class TestRowToDict:
@@ -230,6 +276,47 @@ class TestCreatePortfolio:
         create_portfolio("X", 5000, commission_per_leg=1.0, engine=eng)
         conn.commit.assert_called_once()
 
+    def test_strategy_ids_stored_as_json(self):
+        """(א) strategy_ids נשמר כ-JSON string בפרמטרים של ה-INSERT."""
+        conn = _mock_conn(fetchone=_make_row(id=1, name="T", initial_balance=1000,
+                                             current_balance=1000, commission_per_leg=2.5,
+                                             strategy_ids="[2]", is_active=True))
+        eng = MagicMock()
+        eng.connect.return_value = conn
+        create_portfolio("T", 1000, strategy_ids=[2], engine=eng)
+        params = conn.execute.call_args[0][1]
+        assert isinstance(params["strategy_ids"], str)
+        assert json.loads(params["strategy_ids"]) == [2]
+
+    def test_strategy_ids_default_all_when_none(self):
+        """(ד) strategy_ids=None → נשמרות כל 6 האסטרטגיות (ברירת מחדל)."""
+        conn = _mock_conn(fetchone=_make_row(id=1, name="T", initial_balance=1000,
+                                             current_balance=1000, commission_per_leg=2.5,
+                                             strategy_ids="[1,2,3,4,5,6]", is_active=True))
+        eng = MagicMock()
+        eng.connect.return_value = conn
+        create_portfolio("T", 1000, engine=eng)
+        params = conn.execute.call_args[0][1]
+        assert json.loads(params["strategy_ids"]) == [1, 2, 3, 4, 5, 6]
+
+    def test_returned_strategy_ids_parsed_to_list(self):
+        """התיק שחוזר מ-create_portfolio כולל strategy_ids כ-list[int]."""
+        row = _make_row(id=1, name="T", initial_balance=1000, current_balance=1000,
+                        commission_per_leg=2.5, strategy_ids="[2, 3]", is_active=True)
+        eng = _mock_engine(fetchone=row)
+        result = create_portfolio("T", 1000, strategy_ids=[2, 3], engine=eng)
+        assert result["strategy_ids"] == [2, 3]
+
+    def test_sql_inserts_strategy_ids_column(self):
+        conn = _mock_conn(fetchone=_make_row(id=1, name="T", initial_balance=1000,
+                                             current_balance=1000, commission_per_leg=2.5,
+                                             strategy_ids="[1,2,3,4,5,6]", is_active=True))
+        eng = MagicMock()
+        eng.connect.return_value = conn
+        create_portfolio("T", 1000, engine=eng)
+        sql_text = str(conn.execute.call_args[0][0])
+        assert "strategy_ids" in sql_text
+
 
 # ─── get_portfolios ────────────────────────────────────────────────────
 
@@ -258,6 +345,27 @@ class TestGetPortfolios:
         eng = _mock_engine(fetchall=[])
         assert get_portfolios(engine=eng) == []
 
+    def test_strategy_ids_parsed_to_list(self):
+        """(ב) strategy_ids שחוזר כ-JSON string מ-JSONB מפורסר ל-list[int]."""
+        rows = [_make_row(id=1, name="P1", is_active=True, strategy_ids="[2]")]
+        eng = _mock_engine(fetchall=rows)
+        result = get_portfolios(engine=eng)
+        assert result[0]["strategy_ids"] == [2]
+
+    def test_strategy_ids_as_native_list_kept(self):
+        """JSONB שחוזר כבר כ-list נשמר כ-list[int]."""
+        rows = [_make_row(id=1, name="P1", is_active=True, strategy_ids=[3, 4])]
+        eng = _mock_engine(fetchall=rows)
+        result = get_portfolios(engine=eng)
+        assert result[0]["strategy_ids"] == [3, 4]
+
+    def test_missing_strategy_ids_defaults_to_all(self):
+        """(ד) שורה ללא strategy_ids → כל 6 (תאימות לאחור)."""
+        rows = [_make_row(id=1, name="P1", is_active=True)]
+        eng = _mock_engine(fetchall=rows)
+        result = get_portfolios(engine=eng)
+        assert result[0]["strategy_ids"] == [1, 2, 3, 4, 5, 6]
+
 
 # ─── get_portfolio ─────────────────────────────────────────────────────
 
@@ -282,6 +390,18 @@ class TestGetPortfolio:
         eng = MagicMock()
         eng.connect.side_effect = Exception("timeout")
         assert get_portfolio(1, engine=eng) is None
+
+    def test_strategy_ids_parsed_as_list(self):
+        row = _make_row(id=5, name="P", strategy_ids="[3, 4]")
+        eng = _mock_engine(fetchone=row)
+        result = get_portfolio(5, engine=eng)
+        assert result["strategy_ids"] == [3, 4]
+
+    def test_strategy_ids_default_when_missing(self):
+        row = _make_row(id=5, name="P")
+        eng = _mock_engine(fetchone=row)
+        result = get_portfolio(5, engine=eng)
+        assert result["strategy_ids"] == [1, 2, 3, 4, 5, 6]
 
 
 # ─── update_balance ────────────────────────────────────────────────────

@@ -6,7 +6,7 @@ paper_db.py — שכבת DB לתיקי Paper Trading.
 
 פונקציות ציבוריות:
   has_paper_db()                                                        → bool
-  create_portfolio(name, initial_balance, commission_per_leg, engine)   → dict | None
+  create_portfolio(name, initial_balance, commission_per_leg, strategy_ids, engine) → dict | None
   get_portfolios(engine=None)                                           → list[dict]
   get_portfolio(portfolio_id, engine=None)                              → dict | None
   update_balance(portfolio_id, new_balance, engine=None)                → bool
@@ -22,6 +22,10 @@ import os
 from typing import Optional
 
 from sqlalchemy import create_engine, text
+
+
+# רשימת מזהי כל האסטרטגיות — ברירת מחדל לתיק שמריץ את כולן.
+DEFAULT_STRATEGY_IDS: list[int] = [1, 2, 3, 4, 5, 6]
 
 
 # ─── DB connection ─────────────────────────────────────────────────────
@@ -77,35 +81,77 @@ def _row_to_dict(row) -> dict:
     return d
 
 
+def _parse_strategy_ids(v) -> list[int]:
+    """ממיר ערך strategy_ids מ-JSONB ל-list[int].
+
+    מקבל list, JSON-string או None (JSONB עשוי לחזור כ-list או כ-string).
+    שדה חסר / ריק / לא תקין → כל 6 האסטרטגיות (null-safe, תאימות לאחור).
+    """
+    if v is None:
+        return list(DEFAULT_STRATEGY_IDS)
+    if isinstance(v, str):
+        try:
+            v = json.loads(v)
+        except (json.JSONDecodeError, ValueError):
+            return list(DEFAULT_STRATEGY_IDS)
+    if not isinstance(v, (list, tuple)):
+        return list(DEFAULT_STRATEGY_IDS)
+    ids: list[int] = []
+    for x in v:
+        try:
+            sid = int(x)
+        except (TypeError, ValueError):
+            continue
+        if sid not in ids:
+            ids.append(sid)
+    return ids or list(DEFAULT_STRATEGY_IDS)
+
+
+def _portfolio_to_dict(row) -> dict:
+    """ממיר שורת paper_portfolios ל-dict ומפרש strategy_ids ל-list[int]."""
+    d = dict(row._mapping)
+    d["strategy_ids"] = _parse_strategy_ids(d.get("strategy_ids"))
+    return d
+
+
 # ─── Portfolios ─────────────────────────────────────────────────────────
 
 def create_portfolio(
     name: str,
     initial_balance: float,
     commission_per_leg: float = 2.5,
+    strategy_ids: Optional[list[int]] = None,
     engine=None,
 ) -> Optional[dict]:
-    """יוצר תיק paper trading חדש ומחזיר אותו כ-dict; None בכישלון."""
+    """יוצר תיק paper trading חדש ומחזיר אותו כ-dict; None בכישלון.
+
+    strategy_ids — רשימת מזהי האסטרטגיות שהתיק מריץ; None → כל 6 האסטרטגיות.
+    נשמר כ-JSONB (אותו pattern כמו legs_json דרך _dumps).
+    """
     eng = _make_engine(engine)
     if eng is None:
         return None
+    sids = _parse_strategy_ids(strategy_ids)
     try:
         with eng.connect() as conn:
             row = conn.execute(
                 text("""
                     INSERT INTO paper_portfolios
-                        (name, initial_balance, current_balance, commission_per_leg, is_active)
-                    VALUES (:name, :initial_balance, :initial_balance, :commission_per_leg, TRUE)
+                        (name, initial_balance, current_balance, commission_per_leg,
+                         strategy_ids, is_active)
+                    VALUES (:name, :initial_balance, :initial_balance, :commission_per_leg,
+                            CAST(:strategy_ids AS JSONB), TRUE)
                     RETURNING *
                 """),
                 {
                     "name":               name,
                     "initial_balance":    initial_balance,
                     "commission_per_leg": commission_per_leg,
+                    "strategy_ids":       _dumps(sids),
                 },
             ).fetchone()
             conn.commit()
-        return dict(row._mapping) if row else None
+        return _portfolio_to_dict(row) if row else None
     except Exception:
         return None
 
@@ -123,7 +169,7 @@ def get_portfolios(engine=None) -> list[dict]:
                     " WHERE is_active = TRUE ORDER BY created_at DESC"
                 )
             ).fetchall()
-        return [dict(r._mapping) for r in rows]
+        return [_portfolio_to_dict(r) for r in rows]
     except Exception:
         return []
 
@@ -139,7 +185,7 @@ def get_portfolio(portfolio_id: int, engine=None) -> Optional[dict]:
                 text("SELECT * FROM paper_portfolios WHERE id = :id"),
                 {"id": portfolio_id},
             ).fetchone()
-        return dict(row._mapping) if row else None
+        return _portfolio_to_dict(row) if row else None
     except Exception:
         return None
 

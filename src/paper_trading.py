@@ -66,6 +66,32 @@ def _parse_date(d) -> Optional[date]:
     return None
 
 
+def _portfolio_strategy_ids(portfolio: dict) -> list[int]:
+    """מחזיר את רשימת מזהי האסטרטגיות שהתיק מוגדר להריץ, לפי הסדר.
+
+    מקבל list[int], list[str] או JSON-string (במקרה ש-strategy_ids לא פורסר).
+    מסנן רק מזהים חוקיים הקיימים ב-STRATEGIES ומונע כפילויות.
+    שדה חסר / ריק / לא תקין → כל 6 האסטרטגיות (null-safe, תאימות לאחור).
+    """
+    raw = (portfolio or {}).get("strategy_ids")
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (json.JSONDecodeError, ValueError):
+            raw = None
+    if not isinstance(raw, (list, tuple)) or not raw:
+        return list(STRATEGIES.keys())
+    out: list[int] = []
+    for x in raw:
+        try:
+            sid = int(x)
+        except (TypeError, ValueError):
+            continue
+        if sid in STRATEGIES and sid not in out:
+            out.append(sid)
+    return out or list(STRATEGIES.keys())
+
+
 def _find_chain_entry(chain: dict, expiry_date) -> Optional[dict]:
     """מאתר את רשומת הפקיעה ב-chain dict לפי expiry_date."""
     target = _parse_date(expiry_date)
@@ -239,8 +265,9 @@ def open_trades_for_expiry(
     portfolios: list[dict],
     engine=None,
 ) -> list[dict]:
-    """פותחת עסקה לכל אחת מ-6 האסטרטגיות בכל תיק.
+    """פותחת עסקה לכל אחת מהאסטרטגיות שהתיק מוגדר להריץ (portfolio["strategy_ids"]).
 
+    תיק ללא strategy_ids (או ריק) → כל 6 האסטרטגיות (תאימות לאחור).
     מחזיר רשימת תוצאות עם status לכל (portfolio_id, strategy_id).
     """
     if not portfolios:
@@ -272,7 +299,8 @@ def open_trades_for_expiry(
         )
         existing_sids = {t.get("strategy_id") for t in existing}
 
-        for strategy_id in range(1, 7):
+        # עוברים רק על האסטרטגיות שהתיק מוגדר להריץ (null-safe → כל ה-6).
+        for strategy_id in _portfolio_strategy_ids(portfolio):
             # ─── מניעת כפילות ───────────────────────────────────────
             if strategy_id in existing_sids:
                 results.append({

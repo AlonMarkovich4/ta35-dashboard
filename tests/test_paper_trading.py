@@ -23,6 +23,7 @@ from paper_trading import (
     _norm_ts,
     _parse_date,
     _payoff_from_legs,
+    _portfolio_strategy_ids,
     build_equity_curve,
     build_track_record,
     close_trades_for_expiry,
@@ -93,9 +94,13 @@ def _make_chain_dict(
 
 
 def _make_portfolio(portfolio_id: int = 1, balance: float = 100_000.0,
-                    commission_per_leg: float = 0.0) -> dict:
-    return {"id": portfolio_id, "name": "תיק בדיקה", "current_balance": balance,
-            "is_active": True, "commission_per_leg": commission_per_leg}
+                    commission_per_leg: float = 0.0, strategy_ids=None) -> dict:
+    p = {"id": portfolio_id, "name": "תיק בדיקה", "current_balance": balance,
+         "is_active": True, "commission_per_leg": commission_per_leg}
+    # נוסף רק כשמסופק במפורש — תיק בלי המפתח בודק תאימות לאחור (null-safe).
+    if strategy_ids is not None:
+        p["strategy_ids"] = strategy_ids
+    return p
 
 
 def _make_inserted_trade(portfolio_id: int = 1, strategy_id: int = 1) -> dict:
@@ -492,6 +497,115 @@ class TestOpenTradesMultiPortfolio:
 
         assert 1 in portfolio_ids_inserted
         assert 2 in portfolio_ids_inserted
+
+
+# ─── _portfolio_strategy_ids ──────────────────────────────────────────
+
+class TestPortfolioStrategyIds:
+    """בחירת האסטרטגיות שתיק מריץ — null-safe וסינון מזהים."""
+
+    _ALL = [1, 2, 3, 4, 5, 6]
+
+    def test_missing_key_returns_all(self):
+        assert _portfolio_strategy_ids({"id": 1}) == self._ALL
+
+    def test_none_value_returns_all(self):
+        assert _portfolio_strategy_ids({"strategy_ids": None}) == self._ALL
+
+    def test_empty_list_returns_all(self):
+        assert _portfolio_strategy_ids({"strategy_ids": []}) == self._ALL
+
+    def test_subset_preserved(self):
+        assert _portfolio_strategy_ids({"strategy_ids": [2]}) == [2]
+
+    def test_two_butterflies(self):
+        assert _portfolio_strategy_ids({"strategy_ids": [3, 4]}) == [3, 4]
+
+    def test_json_string_parsed(self):
+        assert _portfolio_strategy_ids({"strategy_ids": "[5]"}) == [5]
+
+    def test_string_ids_coerced(self):
+        assert _portfolio_strategy_ids({"strategy_ids": ["1", "2"]}) == [1, 2]
+
+    def test_invalid_ids_filtered_out(self):
+        """מזהים שאינם קיימים ב-STRATEGIES (0, 99) מסוננים."""
+        assert _portfolio_strategy_ids({"strategy_ids": [2, 99, 0]}) == [2]
+
+    def test_all_invalid_falls_back_to_all(self):
+        assert _portfolio_strategy_ids({"strategy_ids": [99, 0]}) == self._ALL
+
+    def test_duplicates_removed(self):
+        assert _portfolio_strategy_ids({"strategy_ids": [2, 2, 3]}) == [2, 3]
+
+    def test_order_preserved(self):
+        assert _portfolio_strategy_ids({"strategy_ids": [6, 1, 3]}) == [6, 1, 3]
+
+
+# ─── open_trades_for_expiry — תת-קבוצת אסטרטגיות ───────────────────────
+
+class TestOpenTradesStrategySubset:
+    """(ג)+(ד): פותחים רק את האסטרטגיות שהתיק מוגדר להריץ.
+
+    ה-pricing ממוקמ (mock) לערך קבוע — הבדיקה ממוקדת בלוגיקת *בחירת* האסטרטגיות
+    בלולאה, לא בחישוב המחיר עצמו.
+    """
+
+    def _run(self, portfolio):
+        attempted: list[int] = []   # אילו אסטרטגיות נוסו (נכנסו ללולאת ה-pricing)
+        inserted: list[int]  = []   # אילו נפתחו בפועל
+
+        def fake_params(sid, atm, chain):
+            attempted.append(sid)
+            return {"cost_pts": 10.0, "credit_pts": 10.0}
+
+        def fake_insert(trade, engine=None):
+            inserted.append(trade["strategy_id"])
+            return {"id": 10, **trade, "legs_json": trade.get("legs_json", []),
+                    "market_snapshot_json": None}
+
+        with patch("paper_trading.get_trades", return_value=[]), \
+             patch("paper_trading.strategy_payoff_params", side_effect=fake_params), \
+             patch("paper_trading.strategy_legs_detail", return_value=[]), \
+             patch("paper_trading.strategy_summary", return_value={}), \
+             patch("paper_trading.insert_trade", side_effect=fake_insert), \
+             patch("paper_trading._build_snapshot", return_value={}):
+            results = open_trades_for_expiry(_EXPIRY, _CHAIN, [portfolio], engine=MagicMock())
+
+        return attempted, inserted, results
+
+    def test_only_iron_condor_when_subset_is_2(self):
+        """תיק עם strategy_ids=[2] → נפתחת רק Iron Condor."""
+        attempted, inserted, results = self._run(_make_portfolio(strategy_ids=[2]))
+        assert attempted == [2]
+        assert inserted == [2]
+        assert {r["strategy_id"] for r in results} == {2}
+
+    def test_two_butterflies_subset(self):
+        """תיק עם strategy_ids=[3,4] → נפתחות רק שתי ה-Butterfly."""
+        attempted, inserted, _ = self._run(_make_portfolio(strategy_ids=[3, 4]))
+        assert attempted == [3, 4]
+        assert inserted == [3, 4]
+
+    def test_missing_strategy_ids_opens_all_six(self):
+        """(ד) תיק בלי strategy_ids → כל 6 האסטרטגיות (תאימות לאחור)."""
+        attempted, inserted, _ = self._run(_make_portfolio())
+        assert attempted == [1, 2, 3, 4, 5, 6]
+        assert inserted == [1, 2, 3, 4, 5, 6]
+
+    def test_empty_strategy_ids_opens_all_six(self):
+        attempted, _, _ = self._run(_make_portfolio(strategy_ids=[]))
+        assert attempted == [1, 2, 3, 4, 5, 6]
+
+    def test_json_string_strategy_ids(self):
+        """strategy_ids כ-JSON string (לא פורסר) → מטופל null-safe."""
+        attempted, inserted, _ = self._run(_make_portfolio(strategy_ids="[5]"))
+        assert attempted == [5]
+        assert inserted == [5]
+
+    def test_invalid_ids_filtered(self):
+        attempted, inserted, _ = self._run(_make_portfolio(strategy_ids=[2, 99, 0]))
+        assert attempted == [2]
+        assert inserted == [2]
 
 
 # ─── compute_balance — מקור אמת אחד ליתרה ──────────────────────────────

@@ -26,6 +26,7 @@ from paper_trading import (
     compute_balance,
     open_trades_for_expiry,
 )
+from strategies import STRATEGIES
 from supabase_loader import get_available_expiries, get_latest_option_chain
 from styles import inject_global_css
 
@@ -40,6 +41,21 @@ _GOLD     = "#c9a84c"
 _BLUE     = "#4a9fd4"
 
 _STATUS_HE = {"open": "פתוח", "closed": "סגור", "skipped": "דולג"}
+
+# מיפוי מזהה→שם אסטרטגיה + תווית בחירה לטופס (לפי הסדר 1..6)
+_ALL_SIDS        = set(STRATEGIES.keys())
+_STRATEGY_LABELS = {f"{sid}. {STRATEGIES[sid].name}": sid for sid in sorted(STRATEGIES)}
+
+
+def _strategy_label(strategy_ids) -> str:
+    """תיאור קריא של אסטרטגיות התיק: 'כל האסטרטגיות' או רשימת שמות.
+
+    null-safe: ערך חסר/ריק → נחשב ככל האסטרטגיות.
+    """
+    ids = [s for s in (strategy_ids or []) if s in STRATEGIES]
+    if not ids or set(ids) >= _ALL_SIDS:
+        return "כל האסטרטגיות"
+    return ", ".join(STRATEGIES[s].name for s in sorted(ids))
 
 st.set_page_config(
     page_title="תיקי דמו — TA-35",
@@ -330,6 +346,7 @@ def _render_portfolio_detail(pid: int) -> None:
 
     # ── כותרת ───────────────────────────────────────────────────────
     st.markdown(f"## 📁 {name}")
+    st.caption(f"🎯 אסטרטגיות התיק: {_strategy_label(portfolio.get('strategy_ids'))}")
     _disclaimer_banner()
 
     # ── כרטיסי סיכום ────────────────────────────────────────────────
@@ -364,6 +381,7 @@ def _portfolio_card(p: dict) -> None:
     initial    = float(p.get("initial_balance") or 0)
     _cpv       = p.get("commission_per_leg")
     commission = float(_cpv if _cpv is not None else 2.5)
+    strat_text = _strategy_label(p.get("strategy_ids"))
 
     trades       = get_trades(portfolio_id=pid)
     open_count   = sum(1 for t in trades if t.get("status") == "open")
@@ -401,9 +419,15 @@ def _portfolio_card(p: dict) -> None:
             <span style='color:#7a9ab8;font-size:0.85rem'>עסקאות פתוחות / סגורות</span>
             <span style='color:#c8d6e8'>{open_count} / {closed_count}</span>
           </div>
-          <div style='display:flex;justify-content:space-between;margin-bottom:14px'>
+          <div style='display:flex;justify-content:space-between;margin-bottom:8px'>
             <span style='color:#7a9ab8;font-size:0.85rem'>עמלה לרגל</span>
             <span style='color:#c9a84c'>₪{commission:.1f}</span>
+          </div>
+          <div style='margin-bottom:6px'>
+            <span style='color:#7a9ab8;font-size:0.85rem'>אסטרטגיות</span>
+            <div style='color:#c8d6e8;font-size:0.82rem;margin-top:3px;line-height:1.45'>
+              {strat_text}
+            </div>
           </div>
         </div>
         """,
@@ -557,10 +581,10 @@ def _render_manual_actions(portfolios: list[dict]) -> None:
         st.markdown(f"**ייפתח עבור {len(portfolios)} תיקים פעילים:**")
         for p in portfolios:
             pname = p.get("name") or f"תיק #{p['id']}"
-            st.markdown(f"- {pname}")
+            st.markdown(f"- {pname} — _{_strategy_label(p.get('strategy_ids'))}_")
 
         st.caption(
-            "לכל תיק ייפתחו עד 6 אסטרטגיות לכל פקיעה. "
+            "לכל תיק ייפתחו רק האסטרטגיות שהוגדרו לו, לכל פקיעה. "
             "עסקאות שכבר קיימות יסומנו ככפילות וידולגו."
         )
 
@@ -602,14 +626,29 @@ with st.expander("➕ צור תיק חדש", expanded=False):
             )
         with col3:
             p_comm = st.number_input("עמלה לכל רגל (₪)", min_value=0.0, value=2.5, step=0.5)
+
+        p_strat_labels = st.multiselect(
+            "אסטרטגיות שהתיק יריץ",
+            options=list(_STRATEGY_LABELS.keys()),
+            default=list(_STRATEGY_LABELS.keys()),
+            help="בחר אילו אסטרטגיות ייפתחו אוטומטית בתיק זה. ברירת מחדל: כולן.",
+        )
+
         if st.form_submit_button("✅ צור תיק"):
+            p_strategy_ids = [_STRATEGY_LABELS[lbl] for lbl in p_strat_labels]
             if not p_name.strip():
                 st.error("נא להזין שם לתיק.")
+            elif not p_strategy_ids:
+                st.error("נא לבחור לפחות אסטרטגיה אחת לתיק.")
             else:
-                res = create_portfolio(p_name.strip(), p_balance, p_comm)
+                res = create_portfolio(
+                    p_name.strip(), p_balance, p_comm, strategy_ids=p_strategy_ids
+                )
                 if res:
                     st.success(
-                        f"✅ תיק «{res['name']}» נוצר (הון: ₪{p_balance:,.0f} | עמלה: ₪{p_comm:.1f}/רגל)"
+                        f"✅ תיק «{res['name']}» נוצר "
+                        f"(הון: ₪{p_balance:,.0f} | עמלה: ₪{p_comm:.1f}/רגל | "
+                        f"אסטרטגיות: {_strategy_label(p_strategy_ids)})"
                     )
                     st.rerun()
                 else:
