@@ -23,9 +23,13 @@ from paper_db import (
 )
 from paper_trading import (
     build_equity_curve,
+    build_legs_chart_data,
     build_track_record,
+    build_trade_payoff_curve,
     compute_balance,
+    nearest_expiry,
     open_trades_for_expiry,
+    trade_expiries,
 )
 from strategies import STRATEGIES
 from supabase_loader import get_available_expiries, get_latest_option_chain
@@ -314,6 +318,206 @@ def _render_track_record(trades: list[dict]) -> None:
     st.dataframe(styled, use_container_width=True, hide_index=True)
 
 
+def _render_legs_table(legs: list[dict]) -> None:
+    """טבלת רגליים צבעונית (קנה ירוק / מכור אדום)."""
+    rows = []
+    for lg in legs:
+        rows.append({
+            "פעולה":        lg.get("action") or "—",
+            "סוג":          lg.get("type") or "—",
+            "סטרייק":       lg.get("strike"),
+            "כמות":         lg.get("qty", 1),
+            "מחיר (נק׳)":   lg.get("price_pts"),
+            "מחיר (₪)":     lg.get("price_nis"),
+        })
+    df = pd.DataFrame(rows)
+
+    def _color_action(v):
+        if v == "קנה":
+            return f"color: {_GREEN}; font-weight: 700"
+        if v == "מכור":
+            return f"color: {_RED}; font-weight: 700"
+        return ""
+
+    styled = (
+        df.style
+        .map(_color_action, subset=["פעולה"])
+        .format({
+            "סטרייק":     lambda v: f"{v:,.0f}" if v is not None else "—",
+            "מחיר (נק׳)": lambda v: f"{v:,.1f}" if v is not None else "—",
+            "מחיר (₪)":   lambda v: f"₪{v:,.0f}" if v is not None else "—",
+        })
+    )
+    st.dataframe(styled, use_container_width=True, hide_index=True)
+
+
+def _render_legs_structure_chart(legs: list[dict], entry_index: float | None) -> None:
+    """תרשים מבנה: כל רגל כסמן על ציר הסטרייקים (קנה למעלה / מכור למטה)."""
+    data = build_legs_chart_data(legs)
+    if not data:
+        st.info("אין נתונים לתרשים מבנה.")
+        return
+
+    fig = go.Figure()
+    for d in data:
+        is_buy = d["y"] > 0
+        color  = _GREEN if d["action"] == "קנה" else _RED
+        fig.add_trace(go.Scatter(
+            x=[d["strike"]], y=[d["y"]],
+            mode="markers+text",
+            marker=dict(
+                size=20, color=color,
+                symbol="triangle-up" if is_buy else "triangle-down",
+                line=dict(color=_DARK_BG, width=1.5),
+            ),
+            text=[f"{d['type']} {d['strike']:,.0f}"],
+            textposition="top center" if is_buy else "bottom center",
+            textfont=dict(color="#c8d6e8", size=11),
+            hovertext=[f"{d['action']} {d['qty']}× {d['type']} @ {d['strike']:,.0f}"],
+            hoverinfo="text",
+            showlegend=False,
+        ))
+
+    fig.add_hline(y=0, line_color=_AXIS, line_width=1)
+    if entry_index:
+        fig.add_vline(
+            x=float(entry_index), line_dash="dash", line_color=_GOLD, line_width=2,
+            annotation_text=f"מדד בכניסה {float(entry_index):,.0f}",
+            annotation_font=dict(color=_GOLD, size=12),
+            annotation_position="top right",
+        )
+
+    fig.update_layout(
+        paper_bgcolor=_DARK_BG, plot_bgcolor=_PLOT_BG,
+        font=dict(color="#c8d6e8", family="Arial", size=12),
+        height=300, margin=dict(t=30, b=40, l=30, r=30),
+        xaxis=dict(title="סטרייק", gridcolor=_GRID, linecolor=_GRID,
+                   zeroline=False, color=_AXIS, tickformat=","),
+        yaxis=dict(
+            showgrid=False, zeroline=False, color=_AXIS,
+            tickvals=[-2, -1, 0, 1, 2],
+            ticktext=["מכור ×2", "מכור", "", "קנה", "קנה ×2"],
+            range=[-2.6, 2.6],
+        ),
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def _render_trade_payoff_chart(trade: dict, legs: list[dict]) -> None:
+    """גרף payoff (P&L לפי מחיר המדד בפקיעה) בסגנון הכהה — מבוסס על הרגליים."""
+    entry_cost   = float(trade.get("entry_cost") or 0.0)
+    entry_index  = trade.get("entry_index")
+    center       = float(entry_index or 0.0)
+    if center <= 0:
+        strikes = [float(l["strike"]) for l in legs if l.get("strike") is not None]
+        center  = sum(strikes) / len(strikes) if strikes else 0.0
+
+    curve = build_trade_payoff_curve(legs, entry_cost, center)
+    if not curve["x"]:
+        st.info("אין מספיק נתונים לגרף payoff.")
+        return
+
+    xs, ys = curve["x"], curve["y"]
+
+    fig = go.Figure()
+    # אזור רווח (ירוק) ואזור הפסד (אדום) — אותו סגנון כמו payoff.py
+    fig.add_trace(go.Scatter(
+        x=xs, y=[v if v >= 0 else 0 for v in ys],
+        fill="tozeroy", fillcolor="rgba(39,174,96,0.20)",
+        line=dict(color=_GREEN, width=2.5), name="רווח",
+        hovertemplate="מדד: %{x:,.0f}<br>P&L: %{y:+,.0f} ₪<extra></extra>",
+    ))
+    fig.add_trace(go.Scatter(
+        x=xs, y=[v if v <= 0 else 0 for v in ys],
+        fill="tozeroy", fillcolor="rgba(231,76,60,0.20)",
+        line=dict(color=_RED, width=2.5), name="הפסד",
+        hovertemplate="מדד: %{x:,.0f}<br>P&L: %{y:+,.0f} ₪<extra></extra>",
+    ))
+    fig.add_hline(y=0, line_dash="dash", line_color="#666", line_width=1.5)
+
+    # קו מדד בכניסה
+    if center > 0:
+        fig.add_vline(
+            x=center, line_dash="dash", line_color=_GOLD, line_width=2,
+            annotation_text=f"מדד בכניסה {center:,.0f}",
+            annotation_font=dict(color=_GOLD, size=12),
+            annotation_position="top right",
+        )
+
+    # תוויות רווח/הפסד מרבי (על הטווח המוצג)
+    mp, ml = curve["max_profit"], curve["max_loss"]
+    if mp is not None and mp > 0:
+        x_mp = xs[ys.index(mp)]
+        fig.add_annotation(x=x_mp, y=mp, text=f"רווח מקס׳<br>{mp:+,.0f} ₪",
+                           showarrow=True, arrowhead=2, arrowcolor=_GREEN,
+                           font=dict(color=_GREEN, size=12),
+                           bgcolor="rgba(0,0,0,0.55)", bordercolor=_GREEN, ax=0, ay=-38)
+    if ml is not None and ml < 0:
+        x_ml = xs[ys.index(ml)]
+        fig.add_annotation(x=x_ml, y=ml, text=f"הפסד מקס׳<br>{ml:+,.0f} ₪",
+                           showarrow=True, arrowhead=2, arrowcolor=_RED,
+                           font=dict(color=_RED, size=12),
+                           bgcolor="rgba(0,0,0,0.55)", bordercolor=_RED, ax=0, ay=38)
+
+    fig.update_layout(
+        paper_bgcolor=_DARK_BG, plot_bgcolor=_PLOT_BG,
+        font=dict(color="#c8d6e8", family="Arial", size=12),
+        height=300, margin=dict(t=30, b=40, l=70, r=25),
+        xaxis=dict(title="מחיר מדד בפקיעה", gridcolor=_GRID, linecolor=_GRID,
+                   zeroline=False, color=_AXIS, tickformat=","),
+        yaxis=dict(title='רווח/הפסד (₪)', gridcolor=_GRID, linecolor=_GRID,
+                   zeroline=False, color=_AXIS, tickformat=",.0f"),
+        legend=dict(bgcolor="rgba(0,0,0,0)", font=dict(color="#c8d6e8", size=11),
+                    orientation="h", yanchor="bottom", y=1.02),
+        hovermode="x unified",
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def _render_single_trade_detail(trade: dict) -> None:
+    """פירוט עסקה בודדת: כותרת + טבלת רגליים + תרשים מבנה + גרף payoff."""
+    name   = trade.get("strategy_name") or "—"
+    status = _STATUS_HE.get(trade.get("status", ""), trade.get("status", "—"))
+    st.markdown(f"#### {name} — {status}")
+
+    legs = trade.get("legs_json") or []
+    if not legs:
+        st.info("לעסקה זו אין פירוט רגליים (ייתכן שדולגה — לא היו נתוני מחיר).")
+        return
+
+    _render_legs_table(legs)
+
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown("**מבנה הרגליים**")
+        _render_legs_structure_chart(legs, trade.get("entry_index"))
+    with c2:
+        st.markdown("**גרף Payoff**")
+        _render_trade_payoff_chart(trade, legs)
+
+
+def _render_expiry_breakdown(trades: list[dict]) -> None:
+    """אזור '🔍 פירוט לפי פקיעה' — בורר פקיעה + פירוט העסקה/ות שלה."""
+    st.markdown("### 🔍 פירוט לפי פקיעה")
+
+    expiries = trade_expiries(trades)
+    if not expiries:
+        st.info("אין עסקאות להצגה לפי פקיעה.")
+        return
+
+    default = nearest_expiry(expiries)
+    idx     = expiries.index(default) if default in expiries else 0
+    chosen  = st.selectbox("בחר פקיעה:", expiries, index=idx)
+
+    day_trades = [t for t in trades if str(t.get("expiry_date")) == str(chosen)]
+    if not day_trades:
+        st.info("אין עסקה לפקיעה שנבחרה.")
+        return
+
+    for trade in day_trades:
+        _render_single_trade_detail(trade)
+
+
 def _render_portfolio_detail(pid: int) -> None:
     """תצוגה מלאה של תיק בודד."""
     # ── כפתור חזרה ──────────────────────────────────────────────────
@@ -361,6 +565,9 @@ def _render_portfolio_detail(pid: int) -> None:
     # ── טבלת עסקאות ─────────────────────────────────────────────────
     st.markdown("### 📋 עסקאות")
     _render_trade_table(sorted(trades, key=lambda t: str(t.get("opened_at") or ""), reverse=True))
+
+    # ── פירוט לפי פקיעה (רגליים + מבנה + payoff) ─────────────────────
+    _render_expiry_breakdown(trades)
 
     # ── Track record ─────────────────────────────────────────────────
     st.markdown("### 🏆 Track Record לפי אסטרטגיה")

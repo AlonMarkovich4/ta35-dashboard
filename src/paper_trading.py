@@ -35,6 +35,7 @@ import pandas as pd
 from options_parser import find_atm
 from payoff import (
     MULTIPLIER,
+    find_breakevens,
     strategy_legs_detail,
     strategy_payoff_params,
     strategy_summary,
@@ -521,3 +522,100 @@ def build_track_record(trades: list[dict]) -> list[dict]:
         })
 
     return sorted(rows, key=lambda r: r["total_pnl"], reverse=True)
+
+
+# ─── Trade-detail helpers (תצוגת פירוט לפי פקיעה) ──────────────────────
+
+def trade_expiries(trades: list[dict]) -> list[str]:
+    """מחזיר תאריכי פקיעה ייחודיים (כמחרוזת) שיש להם עסקה, ממוינים כרונולוגית.
+
+    מתעלם מערכי None. ממיין לפי התאריך המפורסר (לא לקסיקוגרפית).
+    """
+    uniq = {
+        str(t["expiry_date"])
+        for t in (trades or [])
+        if t.get("expiry_date") is not None
+    }
+    return sorted(uniq, key=lambda s: (_parse_date(s) or date.max))
+
+
+def nearest_expiry(expiries: list[str], today: Optional[date] = None) -> Optional[str]:
+    """מחזיר את הפקיעה הקרובה ביותר להיום (מרחק ימים מינימלי); None אם הרשימה ריקה.
+
+    תאריך שלא ניתן לפרסור נדחק לסוף (מרחק ענק) כדי לא להיבחר בטעות.
+    """
+    if not expiries:
+        return None
+    ref = today or date.today()
+
+    def _dist(s: str) -> int:
+        d = _parse_date(s)
+        return abs((d - ref).days) if d else 10 ** 9
+
+    return min(expiries, key=_dist)
+
+
+def build_legs_chart_data(legs: list[dict]) -> list[dict]:
+    """ממיר legs_json לנקודות תרשים-מבנה על ציר הסטרייקים.
+
+    לכל רגל: {strike, action, type, qty, y, label}.
+    y = +qty לרגל 'קנה' (מעל הציר), −qty לרגל 'מכור' (מתחת לציר) — להמחשה ויזואלית.
+    רגל ללא strike תקין מדולגת. מחזיר [] אם אין רגליים.
+    """
+    out: list[dict] = []
+    for leg in (legs or []):
+        try:
+            strike = float(leg.get("strike"))
+        except (TypeError, ValueError):
+            continue
+        action = leg.get("action", "")
+        otype  = leg.get("type", "")
+        try:
+            qty = int(leg.get("qty", 1) or 1)
+        except (TypeError, ValueError):
+            qty = 1
+        sign = 1 if action == "קנה" else -1
+        out.append({
+            "strike": strike,
+            "action": action,
+            "type":   otype,
+            "qty":    qty,
+            "y":      sign * qty,
+            "label":  f"{action} {otype} {strike:,.0f}",
+        })
+    return out
+
+
+def build_trade_payoff_curve(
+    legs: list[dict],
+    entry_cost: float,
+    center_index: float,
+    pct: float = 0.10,
+    n: int = 241,
+) -> dict:
+    """בונה עקומת P&L נטו לעסקה על טווח ±pct סביב center_index.
+
+    משתמש ב-_payoff_from_legs הקיים (payoff גולמי בש"ח) ומחסיר entry_cost —
+    אינו מחשב payoff מאפס. ה-entry_cost כבר בש"ח (חיובי=שולמה פרמיה,
+    שלילי=התקבלה פרמיה כמו Iron Condor).
+
+    מחזיר {"x", "y", "max_profit", "max_loss", "breakevens"};
+    ריק אם אין רגליים או center_index לא תקין.
+    """
+    empty = {"x": [], "y": [], "max_profit": None, "max_loss": None, "breakevens": []}
+    if not legs or not center_index or center_index <= 0 or n < 2:
+        return empty
+
+    lo = center_index * (1 - pct)
+    hi = center_index * (1 + pct)
+    xs = [lo + (hi - lo) * i / (n - 1) for i in range(n)]
+    ec = float(entry_cost or 0.0)
+    ys = [_payoff_from_legs(legs, x) - ec for x in xs]
+
+    return {
+        "x":           xs,
+        "y":           ys,
+        "max_profit":  max(ys),
+        "max_loss":    min(ys),
+        "breakevens":  find_breakevens(xs, ys),
+    }

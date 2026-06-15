@@ -24,6 +24,10 @@ from paper_trading import (
     _parse_date,
     _payoff_from_legs,
     _portfolio_strategy_ids,
+    build_legs_chart_data,
+    build_trade_payoff_curve,
+    nearest_expiry,
+    trade_expiries,
     build_equity_curve,
     build_track_record,
     close_trades_for_expiry,
@@ -1260,3 +1264,123 @@ class TestBuildTrackRecord:
         result = build_track_record(trades)
         assert result[0]["wins"]     == 0
         assert result[0]["win_rate"] == pytest.approx(0.0)
+
+
+# ─── trade_expiries / nearest_expiry ───────────────────────────────────
+
+class TestTradeExpiries:
+    def test_empty(self):
+        assert trade_expiries([]) == []
+
+    def test_unique_and_chronological(self):
+        trades = [
+            {"expiry_date": "2026-06-19"},
+            {"expiry_date": "2026-06-16"},
+            {"expiry_date": "2026-06-19"},
+        ]
+        assert trade_expiries(trades) == ["2026-06-16", "2026-06-19"]
+
+    def test_ignores_none(self):
+        trades = [{"expiry_date": None}, {"expiry_date": "2026-06-16"}]
+        assert trade_expiries(trades) == ["2026-06-16"]
+
+    def test_handles_date_objects(self):
+        trades = [{"expiry_date": date(2026, 6, 18)}, {"expiry_date": date(2026, 6, 16)}]
+        assert trade_expiries(trades) == ["2026-06-16", "2026-06-18"]
+
+
+class TestNearestExpiry:
+    def test_empty_returns_none(self):
+        assert nearest_expiry([]) is None
+
+    def test_picks_closest_upcoming(self):
+        exps = ["2026-06-16", "2026-06-19", "2026-07-01"]
+        assert nearest_expiry(exps, today=date(2026, 6, 15)) == "2026-06-16"
+
+    def test_picks_closest_when_past_and_future(self):
+        exps = ["2026-06-10", "2026-06-20"]
+        assert nearest_expiry(exps, today=date(2026, 6, 12)) == "2026-06-10"
+
+    def test_exact_match_distance_zero(self):
+        exps = ["2026-06-16", "2026-06-19"]
+        assert nearest_expiry(exps, today=date(2026, 6, 19)) == "2026-06-19"
+
+
+# ─── build_legs_chart_data ─────────────────────────────────────────────
+
+class TestBuildLegsChartData:
+    def test_empty(self):
+        assert build_legs_chart_data([]) == []
+
+    def test_buy_call_positive_y(self):
+        legs = [{"action": "קנה", "type": "Call", "qty": 1, "strike": 4300.0,
+                 "price_pts": 30.0, "price_nis": 1500.0}]
+        d = build_legs_chart_data(legs)
+        assert len(d) == 1
+        assert d[0]["strike"] == 4300.0
+        assert d[0]["y"] == 1            # קנה → מעל הציר
+        assert d[0]["action"] == "קנה"
+        assert "Call" in d[0]["label"] and "4,300" in d[0]["label"]
+
+    def test_sell_negative_y(self):
+        legs = [{"action": "מכור", "type": "Call", "qty": 1, "strike": 4400.0}]
+        assert build_legs_chart_data(legs)[0]["y"] == -1
+
+    def test_qty_scales_y(self):
+        legs = [{"action": "מכור", "type": "Call", "qty": 2, "strike": 4350.0}]
+        assert build_legs_chart_data(legs)[0]["y"] == -2
+
+    def test_bad_strike_skipped(self):
+        legs = [{"action": "קנה", "type": "Call", "qty": 1, "strike": None}]
+        assert build_legs_chart_data(legs) == []
+
+    def test_iron_condor_four_legs(self):
+        legs = [
+            {"action": "קנה",  "type": "Put",  "qty": 1, "strike": 4100.0},
+            {"action": "מכור", "type": "Put",  "qty": 1, "strike": 4200.0},
+            {"action": "מכור", "type": "Call", "qty": 1, "strike": 4400.0},
+            {"action": "קנה",  "type": "Call", "qty": 1, "strike": 4500.0},
+        ]
+        d = build_legs_chart_data(legs)
+        assert len(d) == 4
+        assert [p["y"] for p in d] == [1, -1, -1, 1]
+
+
+# ─── build_trade_payoff_curve ──────────────────────────────────────────
+
+class TestBuildTradePayoffCurve:
+    def test_empty_legs(self):
+        c = build_trade_payoff_curve([], 0.0, 4300.0)
+        assert c["x"] == [] and c["y"] == []
+        assert c["breakevens"] == []
+
+    def test_invalid_center(self):
+        legs = [{"action": "קנה", "type": "Call", "qty": 1, "strike": 4300.0}]
+        assert build_trade_payoff_curve(legs, 1000.0, 0.0)["x"] == []
+
+    def test_long_call_payoff_increases_and_floor(self):
+        """קנה Call 4300, פרמיה 1500₪: מתחת לסטרייק P&L=−1500, ועולה מעליו."""
+        legs = [{"action": "קנה", "type": "Call", "qty": 1, "strike": 4300.0}]
+        c = build_trade_payoff_curve(legs, 1500.0, 4300.0, pct=0.10, n=101)
+        assert len(c["x"]) == 101 and len(c["y"]) == 101
+        assert c["y"][-1] > c["y"][0]                       # עולה עם המחיר
+        assert c["max_loss"] == pytest.approx(-1500.0)      # הרצפה = הפרמיה ששולמה
+
+    def test_long_call_breakeven_near_strike_plus_premium(self):
+        """Breakeven ≈ 4300 + (1500/50) = 4330."""
+        legs = [{"action": "קנה", "type": "Call", "qty": 1, "strike": 4300.0}]
+        c = build_trade_payoff_curve(legs, 1500.0, 4300.0)
+        assert any(abs(be - 4330.0) < 25 for be in c["breakevens"])
+
+    def test_iron_condor_credit_profit_at_center(self):
+        """IC עם credit 500₪ (entry_cost=−500): במרכז כל הרגליים פגות → P&L=+500."""
+        legs = [
+            {"action": "קנה",  "type": "Put",  "qty": 1, "strike": 4100.0},
+            {"action": "מכור", "type": "Put",  "qty": 1, "strike": 4200.0},
+            {"action": "מכור", "type": "Call", "qty": 1, "strike": 4400.0},
+            {"action": "קנה",  "type": "Call", "qty": 1, "strike": 4500.0},
+        ]
+        c = build_trade_payoff_curve(legs, -500.0, 4300.0, n=101)
+        mid = c["y"][len(c["y"]) // 2]                      # ≈ 4300 (המרכז)
+        assert mid == pytest.approx(500.0)
+        assert c["max_profit"] == pytest.approx(500.0)      # הרווח המרבי = ה-credit
