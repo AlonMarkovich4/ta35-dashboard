@@ -27,6 +27,7 @@ from paper_trading import (
     build_track_record,
     build_trade_payoff_curve,
     compute_balance,
+    group_trades_by_portfolio,
     nearest_expiry,
     open_trades_for_expiry,
     trade_expiries,
@@ -68,6 +69,54 @@ st.set_page_config(
     layout="wide",
 )
 inject_global_css()
+
+
+# ════════════════════════════════════════════════════════════════════════
+#  Cached DB layer
+# ════════════════════════════════════════════════════════════════════════
+# engine יחיד משותף לכל הריצה (cache_resource — אובייקט חי עם connection pool,
+# לא דאטה). הקריאות ל-DB עוברות דרך cache_data (ttl) כדי לא לרוץ בכל אינטראקציה.
+# חשוב: ה-wrappers המ-cached *אינם* מקבלים engine כפרמטר — הם שולפים אותו פנימית
+# מ-_engine(), כדי שלא לשבור את ה-hashing של cache_data על אובייקט ה-engine.
+_CACHE_TTL = 60   # שניות — איזון בין רענון לבין מספר השאילתות
+
+
+@st.cache_resource(show_spinner=False)
+def _engine():
+    """engine יחיד ומשותף לכל הריצה — נוצר פעם אחת ומשותף בין כל ה-reruns/sessions."""
+    return _make_engine()
+
+
+@st.cache_data(ttl=_CACHE_TTL, show_spinner=False)
+def _cached_portfolios() -> list[dict]:
+    """רשימת התיקים, cached ל-_CACHE_TTL שניות (engine נשלף פנימית)."""
+    return get_portfolios(engine=_engine())
+
+
+@st.cache_data(ttl=_CACHE_TTL, show_spinner=False)
+def _cached_portfolio(pid: int) -> dict | None:
+    """תיק בודד לפי id, cached."""
+    return get_portfolio(pid, engine=_engine())
+
+
+@st.cache_data(ttl=_CACHE_TTL, show_spinner=False)
+def _cached_trades(portfolio_id: int | None = None) -> list[dict]:
+    """עסקאות (לכל התיקים, או לתיק יחיד), cached. portfolio_id ניתן ל-hash."""
+    return get_trades(portfolio_id=portfolio_id, engine=_engine())
+
+
+@st.cache_data(ttl=_CACHE_TTL, show_spinner=False)
+def _cached_expiries() -> list[str]:
+    """פקיעות זמינות, cached (משתמש ב-engine המשותף)."""
+    return get_available_expiries(engine=_engine())
+
+
+def _clear_db_cache() -> None:
+    """מנקה את cache הדאטה אחרי פעולת כתיבה כדי שהשינוי יופיע מיד.
+
+    מנקה רק cache_data (הקריאות) — לא את cache_resource (ה-engine נשאר חי).
+    """
+    st.cache_data.clear()
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -525,9 +574,9 @@ def _render_portfolio_detail(pid: int) -> None:
         st.session_state["selected_portfolio_id"] = None
         st.rerun()
 
-    # ── טעינת נתונים ────────────────────────────────────────────────
+    # ── טעינת נתונים (cached) ───────────────────────────────────────
     try:
-        portfolio = get_portfolio(pid)
+        portfolio = _cached_portfolio(pid)
     except Exception:
         st.error("❌ שגיאה בטעינת נתוני התיק.")
         return
@@ -537,7 +586,7 @@ def _render_portfolio_detail(pid: int) -> None:
         return
 
     try:
-        trades = get_trades(portfolio_id=pid)
+        trades = _cached_trades(portfolio_id=pid)
     except Exception:
         trades = []
         st.warning("⚠️ שגיאה בטעינת עסקאות — מוצגים נתוני תיק בלבד.")
@@ -582,8 +631,11 @@ def _render_portfolio_detail(pid: int) -> None:
 #  Portfolio card (list view)
 # ════════════════════════════════════════════════════════════════════════
 
-def _portfolio_card(p: dict) -> None:
-    """מציג כרטיס HTML של תיק + כפתור פתיחה."""
+def _portfolio_card(p: dict, trades: list[dict]) -> None:
+    """מציג כרטיס HTML של תיק + כפתור פתיחה.
+
+    trades — עסקאות התיק (מתקבלות מבחוץ, משאילתה אחת לכל הרשת — לא שאילתה לכל כרטיס).
+    """
     pid        = p["id"]
     name       = p.get("name") or f"תיק #{pid}"
     initial    = float(p.get("initial_balance") or 0)
@@ -591,7 +643,6 @@ def _portfolio_card(p: dict) -> None:
     commission = float(_cpv if _cpv is not None else 2.5)
     strat_text = _strategy_label(p.get("strategy_ids"))
 
-    trades       = get_trades(portfolio_id=pid)
     open_count   = sum(1 for t in trades if t.get("status") == "open")
     closed_count = sum(1 for t in trades if t.get("status") == "closed")
 
@@ -672,60 +723,56 @@ def _run_manual_open(expiries: list[str], portfolios: list[dict]) -> dict:
         "expiries": [],
     }
 
-    # engine אחד לכל ההרצה (חוצה כל הפקיעות) — נסגר ב-finally כדי לנקות את ה-pool
-    # ולא להשאיר חיבורים פתוחים מול ה-Supabase pooler.
-    engine = _make_engine()
-    try:
-        for expiry in expiries:
-            exp_rec: dict = {
-                "expiry":       expiry,
-                "chain_error":  None,
-                "counts":       {},
-                "by_portfolio": {},
-            }
+    # engine המשותף (cache_resource) — לא יוצרים חדש ו*לא* קוראים dispose:
+    # זהו ה-engine החי של כל האפליקציה, סגירתו תשבור שאילתות עתידיות.
+    engine = _engine()
 
-            # ── טעינת שרשרת — כישלון מדווח ומדלג ──────────────────────────
-            try:
-                chain = get_latest_option_chain(expiry, engine=engine)
-            except Exception as exc:  # noqa: BLE001
-                exp_rec["chain_error"] = f"חריגה בטעינת השרשרת: {exc}"
-                summary["expiries"].append(exp_rec)
-                continue
+    for expiry in expiries:
+        exp_rec: dict = {
+            "expiry":       expiry,
+            "chain_error":  None,
+            "counts":       {},
+            "by_portfolio": {},
+        }
 
-            if not chain:
-                exp_rec["chain_error"] = (
-                    "לא נטענה שרשרת אופציות (נתונים חסרים או לא תקינים)."
-                )
-                summary["expiries"].append(exp_rec)
-                continue
-
-            # ── פתיחת עסקאות — engine משותף לכל ההרצה ─────────────────────
-            try:
-                results = open_trades_for_expiry(expiry, chain, portfolios, engine=engine)
-            except Exception as exc:  # noqa: BLE001
-                exp_rec["chain_error"] = f"חריגה בפתיחת עסקאות: {exc}"
-                summary["expiries"].append(exp_rec)
-                continue
-
-            # ── ספירת תוצאות לפי סטטוס + פירוט לכל תיק ─────────────────────
-            counts: dict = {}
-            by_pf: dict = {}
-            for r in results:
-                status = r.get("status", "error")
-                pid    = r.get("portfolio_id")
-                counts[status] = counts.get(status, 0) + 1
-                if pid is not None:
-                    name = pid_to_name.get(pid, f"תיק #{pid}")
-                    by_pf.setdefault(pid, {"name": name, "counts": {}})
-                    by_pf[pid]["counts"][status] = by_pf[pid]["counts"].get(status, 0) + 1
-
-            exp_rec["counts"]       = counts
-            exp_rec["by_portfolio"] = by_pf
+        # ── טעינת שרשרת — כישלון מדווח ומדלג ──────────────────────────
+        try:
+            chain = get_latest_option_chain(expiry, engine=engine)
+        except Exception as exc:  # noqa: BLE001
+            exp_rec["chain_error"] = f"חריגה בטעינת השרשרת: {exc}"
             summary["expiries"].append(exp_rec)
-    finally:
-        # _make_engine מחזיר None אם DATABASE_URL לא מוגדר — הגנה לפני dispose
-        if engine is not None:
-            engine.dispose()
+            continue
+
+        if not chain:
+            exp_rec["chain_error"] = (
+                "לא נטענה שרשרת אופציות (נתונים חסרים או לא תקינים)."
+            )
+            summary["expiries"].append(exp_rec)
+            continue
+
+        # ── פתיחת עסקאות — engine משותף לכל ההרצה ─────────────────────
+        try:
+            results = open_trades_for_expiry(expiry, chain, portfolios, engine=engine)
+        except Exception as exc:  # noqa: BLE001
+            exp_rec["chain_error"] = f"חריגה בפתיחת עסקאות: {exc}"
+            summary["expiries"].append(exp_rec)
+            continue
+
+        # ── ספירת תוצאות לפי סטטוס + פירוט לכל תיק ─────────────────────
+        counts: dict = {}
+        by_pf: dict = {}
+        for r in results:
+            status = r.get("status", "error")
+            pid    = r.get("portfolio_id")
+            counts[status] = counts.get(status, 0) + 1
+            if pid is not None:
+                name = pid_to_name.get(pid, f"תיק #{pid}")
+                by_pf.setdefault(pid, {"name": name, "counts": {}})
+                by_pf[pid]["counts"][status] = by_pf[pid]["counts"].get(status, 0) + 1
+
+        exp_rec["counts"]       = counts
+        exp_rec["by_portfolio"] = by_pf
+        summary["expiries"].append(exp_rec)
 
     return summary
 
@@ -785,7 +832,7 @@ def _render_manual_actions(portfolios: list[dict]) -> None:
             "לבדיקה בלבד."
         )
 
-        expiries = get_available_expiries()
+        expiries = _cached_expiries()
         if not expiries:
             st.warning("אין פקיעות זמינות כרגע (טבלת tase_putcall ריקה או לא נגישה).")
             return
@@ -808,6 +855,7 @@ def _render_manual_actions(portfolios: list[dict]) -> None:
             with st.spinner("פותח עסקאות..."):
                 summary = _run_manual_open(expiries, portfolios)
             st.session_state["manual_open_summary"] = summary
+            _clear_db_cache()   # כתיבה בוצעה — לרענן את הדאטה כדי שהעסקאות יופיעו מיד
             st.rerun()
 
 
@@ -858,7 +906,8 @@ with st.expander("➕ צור תיק חדש", expanded=False):
                 st.error("נא לבחור לפחות אסטרטגיה אחת לתיק.")
             else:
                 res = create_portfolio(
-                    p_name.strip(), p_balance, p_comm, strategy_ids=p_strategy_ids
+                    p_name.strip(), p_balance, p_comm,
+                    strategy_ids=p_strategy_ids, engine=_engine(),
                 )
                 if res:
                     st.success(
@@ -866,16 +915,20 @@ with st.expander("➕ צור תיק חדש", expanded=False):
                         f"(הון: ₪{p_balance:,.0f} | עמלה: ₪{p_comm:.1f}/רגל | "
                         f"אסטרטגיות: {_strategy_label(p_strategy_ids)})"
                     )
+                    _clear_db_cache()   # כתיבה בוצעה — לרענן כדי שהתיק החדש יופיע מיד
                     st.rerun()
                 else:
                     st.error("❌ שגיאה ביצירת התיק — בדוק חיבור DB.")
 
 # ─── רשת תיקים ──────────────────────────────────────────────────────
-portfolios = get_portfolios()
+portfolios = _cached_portfolios()
 
 if not portfolios:
     st.info("אין תיקים פעילים. צור תיק חדש בעזרת הכפתור למעלה.")
     st.stop()
+
+# שאילתה אחת לכל העסקאות, ואז קיבוץ לפי תיק ב-Python — במקום שאילתה לכל כרטיס.
+trades_by_pid = group_trades_by_portfolio(_cached_trades())
 
 st.markdown(f"### תיקים פעילים ({len(portfolios)})")
 
@@ -887,7 +940,8 @@ for row_start in range(0, len(portfolios), _COLS):
         if idx >= len(portfolios):
             break
         with col:
-            _portfolio_card(portfolios[idx])
+            p = portfolios[idx]
+            _portfolio_card(p, trades_by_pid.get(p["id"], []))
 
 # ─── פעולות ידניות (בדיקה) ──────────────────────────────────────────
 st.divider()

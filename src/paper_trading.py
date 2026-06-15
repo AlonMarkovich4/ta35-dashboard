@@ -526,6 +526,21 @@ def build_track_record(trades: list[dict]) -> list[dict]:
 
 # ─── Trade-detail helpers (תצוגת פירוט לפי פקיעה) ──────────────────────
 
+def group_trades_by_portfolio(trades: list[dict]) -> dict[int, list[dict]]:
+    """מקבץ רשימת עסקאות לפי portfolio_id (לשאילתה אחת במקום אחת-לכל-תיק).
+
+    מחזיר dict{portfolio_id: [trades...]} תוך שמירת סדר העסקאות. עסקאות ללא
+    portfolio_id מדולגות. מחזיר {} אם הקלט ריק.
+    """
+    grouped: dict[int, list[dict]] = {}
+    for t in (trades or []):
+        pid = t.get("portfolio_id")
+        if pid is None:
+            continue
+        grouped.setdefault(pid, []).append(t)
+    return grouped
+
+
 def trade_expiries(trades: list[dict]) -> list[str]:
     """מחזיר תאריכי פקיעה ייחודיים (כמחרוזת) שיש להם עסקה, ממוינים כרונולוגית.
 

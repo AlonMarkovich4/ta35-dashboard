@@ -26,6 +26,7 @@ from paper_trading import (
     _portfolio_strategy_ids,
     build_legs_chart_data,
     build_trade_payoff_curve,
+    group_trades_by_portfolio,
     nearest_expiry,
     trade_expiries,
     build_equity_curve,
@@ -1264,6 +1265,39 @@ class TestBuildTrackRecord:
         result = build_track_record(trades)
         assert result[0]["wins"]     == 0
         assert result[0]["win_rate"] == pytest.approx(0.0)
+
+
+# ─── group_trades_by_portfolio ─────────────────────────────────────────
+
+class TestGroupTradesByPortfolio:
+    def test_empty(self):
+        assert group_trades_by_portfolio([]) == {}
+
+    def test_groups_by_pid(self):
+        trades = [
+            {"portfolio_id": 1, "id": 10},
+            {"portfolio_id": 2, "id": 20},
+            {"portfolio_id": 1, "id": 11},
+        ]
+        g = group_trades_by_portfolio(trades)
+        assert set(g) == {1, 2}
+        assert [t["id"] for t in g[1]] == [10, 11]   # סדר נשמר
+        assert [t["id"] for t in g[2]] == [20]
+
+    def test_skips_missing_pid(self):
+        trades = [{"portfolio_id": None, "id": 1}, {"id": 2}, {"portfolio_id": 3, "id": 3}]
+        g = group_trades_by_portfolio(trades)
+        assert set(g) == {3}
+
+    def test_matches_per_portfolio_query(self):
+        """קיבוץ משאילתה אחת חייב להניב בדיוק כמו סינון לכל תיק בנפרד."""
+        trades = [
+            {"portfolio_id": 1, "id": 10}, {"portfolio_id": 2, "id": 20},
+            {"portfolio_id": 1, "id": 11}, {"portfolio_id": 3, "id": 30},
+        ]
+        g = group_trades_by_portfolio(trades)
+        for pid in (1, 2, 3):
+            assert g.get(pid, []) == [t for t in trades if t.get("portfolio_id") == pid]
 
 
 # ─── trade_expiries / nearest_expiry ───────────────────────────────────
