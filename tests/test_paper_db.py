@@ -29,6 +29,7 @@ from paper_db import (
     _row_to_dict,
     close_trade,
     create_portfolio,
+    get_decision_logs,
     get_open_trades_for_expiry,
     get_portfolio,
     get_portfolios,
@@ -853,3 +854,45 @@ class TestInsertDecisionLog:
         eng, conn = _mock_engine_scalar(5)
         insert_decision_log(_SAMPLE_DECISION, engine=eng)
         conn.commit.assert_called_once()
+
+
+# ─── get_decision_logs ──────────────────────────────────────────────────
+
+class TestGetDecisionLogs:
+    def test_returns_empty_without_engine(self, monkeypatch):
+        monkeypatch.delenv("DATABASE_URL", raising=False)
+        assert get_decision_logs() == []
+
+    def test_returns_list_of_dicts(self):
+        rows = [
+            _make_row(id=2, expiry_date="2026-06-17", regime="calm", top_strategy_id=2),
+            _make_row(id=1, expiry_date="2026-06-12", regime="normal", top_strategy_id=3),
+        ]
+        eng = _mock_engine(fetchall=rows)
+        result = get_decision_logs(engine=eng)
+        assert len(result) == 2
+        assert result[0]["id"] == 2 and result[0]["regime"] == "calm"
+
+    def test_sql_orders_by_decided_at_desc_with_limit(self):
+        conn = _mock_conn(fetchall=[])
+        eng = MagicMock()
+        eng.connect.return_value = conn
+        get_decision_logs(limit=10, engine=eng)
+        sql = str(conn.execute.call_args[0][0])
+        assert "decision_log" in sql
+        assert "ORDER BY decided_at DESC" in sql
+        assert "LIMIT" in sql
+        params = conn.execute.call_args[0][1]
+        assert params["limit"] == 10
+
+    def test_default_limit_is_50(self):
+        conn = _mock_conn(fetchall=[])
+        eng = MagicMock()
+        eng.connect.return_value = conn
+        get_decision_logs(engine=eng)
+        assert conn.execute.call_args[0][1]["limit"] == 50
+
+    def test_returns_empty_on_db_error(self):
+        eng = MagicMock()
+        eng.connect.side_effect = Exception("read failed")
+        assert get_decision_logs(engine=eng) == []

@@ -15,6 +15,7 @@ paper_db.py — שכבת DB לתיקי Paper Trading.
   get_open_trades_for_expiry(expiry_date, engine=None)                  → list[dict]
   close_trade(trade_id, close_index, pnl, pnl_pct, exit_commission, engine) → bool
   insert_decision_log(decision, trigger, engine_version, engine)        → int | None
+  get_decision_logs(limit, engine)                                      → list[dict]
 """
 from __future__ import annotations
 
@@ -450,3 +451,26 @@ def insert_decision_log(
             decision.get("expiry_date"), exc, exc_info=True,
         )
         return None
+
+
+def get_decision_logs(limit: int = 50, engine=None) -> list[dict]:
+    """מחזיר רשומות decision_log ממוינות לפי decided_at יורד (האחרונה ראשונה).
+
+    קריאה בלבד (append-only) — מחזיר עד limit רשומות; [] בכישלון.
+    decision_json (JSONB) חוזר כ-dict מהדרייבר.
+    """
+    eng = _make_engine(engine)
+    if eng is None:
+        return []
+    try:
+        with eng.connect() as conn:
+            rows = conn.execute(
+                text(
+                    "SELECT * FROM decision_log"
+                    " ORDER BY decided_at DESC LIMIT :limit"
+                ),
+                {"limit": limit},
+            ).fetchall()
+        return [dict(r._mapping) for r in rows]
+    except Exception:
+        return []
