@@ -58,7 +58,8 @@ def run_backtest(
     -------
     DataFrame עם שורה לכל וריאנט פרמטר:
       strategy_id | strategy_name | params_repr | param_value |
-      win_rate | wins | losses | total
+      win_rate | wins | losses | total | avg_intensity
+    avg_intensity — עוצמה ממוצעת ([0,1]) על אותם moves (מדד משלים ל-win_rate).
     ממוין לפי strategy_id, ואז לפי param_value.
     """
     grid = strategy_grid if strategy_grid is not None else STRATEGY_GRID
@@ -80,6 +81,8 @@ def run_backtest(
         strategy = get_strategy(strategy_id)
         for params in grid[strategy_id]:
             wins = sum(1 for m in moves if strategy.is_success(m, params))
+            # עוצמה ממוצעת — על אותם moves (מדד משלים ל-win_rate, append בלבד)
+            intensity_sum = sum(strategy.profit_intensity(m, params) for m in moves)
             # ערך מספרי ראשון לציר ה-X בגרפים
             param_value = float(next(iter(params.values()))) if params else 0.0
             rows.append(
@@ -92,6 +95,7 @@ def run_backtest(
                     "wins": wins,
                     "losses": total - wins,
                     "total": total,
+                    "avg_intensity": intensity_sum / total if total else 0.0,
                 }
             )
 

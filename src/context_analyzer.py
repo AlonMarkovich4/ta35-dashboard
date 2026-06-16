@@ -260,8 +260,9 @@ _MIN_SIMILAR_FOR_CONFIDENCE = 5         # מתחת לזה — נימה מסתי�
 
 
 def _decision_reason(rec: dict, n_similar: int, regime: str) -> str:
-    """בונה נימוק עברי קצר לרשומת דירוג בודדת (כולל rank, cond_wr, regime)."""
+    """בונה נימוק עברי קצר לרשומת דירוג בודדת (כולל rank, cond_wr, עוצמה, regime)."""
     rank, cwr, gwr, dwr = rec["rank"], rec["cond_wr"], rec["global_wr"], rec["delta_wr"]
+    ci = rec["cond_intensity"]
     if cwr is not None:
         s = f"מדורגת #{rank} — Win Rate מותנה {cwr:.0%} על {n_similar} מקרים דומים"
         if gwr is not None:
@@ -270,6 +271,8 @@ def _decision_reason(rec: dict, n_similar: int, regime: str) -> str:
         s = f"מדורגת #{rank} — אין מקרים דומים; Win Rate גלובלי {gwr:.0%}"
     else:
         s = f"מדורגת #{rank} — אין נתונים היסטוריים מספיקים"
+    if ci is not None:
+        s += f"; עוצמה ממוצעת {ci:.2f}"
     return s + f"; משטר נוכחי: {regime}"
 
 
@@ -331,8 +334,12 @@ def build_expiry_decision(
       expiry_date, expiry_type,
       regime: {regime, mean_abs_move, std_move, n},
       n_similar, risk_score,
-      ranking: [{rank, strategy_id, strategy_name, cond_wr, global_wr, delta_wr, reason} ×6],
+      ranking: [{rank, strategy_id, strategy_name, cond_wr, global_wr, delta_wr,
+                 cond_intensity, reason} ×6],
       top_strategy_id, note
+
+    דירוג: ראשי לפי cond_wr (יורד); שובר-שוויון cond_intensity (עוצמה ממוצעת על
+    הפקיעות הדומות) — מבדיל בין אסטרטגיות עם אותו cond_wr (IC מול Butterfly).
     """
     # סוג מנורמל — W/M בלבד מסננים; כל ערך אחר (None/לא ידוע) = ללא סינון, עקבי
     # בין recent_volatility / find_similar_expiries / run_backtest.
@@ -350,6 +357,11 @@ def build_expiry_decision(
         {int(r["strategy_id"]): float(r["win_rate"]) for _, r in cond_best.iterrows()}
         if not cond_best.empty else {}
     )
+    # עוצמה ממוצעת על הפקיעות הדומות — שובר-שוויון (מ-avg_intensity של run_backtest)
+    cond_int_by_id = (
+        {int(r["strategy_id"]): float(r["avg_intensity"]) for _, r in cond_best.iterrows()}
+        if not cond_best.empty and "avg_intensity" in cond_best.columns else {}
+    )
 
     # 3. Win Rate גלובלי (כל ההיסטוריה מאותו סוג) ל-delta
     global_best = best_per_strategy(run_backtest(df, expiry_type=gt))
@@ -363,24 +375,29 @@ def build_expiry_decision(
     for sid in sorted(STRATEGIES):
         cwr = cond_wr_by_id.get(sid)
         gwr = global_wr_by_id.get(sid)
-        cwr = round(cwr, 4) if cwr is not None else None
-        gwr = round(gwr, 4) if gwr is not None else None
+        cint = cond_int_by_id.get(sid)
+        cwr  = round(cwr, 4)  if cwr  is not None else None
+        gwr  = round(gwr, 4)  if gwr  is not None else None
+        cint = round(cint, 4) if cint is not None else None
         dwr = round(cwr - gwr, 4) if (cwr is not None and gwr is not None) else None
         records.append({
-            "rank":          None,             # נקבע אחרי המיון
-            "strategy_id":   sid,
-            "strategy_name": STRATEGIES[sid].name,
-            "cond_wr":       cwr,
-            "global_wr":     gwr,
-            "delta_wr":      dwr,
-            "reason":        "",               # נבנה אחרי המיון
+            "rank":           None,            # נקבע אחרי המיון
+            "strategy_id":    sid,
+            "strategy_name":  STRATEGIES[sid].name,
+            "cond_wr":        cwr,
+            "global_wr":      gwr,
+            "delta_wr":       dwr,
+            "cond_intensity": cint,
+            "reason":         "",              # נבנה אחרי המיון
         })
 
-    # מיון יורד לפי cond_wr (None→אחרון), שובר שוויון לפי global_wr; מיון יציב
+    # מיון יורד: ראשי=cond_wr, שובר-שוויון=cond_intensity, ואז global_wr (None→אחרון).
+    # כך כשה-cond_wr שווה (אחרי עיגול) — העוצמה הממוצעת מכריעה; שונה → cond_wr קובע.
     records.sort(
         key=lambda r: (
-            r["cond_wr"]   if r["cond_wr"]   is not None else -1.0,
-            r["global_wr"] if r["global_wr"] is not None else -1.0,
+            r["cond_wr"]        if r["cond_wr"]        is not None else -1.0,
+            r["cond_intensity"] if r["cond_intensity"] is not None else -1.0,
+            r["global_wr"]      if r["global_wr"]      is not None else -1.0,
         ),
         reverse=True,
     )

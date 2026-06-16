@@ -611,3 +611,83 @@ class TestBuildExpiryDecision:
         build_expiry_decision(df, "W", 5, _EXP, recent_move_pct=None)
         # טהורה — לא משנה את ה-DataFrame שהועבר
         pd.testing.assert_frame_equal(df, before)
+
+
+# ─── שובר-שוויון לפי עוצמה (cond_intensity) ───────────────────────────
+
+def _rec(dec, sid):
+    """שולף את רשומת הדירוג של אסטרטגיה לפי id."""
+    return next(r for r in dec["ranking"] if r["strategy_id"] == sid)
+
+
+class TestDecisionIntensityTiebreaker:
+    def test_intensity_breaks_cond_wr_tie_and_reverses_global_order(self):
+        """ההבחנה המרכזית: כשה-cond_wr שווה, cond_intensity מכריע — ומהפך את הסדר
+        שהיה נקבע לפי global_wr.
+
+        similar (W-May): 5×0.2 — move קטן שבו BCS/IC/Butterfly כולם cond_wr=1.0.
+        global נשלט ע"י 15×5.0 (W-Aug): BCS global=1.0 (move>0), IC/Butterfly נמוך.
+        → בלי שובר-השוויון (מיון לפי global_wr) BCS היה #1 בקבוצת ה-1.0.
+        → עם cond_intensity: IC (0.8) #1, Butterfly (0.6), BCS (0.2) צונח לתחתית.
+        """
+        specs = [(f"{2010+i}-05-15", "W", 0.2) for i in range(5)] \
+              + [(f"{2010+i}-08-15", "W", 5.0) for i in range(15)]
+        dec = build_expiry_decision(_dec_df(specs), "W", 5,
+                                    pd.Timestamp("2026-05-15"), recent_move_pct=None)
+
+        ic, cb, pb, bcs = _rec(dec, 2), _rec(dec, 3), _rec(dec, 4), _rec(dec, 1)
+
+        # כל הארבע חולקות cond_wr זהה (התנאי לשובר-שוויון)
+        assert ic["cond_wr"] == cb["cond_wr"] == pb["cond_wr"] == bcs["cond_wr"] == 1.0
+
+        # cond_intensity מבדיל: IC > Butterfly > BCS
+        assert ic["cond_intensity"] == pytest.approx(0.8)
+        assert cb["cond_intensity"] == pytest.approx(0.6)
+        assert bcs["cond_intensity"] == pytest.approx(0.2)
+
+        # הדירוג החדש: IC ראשון, BCS אחרון בקבוצת ה-1.0
+        assert dec["top_strategy_id"] == 2
+        assert ic["rank"] < cb["rank"] < bcs["rank"]
+
+        # הוכחת "נכשל בלי שובר-השוויון": ל-BCS ה-global_wr הגבוה ביותר בקבוצה,
+        # כך שמיון לפי (cond_wr, global_wr) בלבד היה ממקם אותו #1.
+        assert bcs["global_wr"] > ic["global_wr"]
+        assert bcs["global_wr"] == max(r["global_wr"] for r in dec["ranking"]
+                                       if r["cond_wr"] == 1.0)
+
+    def test_different_cond_wr_not_overridden_by_intensity(self):
+        """כשה-cond_wr שונה — הוא מכריע, גם אם לאסטרטגיה התחתונה עוצמה גבוהה יותר.
+
+        similar (W-May): [0.9,0.9,0.9,-0.1].
+        IC cond_wr=1.0 (|move|<1) אך עוצמה נמוכה (0.3, רוחב 1.0 על move 0.9).
+        BCS cond_wr=0.75 (3 מתוך 4 חיוביים) אך עוצמה גבוהה יותר (0.675).
+        → IC חייב לדרג מעל BCS למרות עוצמתו הנמוכה — cond_wr גובר.
+        """
+        specs = [("2011-05-15", "W", 0.9), ("2012-05-15", "W", 0.9),
+                 ("2013-05-15", "W", 0.9), ("2014-05-15", "W", -0.1)]
+        dec = build_expiry_decision(_dec_df(specs), "W", 5,
+                                    pd.Timestamp("2026-05-15"), recent_move_pct=None)
+        ic, bcs = _rec(dec, 2), _rec(dec, 1)
+
+        assert ic["cond_wr"] == pytest.approx(1.0)
+        assert bcs["cond_wr"] == pytest.approx(0.75)
+        assert ic["cond_wr"] > bcs["cond_wr"]
+        # העוצמה של BCS גבוהה יותר — אך אסור שתדרוס את ה-cond_wr
+        assert bcs["cond_intensity"] > ic["cond_intensity"]
+        assert ic["rank"] < bcs["rank"]
+
+    def test_cond_intensity_in_records_and_reason(self):
+        """cond_intensity קיים בכל רשומה, ומשולב ב-reason."""
+        dec = build_expiry_decision(_structural_df(), "W", 5, _EXP, recent_move_pct=None)
+        for r in dec["ranking"]:
+            assert "cond_intensity" in r
+        top = dec["ranking"][0]
+        assert top["cond_intensity"] is not None
+        assert "עוצמה ממוצעת" in top["reason"]
+        assert f"{top['cond_intensity']:.2f}" in top["reason"]
+
+    def test_no_similar_cond_intensity_none(self):
+        """ללא דומים → cond_intensity=None בכל רשומה, וה-reason ללא 'עוצמה ממוצעת'."""
+        dec = build_expiry_decision(_structural_df(), "W", 11, _EXP, recent_move_pct=0.5)
+        assert all(r["cond_intensity"] is None for r in dec["ranking"])
+        assert "עוצמה ממוצעת" not in dec["ranking"][0]["reason"]

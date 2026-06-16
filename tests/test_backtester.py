@@ -232,3 +232,36 @@ class TestBestPerStrategy:
         best = best_per_strategy(run_backtest(mixed_df))
         assert best["strategy_name"].notna().all()
         assert (best["strategy_name"] != "").all()
+
+
+# ─── avg_intensity (עמודה חדשה, append) ──────────────────────────────
+
+class TestAvgIntensity:
+    def test_column_present(self, mixed_df):
+        assert "avg_intensity" in run_backtest(mixed_df).columns
+
+    def test_all_in_unit_interval(self, mixed_df):
+        col = run_backtest(mixed_df)["avg_intensity"]
+        assert (col >= 0.0).all() and (col <= 1.0).all()
+
+    def test_iron_condor_avg_intensity_exact(self):
+        """moves=[0,0.5,1,2]; IC width=2.0 → intensity=[1,.75,.5,0] → ממוצע 0.5625."""
+        df = _make_df([0.0, 0.5, 1.0, 2.0])
+        res = run_backtest(df)
+        row = res[(res["strategy_id"] == 2) & (res["param_value"] == 2.0)]
+        assert len(row) == 1
+        assert row.iloc[0]["avg_intensity"] == pytest.approx(0.5625)
+
+    def test_bull_call_spread_avg_intensity_exact(self):
+        """moves=[0,0.5,1,2]; BCS (סף +1%) → intensity=[0,.5,1,1] → ממוצע 0.625."""
+        df = _make_df([0.0, 0.5, 1.0, 2.0])
+        res = run_backtest(df)
+        row = res[res["strategy_id"] == 1].iloc[0]   # width_pts לא משפיע על העוצמה
+        assert row["avg_intensity"] == pytest.approx(0.625)
+
+    def test_existing_columns_unchanged(self, mixed_df):
+        """העמודות הקיימות עדיין שם — append ולא replace."""
+        cols = run_backtest(mixed_df).columns
+        for c in ("strategy_id", "strategy_name", "params_repr", "param_value",
+                  "win_rate", "wins", "losses", "total"):
+            assert c in cols
