@@ -160,6 +160,33 @@ class TestFindSimilarExpiries:
         years = result["expiry_date"].dt.year.unique()
         assert 2023 in years and 2024 in years
 
+    def test_move_filter_exact_membership_excludes_nan_and_out_of_range(self):
+        """רגרסיה לבאג קדימות-האופרטורים בסינון התנועה הקודמת.
+
+        כל השורות W ובמאי (עוברות סינון סוג+חודש). _preceding_move = move_pct.shift(1)
+        על כל הפקיעות הממוינות לפי תאריך:
+          2023-05-01: preceding=NaN            → להחריג (השורה הגלובלית הראשונה)
+          2023-05-08: preceding=0.50 (בטווח)   → לכלול   |0.50-0.5|=0.0 ≤ 0.3
+          2023-05-15: preceding=9.00 (מחוץ)    → להחריג  |9.00-0.5|=8.5 > 0.3
+        התוצאה הנכונה: בדיוק {2023-05-08}.
+        הקוד הישן — (notna() & abs_diff) <= tol — בוחר דווקא את שורת ה-NaN ונכשל כאן;
+        המתוקן — notna() & (abs_diff <= tol) — עובר.
+        """
+        df = _make_df([
+            {"expiry_date": "2023-05-01", "expiry_type": "W", "move_pct": 0.50},
+            {"expiry_date": "2023-05-08", "expiry_type": "W", "move_pct": 9.00},
+            {"expiry_date": "2023-05-15", "expiry_type": "W", "move_pct": 1.00},
+        ])
+        result = find_similar_expiries(
+            df, "W", 5, recent_move_pct=0.5, move_tolerance=0.3
+        )
+        dates = set(result["expiry_date"].dt.strftime("%Y-%m-%d"))
+        assert dates == {"2023-05-08"}, f"ציפינו רק ל-2023-05-08, קיבלנו {dates}"
+        assert len(result) == 1
+        # החרגות מפורשות — מתעדות את שתי הטעויות של הקוד הישן
+        assert "2023-05-01" not in dates   # preceding=NaN
+        assert "2023-05-15" not in dates   # preceding מחוץ לטווח
+
 
 # ─── conditional_win_rates ───────────────────────────────────────────
 

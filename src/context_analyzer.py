@@ -64,9 +64,11 @@ def find_similar_expiries(
 
     # Step 3: סינון תנועה קודמת
     if recent_move_pct is not None and not filtered.empty:
+        # סוגריים סביב תנאי ההפרש חיוניים: & קושר חזק מ-<=, ובלעדיהם הביטוי
+        # מתפרש כ-(notna() & abs_diff) <= move_tolerance — לוגיקה שבורה.
         prec_mask = (
             filtered["_preceding_move"].notna()
-            & (filtered["_preceding_move"] - recent_move_pct).abs() <= move_tolerance
+            & ((filtered["_preceding_move"] - recent_move_pct).abs() <= move_tolerance)
         )
         filtered = filtered[prec_mask]
 
