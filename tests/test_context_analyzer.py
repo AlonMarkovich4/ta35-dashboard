@@ -14,6 +14,7 @@ from context_analyzer import (
     conditional_win_rates,
     find_similar_expiries,
     get_recent_move,
+    recent_volatility,
 )
 
 
@@ -316,3 +317,157 @@ class TestBuildRecommendation:
         # global_wr falls back to cond_wr when strategy not in global
         assert result["global_wr"] == pytest.approx(0.70)
         assert result["delta_wr"] == pytest.approx(0.0)
+
+
+# ─── recent_volatility ───────────────────────────────────────────────
+
+def _vol_df_from_moves(moves, etype="W", start="2015-01-01"):
+    """בונה df עם תאריכים עולים (שבוע ביניהם), expiry_type אחיד, ו-abs_move_pct=|move|."""
+    base = pd.Timestamp(start)
+    rows = [
+        {
+            "expiry_date":  base + pd.Timedelta(days=7 * i),
+            "expiry_type":  etype,
+            "move_pct":     m,
+            "abs_move_pct": abs(m),
+        }
+        for i, m in enumerate(moves)
+    ]
+    return pd.DataFrame(rows)
+
+
+_AFTER_ALL = pd.Timestamp("2099-01-01")   # before_date שאחרי כל הנתונים
+
+
+class TestRecentVolatility:
+    # ── ערכים מדויקים: חלון, מיון, before_date, mean, std ──────────────
+    def test_window_cap_and_exact_mean_std(self):
+        """5 פקיעות תקינות לפני התאריך + אחת אחרי; window=4 → 4 האחרונות שלפני.
+
+        moves בחלון = [1.0, -1.0, 2.0, -2.0]:
+          mean_abs = (1+1+2+2)/4 = 1.5
+          std(ddof=0): ממוצע=0, var=(1+1+4+4)/4=2.5, std=√2.5=1.5811
+        """
+        df = _vol_df_from_moves([9.0, 1.0, -1.0, 2.0, -2.0, 8.0])  # idx5 אחרי החיתוך
+        before = df["expiry_date"].iloc[5]   # מחריג את 8.0 (idx5) ומה שאחריו
+        res = recent_volatility(df, "W", before, window=4)
+        assert res["n"] == 4                                 # tail(4) — מחריג את 9.0 (idx0)
+        assert res["mean_abs_move"] == pytest.approx(1.5)
+        assert res["std_move"] == pytest.approx(1.5811, abs=1e-4)
+
+    def test_fewer_than_window(self):
+        """פחות מ-window פקיעות → n = מה שיש, ללא קריסה."""
+        df = _vol_df_from_moves([1.0, 2.0, 3.0])
+        res = recent_volatility(df, "W", _AFTER_ALL, window=12)
+        assert res["n"] == 3
+        assert res["mean_abs_move"] == pytest.approx(2.0)          # (1+2+3)/3
+        assert res["std_move"] == pytest.approx(0.8165, abs=1e-4)  # √(2/3)
+
+    # ── סינון סוג: W לא מערבב M ─────────────────────────────────────────
+    def test_type_filter_does_not_mix(self):
+        w = _vol_df_from_moves([1.0, 1.0, 1.0], etype="W", start="2016-01-01")
+        m = _vol_df_from_moves([5.0, 5.0, 5.0], etype="M", start="2017-01-01")
+        df = pd.concat([w, m], ignore_index=True)
+        res_w = recent_volatility(df, "W", _AFTER_ALL, window=12)
+        res_m = recent_volatility(df, "M", _AFTER_ALL, window=12)
+        assert res_w["n"] == 3 and res_w["mean_abs_move"] == pytest.approx(1.0)
+        assert res_m["n"] == 3 and res_m["mean_abs_move"] == pytest.approx(5.0)
+
+    def test_none_type_includes_all(self):
+        w = _vol_df_from_moves([1.0, 1.0, 1.0], etype="W", start="2016-01-01")
+        m = _vol_df_from_moves([5.0, 5.0, 5.0], etype="M", start="2017-01-01")
+        df = pd.concat([w, m], ignore_index=True)
+        res = recent_volatility(df, None, _AFTER_ALL, window=12)
+        assert res["n"] == 6
+        assert res["mean_abs_move"] == pytest.approx(3.0)          # (3×1+3×5)/6
+
+    # ── סיווג משטר: calm / normal / volatile / boundary ─────────────────
+    def test_regime_calm(self):
+        """חלון נמוך מול בסיס גבוה: 20×2.0 (ישן) + 12×0.4 (אחרון); window=12.
+        window mean=0.4 ; global=(40+4.8)/32=1.4 ; ratio=0.286 < 0.75 → calm."""
+        df = _vol_df_from_moves([2.0] * 20 + [0.4] * 12)
+        res = recent_volatility(df, "W", _AFTER_ALL, window=12)
+        assert res["n"] == 12
+        assert res["mean_abs_move"] == pytest.approx(0.4)
+        assert res["regime"] == "calm"
+
+    def test_regime_volatile(self):
+        """חלון גבוה מול בסיס נמוך: 20×0.4 + 12×2.0; window=12.
+        window mean=2.0 ; global=(8+24)/32=1.0 ; ratio=2.0 > 1.25 → volatile."""
+        df = _vol_df_from_moves([0.4] * 20 + [2.0] * 12)
+        res = recent_volatility(df, "W", _AFTER_ALL, window=12)
+        assert res["mean_abs_move"] == pytest.approx(2.0)
+        assert res["regime"] == "volatile"
+
+    def test_regime_normal_uniform(self):
+        """תנועות אחידות → window==global → ratio=1.0 → normal."""
+        df = _vol_df_from_moves([1.0] * 30)
+        res = recent_volatility(df, "W", _AFTER_ALL, window=12)
+        assert res["mean_abs_move"] == pytest.approx(1.0)
+        assert res["regime"] == "normal"
+
+    def test_regime_boundary_075_is_normal(self):
+        """ratio=0.75 בדיוק → normal (calm הוא < 0.75 ממש).
+        20×1.15 + 12×0.75 ; window mean=0.75 ; global=(23+9)/32=1.0 ; ratio=0.75."""
+        df = _vol_df_from_moves([1.15] * 20 + [0.75] * 12)
+        res = recent_volatility(df, "W", _AFTER_ALL, window=12)
+        assert res["mean_abs_move"] == pytest.approx(0.75)
+        assert res["regime"] == "normal"
+
+    # ── מקרי קצה ────────────────────────────────────────────────────────
+    def test_empty_window_returns_unknown(self):
+        """before_date לפני כל הנתונים → n=0, ערכים None, regime='unknown'."""
+        df = _vol_df_from_moves([1.0, 2.0, 3.0], start="2020-01-01")
+        before = pd.Timestamp("2019-01-01")
+        res = recent_volatility(df, "W", before, window=12)
+        assert res == {"mean_abs_move": None, "std_move": None, "n": 0, "regime": "unknown"}
+
+    def test_empty_df_returns_unknown(self):
+        res = recent_volatility(pd.DataFrame(), "W", _AFTER_ALL)
+        assert res["n"] == 0 and res["regime"] == "unknown"
+
+    def test_nan_moves_excluded(self):
+        """שורות עם move_pct=NaN (unknown) לא נספרות בחלון."""
+        df = _vol_df_from_moves([1.0, 2.0])
+        df.loc[len(df)] = {"expiry_date": pd.Timestamp("2015-03-01"),
+                           "expiry_type": "W", "move_pct": None, "abs_move_pct": None}
+        res = recent_volatility(df, "W", _AFTER_ALL, window=12)
+        assert res["n"] == 2                                  # שורת ה-NaN הוחרגה
+
+    def test_all_zero_moves_regime_unknown(self):
+        """global_mean=0 → אי-אפשר לסווג יחס → regime='unknown' (בלי חלוקה ב-0)."""
+        df = _vol_df_from_moves([0.0] * 10)
+        res = recent_volatility(df, "W", _AFTER_ALL, window=12)
+        assert res["mean_abs_move"] == pytest.approx(0.0)
+        assert res["regime"] == "unknown"
+
+    def test_default_window_is_12(self):
+        """ברירת המחדל של window היא 12."""
+        df = _vol_df_from_moves([1.0] * 30)
+        res = recent_volatility(df, "W", _AFTER_ALL)   # ללא window מפורש
+        assert res["n"] == 12
+
+    def test_zero_lookahead_future_history_does_not_change_regime(self):
+        """zero-lookahead: אותו חלון + היסטוריה עתידית שונה → אותו regime בדיוק.
+
+        prior (לפני cutoff): 20×0.4 + 12×2.0 → window mean=2.0, baseline=1.0,
+        ratio=2.0 → 'volatile'.
+        df_full מוסיף 50 פקיעות עתידיות ענקיות (move=10.0) *אחרי* cutoff.
+        אם הבסיס היה רואה עתיד (הבאג הישן): baseline=(8+24+500)/82≈6.49, ratio≈0.31
+        → היה הופך ל-'calm'. עם zero-lookahead הבסיס מתעלם מהעתיד → נשאר 'volatile',
+        וזהה ל-df_prior_only. כך מוכחת אי-ההצצה לעתיד.
+        """
+        prior_moves  = [0.4] * 20 + [2.0] * 12
+        future_moves = [10.0] * 50
+        df_full = _vol_df_from_moves(prior_moves + future_moves)
+        cutoff  = df_full["expiry_date"].iloc[len(prior_moves)]   # תאריך הפקיעה העתידית הראשונה
+        df_prior_only = df_full.iloc[:len(prior_moves)].copy()
+
+        res_prior = recent_volatility(df_prior_only, "W", cutoff, window=12)
+        res_full  = recent_volatility(df_full,       "W", cutoff, window=12)
+
+        # אותו חלון בדיוק (העתיד לא משפיע על n/mean)
+        assert res_prior["n"] == res_full["n"] == 12
+        assert res_prior["mean_abs_move"] == res_full["mean_abs_move"] == pytest.approx(2.0)
+        # ואותו regime — הבסיס לא ראה את 50 הפקיעות העתידיות
+        assert res_prior["regime"] == res_full["regime"] == "volatile"

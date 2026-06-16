@@ -31,6 +31,96 @@ def get_recent_move(df: pd.DataFrame, before_date: pd.Timestamp) -> float | None
     return float(before.iloc[-1]["move_pct"])
 
 
+# ─── תנודתיות אחרונה (building block למנוע ההחלטה) ──────────────────────
+
+# ספי סיווג משטר תנודתיות — יחס בין תנודתיות החלון לממוצע ההיסטורי של אותו סוג.
+# נבחר באנד מכפלי סימטרי של ±25% סביב הבסיס ארוך-הטווח:
+#   ratio < 0.75  → "calm"      (תנודתיות נמוכה מהרגיל)
+#   ratio > 1.25  → "volatile"  (תנודתיות גבוהה מהרגיל)
+#   אחרת          → "normal"
+# יחס מכפלי (ולא הפרש מוחלט) כי הוא חסר-יחידות ועובד גם ל-W וגם ל-M (לבסיסים
+# שונים מטבעם); ±25% רחב מספיק כדי לא להגיב לרעש, וצר מספיק כדי לסמן סטייה אמיתית.
+_REGIME_CALM_RATIO     = 0.75
+_REGIME_VOLATILE_RATIO = 1.25
+
+
+def _abs_move_series(frame: pd.DataFrame) -> pd.Series:
+    """מחזיר את סדרת התנועה המוחלטת — abs_move_pct אם קיים, אחרת |move_pct|."""
+    if "abs_move_pct" in frame.columns:
+        return frame["abs_move_pct"]
+    return frame["move_pct"].abs()
+
+
+def _classify_regime(mean_abs_move: float | None, global_mean: float | None) -> str:
+    """מסווג משטר תנודתיות לפי יחס תנודתיות-החלון לממוצע ההיסטורי הכללי."""
+    if mean_abs_move is None or global_mean is None or global_mean <= 0:
+        return "unknown"
+    ratio = mean_abs_move / global_mean
+    if ratio < _REGIME_CALM_RATIO:
+        return "calm"
+    if ratio > _REGIME_VOLATILE_RATIO:
+        return "volatile"
+    return "normal"
+
+
+def recent_volatility(
+    df: pd.DataFrame,
+    expiry_type: str | None,
+    before_date,
+    window: int = 12,
+) -> dict:
+    """
+    מטריקת תנודתיות אחרונה — פונקציה טהורה על expiry_history (ללא גישה ל-DB).
+
+    1. מסננת לאותו expiry_type (W/M); None או ערך אחר = ללא סינון סוג (כדי לא
+       לערבב שבועי/חודשי, שמטבעם בעלי טווחי תנועה שונים).
+    2. שומרת רק פקיעות תקינות (move_pct לא NaN) לפני before_date, ממוינות.
+    3. לוקחת את החלון — window הפקיעות האחרונות (ברירת מחדל 12).
+    4. מסווגת משטר תנודתיות מול הממוצע ההיסטורי של אותו סוג, *מבוסס רק על פקיעות
+       שלפני before_date* (zero-lookahead — לא רואה את העתיד, לחיוניות ב-backtest).
+
+    מחזיר dict:
+      mean_abs_move : float | None — ממוצע abs_move_pct בחלון
+      std_move      : float | None — סטיית תקן (אוכלוסייה, ddof=0) של move_pct בחלון
+      n             : int          — מספר הפקיעות בפועל בחלון (≤ window)
+      regime        : str          — "calm" / "normal" / "volatile" / "unknown"
+
+    null-safe: אם אין נתונים (n=0) → mean/std=None, n=0, regime="unknown".
+    """
+    empty = {"mean_abs_move": None, "std_move": None, "n": 0, "regime": "unknown"}
+    if df is None or df.empty or "move_pct" not in df.columns:
+        return empty
+
+    before = pd.Timestamp(before_date)
+
+    typed = df
+    if expiry_type in ("W", "M"):
+        typed = df[df["expiry_type"] == expiry_type]
+
+    valid = typed[typed["move_pct"].notna()].sort_values("expiry_date")
+    # zero-lookahead: רק פקיעות שהיו ידועות לפני before_date — גם לחלון וגם לבסיס.
+    prior = valid[valid["expiry_date"] < before]
+
+    window_df = prior.tail(window)
+    n = len(window_df)
+    if n == 0:
+        return empty
+
+    mean_abs_move = round(float(_abs_move_series(window_df).mean()), 4)
+    std_move      = round(float(window_df["move_pct"].std(ddof=0)), 4)
+
+    # בסיס ה-regime: כל הפקיעות מאותו סוג *שלפני* before_date (ללא הצצה לעתיד)
+    global_mean = float(_abs_move_series(prior).mean())
+    regime = _classify_regime(mean_abs_move, global_mean)
+
+    return {
+        "mean_abs_move": mean_abs_move,
+        "std_move":      std_move,
+        "n":             n,
+        "regime":        regime,
+    }
+
+
 def find_similar_expiries(
     df: pd.DataFrame,
     expiry_type: str,
