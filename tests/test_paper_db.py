@@ -11,6 +11,8 @@ import os
 from datetime import date, datetime
 from unittest.mock import MagicMock, call, patch
 
+import numpy as np
+import pandas as pd
 import pytest
 
 import sys
@@ -19,6 +21,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from paper_db import (
     _dumps,
+    _dumps_decision,
+    _json_default,
     _loads,
     _make_engine,
     _parse_strategy_ids,
@@ -30,6 +34,7 @@ from paper_db import (
     get_portfolios,
     get_trades,
     has_paper_db,
+    insert_decision_log,
     insert_trade,
     update_balance,
 )
@@ -704,3 +709,147 @@ class TestCloseTrade:
         close_trade(1, 4300.0, 100.0, 0.5, engine=eng)
         params = conn.execute.call_args[0][1]
         assert params["exit_commission"] == pytest.approx(0.0)
+
+
+# ─── _json_default / _dumps_decision ───────────────────────────────────
+
+class TestDumpsDecision:
+    def test_none_returns_none(self):
+        assert _dumps_decision(None) is None
+
+    def test_string_passthrough(self):
+        s = '{"a": 1}'
+        assert _dumps_decision(s) is s
+
+    def test_timestamp_serialized_isoformat(self):
+        out = _dumps_decision({"d": pd.Timestamp("2026-06-17")})
+        assert isinstance(out, str)
+        assert "2026-06-17" in out
+        assert json.loads(out)["d"].startswith("2026-06-17")
+
+    def test_date_serialized(self):
+        out = _dumps_decision({"d": date(2026, 6, 17)})
+        assert json.loads(out)["d"] == "2026-06-17"
+
+    def test_numpy_scalars_serialized(self):
+        out = _dumps_decision({"f": np.float64(0.61), "i": np.int64(7), "b": np.bool_(True)})
+        parsed = json.loads(out)
+        assert parsed["f"] == pytest.approx(0.61)
+        assert parsed["i"] == 7
+        assert parsed["b"] is True
+
+    def test_hebrew_not_escaped(self):
+        out = _dumps_decision({"reason": "מדורגת #1 — משטר calm"})
+        assert "מדורגת" in out
+        assert "\\u" not in out          # אין escape sequences
+
+    def test_json_default_direct(self):
+        assert _json_default(pd.Timestamp("2026-06-17")).startswith("2026-06-17")
+        assert _json_default(np.int64(5)) == 5
+        assert isinstance(_json_default(object()), str)   # גיבוי לא קורס
+
+
+# ─── insert_decision_log ────────────────────────────────────────────────
+
+_SAMPLE_DECISION = {
+    "expiry_date":     pd.Timestamp("2026-06-17"),
+    "expiry_type":     "W",
+    "regime":          {"regime": "calm", "mean_abs_move": 0.6858,
+                        "std_move": 0.5546, "n": 12},
+    "n_similar":       20,
+    "risk_score":      1.1,
+    "ranking":         [{"rank": 1, "strategy_id": 2, "strategy_name": "Short Iron Condor",
+                         "cond_wr": 1.0, "global_wr": 0.99, "delta_wr": 0.01,
+                         "cond_intensity": 0.61,
+                         "reason": "מדורגת #1 — Win Rate מותנה 100%; משטר נוכחי: calm"}],
+    "top_strategy_id": 2,
+    "note":            "",
+}
+
+
+def _mock_engine_scalar(scalar_value):
+    """mock engine שבו execute().scalar() מחזיר ערך נתון; מחזיר (engine, conn)."""
+    conn = MagicMock()
+    conn.__enter__ = MagicMock(return_value=conn)
+    conn.__exit__  = MagicMock(return_value=False)
+    conn.execute.return_value.scalar.return_value = scalar_value
+    eng = MagicMock()
+    eng.connect.return_value = conn
+    return eng, conn
+
+
+class TestInsertDecisionLog:
+    def test_returns_none_without_engine(self, monkeypatch):
+        monkeypatch.delenv("DATABASE_URL", raising=False)
+        assert insert_decision_log(_SAMPLE_DECISION) is None
+
+    def test_returns_new_id_on_success(self):
+        eng, _ = _mock_engine_scalar(42)
+        assert insert_decision_log(_SAMPLE_DECISION, engine=eng) == 42
+
+    def test_flat_fields_extracted(self):
+        eng, conn = _mock_engine_scalar(1)
+        insert_decision_log(_SAMPLE_DECISION, trigger="scheduled",
+                            engine_version="layer1-v1", engine=eng)
+        params = conn.execute.call_args[0][1]
+        assert params["expiry_date"]     == date(2026, 6, 17)   # Timestamp→date
+        assert params["expiry_type"]     == "W"
+        assert params["regime"]          == "calm"              # מתוך regime.regime
+        assert params["risk_score"]      == pytest.approx(1.1)
+        assert params["n_similar"]       == 20
+        assert params["top_strategy_id"] == 2
+        assert params["trigger"]         == "scheduled"
+        assert params["engine_version"]  == "layer1-v1"
+
+    def test_decided_at_not_sent(self):
+        """decided_at לא נשלח — DEFAULT now() של ה-DB קובע."""
+        eng, conn = _mock_engine_scalar(1)
+        insert_decision_log(_SAMPLE_DECISION, engine=eng)
+        params = conn.execute.call_args[0][1]
+        assert "decided_at" not in params
+
+    def test_decision_json_hebrew_preserved(self):
+        eng, conn = _mock_engine_scalar(1)
+        insert_decision_log(_SAMPLE_DECISION, engine=eng)
+        dj = conn.execute.call_args[0][1]["decision_json"]
+        assert isinstance(dj, str)
+        assert "מדורגת" in dj            # עברית נשמרת
+        assert "\\u" not in dj           # לא escaped
+
+    def test_decision_json_handles_timestamp(self):
+        """decision_json מסריאליז את ה-Timestamp הפנימי בלי לקרוס."""
+        eng, conn = _mock_engine_scalar(1)
+        insert_decision_log(_SAMPLE_DECISION, engine=eng)
+        dj = conn.execute.call_args[0][1]["decision_json"]
+        parsed = json.loads(dj)
+        assert parsed["expiry_date"].startswith("2026-06-17")
+        assert parsed["ranking"][0]["strategy_id"] == 2
+
+    def test_sql_insert_into_decision_log_returning_id(self):
+        eng, conn = _mock_engine_scalar(1)
+        insert_decision_log(_SAMPLE_DECISION, engine=eng)
+        sql = str(conn.execute.call_args[0][0])
+        assert "INSERT INTO decision_log" in sql
+        assert "RETURNING id" in sql
+        assert "CAST(:decision_json AS JSONB)" in sql
+        for col in ("expiry_date", "expiry_type", "regime", "risk_score",
+                    "n_similar", "top_strategy_id", "trigger", "engine_version"):
+            assert col in sql
+
+    def test_returns_none_on_db_error(self):
+        eng = MagicMock()
+        eng.connect.side_effect = Exception("insert boom")
+        assert insert_decision_log(_SAMPLE_DECISION, engine=eng) is None
+
+    def test_logs_warning_on_failure(self, caplog):
+        eng = MagicMock()
+        eng.connect.side_effect = Exception("insert boom")
+        with caplog.at_level(logging.WARNING, logger="paper_db"):
+            insert_decision_log(_SAMPLE_DECISION, engine=eng)
+        msgs = " ".join(r.getMessage() for r in caplog.records)
+        assert "insert_decision_log" in msgs and "insert boom" in msgs
+
+    def test_commit_called(self):
+        eng, conn = _mock_engine_scalar(5)
+        insert_decision_log(_SAMPLE_DECISION, engine=eng)
+        conn.commit.assert_called_once()

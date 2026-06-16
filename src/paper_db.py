@@ -14,6 +14,7 @@ paper_db.py — שכבת DB לתיקי Paper Trading.
   get_trades(portfolio_id, status, expiry_date, engine=None)            → list[dict]
   get_open_trades_for_expiry(expiry_date, engine=None)                  → list[dict]
   close_trade(trade_id, close_index, pnl, pnl_pct, exit_commission, engine) → bool
+  insert_decision_log(decision, trigger, engine_version, engine)        → int | None
 """
 from __future__ import annotations
 
@@ -65,6 +66,31 @@ def _dumps(v) -> Optional[str]:
     if isinstance(v, str):
         return v
     return json.dumps(v, ensure_ascii=False)
+
+
+def _json_default(o):
+    """serializer לטיפוסים שאינם JSON-native בתוך decision_json.
+
+    Timestamp/datetime/date → isoformat; numpy scalars (np.int64/float64/bool_)
+    → סקלר Python דרך .item(); כל השאר → str (גיבוי שלא יקרוס).
+    """
+    if hasattr(o, "isoformat"):          # pd.Timestamp / datetime / date
+        return o.isoformat()
+    if hasattr(o, "item"):               # numpy scalars
+        return o.item()
+    return str(o)
+
+
+def _dumps_decision(v) -> Optional[str]:
+    """ממיר את ה-decision dict ל-JSON ל-JSONB — כמו _dumps אך עם default ל-Timestamp/numpy.
+
+    נפרד מ-_dumps כדי לא לשנות את התנהגותו לשימושים הקיימים (legs/snapshot).
+    """
+    if v is None:
+        return None
+    if isinstance(v, str):
+        return v
+    return json.dumps(v, ensure_ascii=False, default=_json_default)
 
 
 def _loads(v):
@@ -361,3 +387,66 @@ def close_trade(
         return True
     except Exception:
         return False
+
+
+# ─── Decision log (append-only) ─────────────────────────────────────────
+
+def insert_decision_log(
+    decision: dict,
+    trigger: str = "manual",
+    engine_version: str = "layer1-v1",
+    engine=None,
+) -> Optional[int]:
+    """מכניס רשומת decision_log אחת (append-only); מחזיר id חדש (RETURNING) או None בכישלון.
+
+    decision — הפלט המלא של build_expiry_decision. השדות השטוחים נשלפים ממנו,
+    וה-decision כולו נשמר ב-decision_json (JSONB) דרך _dumps_decision
+    (ensure_ascii=False + טיפול ב-Timestamp/numpy).
+
+    decided_at אינו נשלח — DEFAULT now() בטבלה קובע את חותמת הזמן בצד ה-DB:
+    מקור אמת אחד, ושעון שרת אחיד לכל ההרצות (לא תלוי בשעון המקומי של הקורא).
+    """
+    eng = _make_engine(engine)
+    if eng is None:
+        return None
+    try:
+        # expiry_date עשוי להגיע כ-pd.Timestamp/datetime → ממירים ל-date לעמודת DATE
+        exp = decision.get("expiry_date")
+        if exp is not None and hasattr(exp, "date") and callable(exp.date):
+            exp = exp.date()
+
+        params = {
+            "expiry_date":     exp,
+            "expiry_type":     decision.get("expiry_type"),
+            "regime":          (decision.get("regime") or {}).get("regime"),
+            "risk_score":      decision.get("risk_score"),
+            "n_similar":       decision.get("n_similar"),
+            "top_strategy_id": decision.get("top_strategy_id"),
+            "trigger":         trigger,
+            "engine_version":  engine_version,
+            "decision_json":   _dumps_decision(decision),
+        }
+        with eng.connect() as conn:
+            new_id = conn.execute(
+                text("""
+                    INSERT INTO decision_log (
+                        expiry_date, expiry_type, regime, risk_score,
+                        n_similar, top_strategy_id, trigger,
+                        decision_json, engine_version
+                    ) VALUES (
+                        :expiry_date, :expiry_type, :regime, :risk_score,
+                        :n_similar, :top_strategy_id, :trigger,
+                        CAST(:decision_json AS JSONB), :engine_version
+                    )
+                    RETURNING id
+                """),
+                params,
+            ).scalar()
+            conn.commit()
+        return int(new_id) if new_id is not None else None
+    except Exception as exc:
+        logger.warning(
+            "insert_decision_log נכשל (expiry_date=%s): %s",
+            decision.get("expiry_date"), exc, exc_info=True,
+        )
+        return None
