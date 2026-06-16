@@ -15,6 +15,7 @@ from typing import Optional
 import pandas as pd
 
 from backtester import best_per_strategy, run_backtest
+from strategies import STRATEGIES
 
 
 def get_recent_move(df: pd.DataFrame, before_date: pd.Timestamp) -> float | None:
@@ -247,4 +248,160 @@ def build_recommendation(
         "n_similar":     n_similar,
         "risk_score":    risk_score,
         "note":          note,
+    }
+
+
+# ─── מנוע ההחלטה (shadow mode) — חיבור אבני הבניין ─────────────────────
+
+_NEUTRAL_IDS   = frozenset({2, 3, 4})   # Iron Condor, Call/Put Butterfly
+_VOLATILE_IDS  = frozenset({5, 6})      # Straddle, Strangle
+_RISK_HIGH     = 6.5                    # סף ציון סיכון "גבוה" (עקבי עם compute_risk_score)
+_MIN_SIMILAR_FOR_CONFIDENCE = 5         # מתחת לזה — נימה מסתייגת על אמינות הדירוג המותנה
+
+
+def _decision_reason(rec: dict, n_similar: int, regime: str) -> str:
+    """בונה נימוק עברי קצר לרשומת דירוג בודדת (כולל rank, cond_wr, regime)."""
+    rank, cwr, gwr, dwr = rec["rank"], rec["cond_wr"], rec["global_wr"], rec["delta_wr"]
+    if cwr is not None:
+        s = f"מדורגת #{rank} — Win Rate מותנה {cwr:.0%} על {n_similar} מקרים דומים"
+        if gwr is not None:
+            s += f" (גלובלי {gwr:.0%}, Δ{dwr:+.0%})"
+    elif gwr is not None:
+        s = f"מדורגת #{rank} — אין מקרים דומים; Win Rate גלובלי {gwr:.0%}"
+    else:
+        s = f"מדורגת #{rank} — אין נתונים היסטוריים מספיקים"
+    return s + f"; משטר נוכחי: {regime}"
+
+
+def _decision_note(
+    records: list[dict],
+    n_similar: int,
+    recent_move_pct: Optional[float],
+    risk_score: Optional[float],
+    regime: str,
+) -> str:
+    """בונה הסתייגות/אזהרה משולבת להחלטה (ריק אם אין)."""
+    parts: list[str] = []
+    if recent_move_pct is None:
+        parts.append("ללא סינון תנועה קודמת (recent_move_pct חסר)")
+    if n_similar == 0:
+        parts.append("אין מקרים דומים — הדירוג מבוסס על Win Rate גלובלי בלבד")
+    elif n_similar < _MIN_SIMILAR_FOR_CONFIDENCE:
+        parts.append(f"מעט מקרים דומים (n={n_similar}) — אמינות הדירוג המותנה מוגבלת")
+
+    # אזהרת סתירה: המדורגת ראשונה ניטרלית בעוד הסיכון/התנודתיות גבוהים
+    top = records[0]
+    high_risk = risk_score is not None and risk_score >= _RISK_HIGH
+    if top["strategy_id"] in _NEUTRAL_IDS and (high_risk or regime == "volatile"):
+        vol_alt = next((r for r in records if r["strategy_id"] in _VOLATILE_IDS), None)
+        if vol_alt is not None:
+            trig = []
+            if high_risk:
+                trig.append(f"ציון סיכון {risk_score:.1f}")
+            if regime == "volatile":
+                trig.append("משטר תנודתי")
+            parts.append(
+                f"⚠️ {' + '.join(trig)} אך המדורגת ראשונה ניטרלית — "
+                f"שקול {vol_alt['strategy_name']} (מנצח בתנועות חזקות)"
+            )
+    return " | ".join(parts)
+
+
+def build_expiry_decision(
+    df: pd.DataFrame,
+    expiry_type: str | None,
+    target_month: int,
+    expiry_date,
+    recent_move_pct: Optional[float],
+    risk_score: Optional[float] = None,
+    move_tolerance: float = 0.5,
+    vol_window: int = 12,
+) -> dict:
+    """
+    מנוע ההחלטה (shadow mode) — מחבר את אבני הבניין לכדי החלטה מנומקת אחת.
+
+    טהורה: מחשבת ומחזירה בלבד — אינה פותחת עסקאות, אינה כותבת ל-DB, ואינה
+    מסננת אסטרטגיות (מחזירה את כל 6 מדורגות לפי Win Rate מותנה יורד). ה-regime
+    מתועד אך אינו משנה את הדירוג בשלב זה (יטויב בעתיד).
+
+    משתמשת אך ורק בפונקציות הקיימות: recent_volatility, find_similar_expiries,
+    conditional_win_rates, best_per_strategy + run_backtest.
+
+    מחזיר dict:
+      expiry_date, expiry_type,
+      regime: {regime, mean_abs_move, std_move, n},
+      n_similar, risk_score,
+      ranking: [{rank, strategy_id, strategy_name, cond_wr, global_wr, delta_wr, reason} ×6],
+      top_strategy_id, note
+    """
+    # סוג מנורמל — W/M בלבד מסננים; כל ערך אחר (None/לא ידוע) = ללא סינון, עקבי
+    # בין recent_volatility / find_similar_expiries / run_backtest.
+    gt = expiry_type if expiry_type in ("W", "M") else None
+
+    # 1. משטר תנודתיות (zero-lookahead — לפני expiry_date)
+    vol = recent_volatility(df, gt, expiry_date, vol_window)
+    regime = vol["regime"]
+
+    # 2. דירוג Win Rate מותנה על מקרים דומים
+    similar = find_similar_expiries(df, gt, target_month, recent_move_pct, move_tolerance)
+    n_similar = len(similar)
+    cond_best = conditional_win_rates(similar)
+    cond_wr_by_id = (
+        {int(r["strategy_id"]): float(r["win_rate"]) for _, r in cond_best.iterrows()}
+        if not cond_best.empty else {}
+    )
+
+    # 3. Win Rate גלובלי (כל ההיסטוריה מאותו סוג) ל-delta
+    global_best = best_per_strategy(run_backtest(df, expiry_type=gt))
+    global_wr_by_id = (
+        {int(r["strategy_id"]): float(r["win_rate"]) for _, r in global_best.iterrows()}
+        if not global_best.empty else {}
+    )
+
+    # 4. רשומת דירוג לכל 6 האסטרטגיות
+    records: list[dict] = []
+    for sid in sorted(STRATEGIES):
+        cwr = cond_wr_by_id.get(sid)
+        gwr = global_wr_by_id.get(sid)
+        cwr = round(cwr, 4) if cwr is not None else None
+        gwr = round(gwr, 4) if gwr is not None else None
+        dwr = round(cwr - gwr, 4) if (cwr is not None and gwr is not None) else None
+        records.append({
+            "rank":          None,             # נקבע אחרי המיון
+            "strategy_id":   sid,
+            "strategy_name": STRATEGIES[sid].name,
+            "cond_wr":       cwr,
+            "global_wr":     gwr,
+            "delta_wr":      dwr,
+            "reason":        "",               # נבנה אחרי המיון
+        })
+
+    # מיון יורד לפי cond_wr (None→אחרון), שובר שוויון לפי global_wr; מיון יציב
+    records.sort(
+        key=lambda r: (
+            r["cond_wr"]   if r["cond_wr"]   is not None else -1.0,
+            r["global_wr"] if r["global_wr"] is not None else -1.0,
+        ),
+        reverse=True,
+    )
+    for i, r in enumerate(records, start=1):
+        r["rank"]   = i
+        r["reason"] = _decision_reason(r, n_similar, regime)
+
+    note = _decision_note(records, n_similar, recent_move_pct, risk_score, regime)
+
+    return {
+        "expiry_date":     expiry_date,
+        "expiry_type":     expiry_type,
+        "regime": {
+            "regime":        vol["regime"],
+            "mean_abs_move": vol["mean_abs_move"],
+            "std_move":      vol["std_move"],
+            "n":             vol["n"],
+        },
+        "n_similar":       n_similar,
+        "risk_score":      risk_score,
+        "ranking":         records,
+        "top_strategy_id": records[0]["strategy_id"],
+        "note":            note,
     }

@@ -10,6 +10,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from context_analyzer import (
+    build_expiry_decision,
     build_recommendation,
     conditional_win_rates,
     find_similar_expiries,
@@ -471,3 +472,142 @@ class TestRecentVolatility:
         assert res_prior["mean_abs_move"] == res_full["mean_abs_move"] == pytest.approx(2.0)
         # ואותו regime — הבסיס לא ראה את 50 הפקיעות העתידיות
         assert res_prior["regime"] == res_full["regime"] == "volatile"
+
+
+# ─── build_expiry_decision (מנוע ההחלטה, shadow mode) ─────────────────
+
+def _dec_df(specs):
+    """specs: list of (date_str, expiry_type, move_pct) → DataFrame."""
+    return _make_df([{"expiry_date": d, "expiry_type": t, "move_pct": m} for d, t, m in specs])
+
+
+def _structural_df():
+    """W-May (similar): [-0.2,-0.2,0.2,3.0]; W-Aug (לגלובלי): 0.2×4; +M-May מוחרגת.
+
+    cond  (4 May): BCS .5 | IC .75 | CallBfly .75 | PutBfly .75 | Straddle .25 | Strangle .25
+    global(8 W):   BCS .75| IC .875| CallBfly .875| PutBfly .875| Straddle .125| Strangle .125
+    → ranking לפי cond יורד: [2,3,4,1,5,6]  (מוכיח מיון לפי cond, לא לפי sid)
+    """
+    return _dec_df([
+        ("2018-05-15", "W", -0.2), ("2019-05-15", "W", -0.2),
+        ("2020-05-15", "W",  0.2), ("2021-05-15", "W",  3.0),
+        ("2018-08-15", "W",  0.2), ("2019-08-15", "W",  0.2),
+        ("2020-08-15", "W",  0.2), ("2021-08-15", "W",  0.2),
+        ("2019-05-28", "M",  0.2),   # M — מוחרגת מסינון הסוג
+    ])
+
+
+_EXP = pd.Timestamp("2022-05-15")
+
+
+class TestBuildExpiryDecision:
+    # ── מבנה מלא + מיון לפי cond_wr (לא לפי sid) ────────────────────────
+    def test_output_structure_and_ranking(self):
+        dec = build_expiry_decision(_structural_df(), "W", 5, _EXP, recent_move_pct=None)
+
+        assert set(dec.keys()) == {
+            "expiry_date", "expiry_type", "regime", "n_similar",
+            "risk_score", "ranking", "top_strategy_id", "note",
+        }
+        assert dec["expiry_type"] == "W"
+        assert dec["n_similar"] == 4
+
+        ranking = dec["ranking"]
+        assert len(ranking) == 6                                  # כל 6 (shadow — לא מסונן)
+        assert {r["strategy_id"] for r in ranking} == {1, 2, 3, 4, 5, 6}
+
+        # מיון לפי cond_wr יורד — סדר ה-sid שונה מ-1..6 (מוכיח שזה אכן ממיין)
+        assert [r["strategy_id"] for r in ranking] == [2, 3, 4, 1, 5, 6]
+        assert [r["cond_wr"] for r in ranking] == [0.75, 0.75, 0.75, 0.5, 0.25, 0.25]
+        assert [r["rank"] for r in ranking] == [1, 2, 3, 4, 5, 6]
+
+    def test_top_strategy_matches_first_record(self):
+        dec = build_expiry_decision(_structural_df(), "W", 5, _EXP, recent_move_pct=None)
+        assert dec["top_strategy_id"] == dec["ranking"][0]["strategy_id"] == 2
+
+    def test_top_record_exact_values(self):
+        dec = build_expiry_decision(_structural_df(), "W", 5, _EXP, recent_move_pct=None)
+        top = dec["ranking"][0]
+        assert top["strategy_id"] == 2
+        assert top["cond_wr"]   == pytest.approx(0.75)
+        assert top["global_wr"] == pytest.approx(0.875)
+        assert top["delta_wr"]  == pytest.approx(-0.125)
+        assert top["rank"] == 1
+
+    def test_delta_wr_equals_cond_minus_global(self):
+        dec = build_expiry_decision(_structural_df(), "W", 5, _EXP, recent_move_pct=None)
+        for r in dec["ranking"]:
+            assert r["delta_wr"] == pytest.approx(round(r["cond_wr"] - r["global_wr"], 4))
+
+    def test_regime_embedded(self):
+        dec = build_expiry_decision(_structural_df(), "W", 5, _EXP, recent_move_pct=None)
+        reg = dec["regime"]
+        assert set(reg.keys()) == {"regime", "mean_abs_move", "std_move", "n"}
+        # 8 W פקיעות לפני 2022-05-15; |moves| ממוצע = 4.4/8 = 0.55 ; ratio=1.0 → normal
+        assert reg["regime"] == "normal"
+        assert reg["mean_abs_move"] == pytest.approx(0.55)
+        assert reg["n"] == 8
+
+    def test_reason_contains_rank_and_cond_wr(self):
+        dec = build_expiry_decision(_structural_df(), "W", 5, _EXP, recent_move_pct=None)
+        top = dec["ranking"][0]
+        assert "#1" in top["reason"]
+        assert f"{top['cond_wr']:.0%}" in top["reason"]   # "75%"
+
+    def test_shadow_returns_all_six_not_filtered(self):
+        dec = build_expiry_decision(_structural_df(), "W", 5, _EXP, recent_move_pct=None)
+        assert len(dec["ranking"]) == 6   # אף אסטרטגיה לא סוננה
+
+    # ── מקרי קצה / נימה ─────────────────────────────────────────────────
+    def test_no_similar_falls_back_to_global(self):
+        # חודש 11 — אין פקיעות → אין דומים; הדירוג נשען על global בלבד
+        dec = build_expiry_decision(_structural_df(), "W", 11, _EXP, recent_move_pct=0.5)
+        assert dec["n_similar"] == 0
+        assert all(r["cond_wr"] is None for r in dec["ranking"])
+        assert all(r["delta_wr"] is None for r in dec["ranking"])
+        assert "אין מקרים דומים" in dec["note"]
+        # ממוין לפי global יורד; global מקסימלי = IC/Bfly (.875) → top ניטרלי
+        assert [r["global_wr"] for r in dec["ranking"]] == [0.875, 0.875, 0.875, 0.75, 0.125, 0.125]
+        assert "אין מקרים דומים" in dec["ranking"][0]["reason"]
+
+    def test_recent_move_none_adds_caveat(self):
+        dec = build_expiry_decision(_structural_df(), "W", 5, _EXP, recent_move_pct=None)
+        assert "ללא סינון תנועה קודמת" in dec["note"]
+
+    def test_high_risk_neutral_top_triggers_warning(self):
+        dec = build_expiry_decision(_structural_df(), "W", 5, _EXP,
+                                    recent_move_pct=None, risk_score=8.0)
+        # top=IC (ניטרלי) + סיכון גבוה → אזהרה שמציעה אסטרטגיה תנודתית
+        assert "⚠️" in dec["note"]
+        assert "ציון סיכון 8.0" in dec["note"]
+        assert "Long Straddle" in dec["note"]      # האלטרנטיבה התנודתית הראשונה בדירוג
+
+    def test_low_risk_normal_regime_no_warning(self):
+        dec = build_expiry_decision(_structural_df(), "W", 5, _EXP,
+                                    recent_move_pct=None, risk_score=1.0)
+        assert "⚠️" not in dec["note"]
+
+    def test_volatile_regime_neutral_top_triggers_warning(self):
+        # בסיס נמוך (20×0.1) + חלון אחרון גבוה (12×2.0) → regime volatile;
+        # May=[-0.2,-0.2,0.2,0.2] → top ניטרלי (IC). risk נמוך — הטריגר הוא ה-regime.
+        specs = []
+        for i in range(20):
+            specs.append((f"{1990+i}-01-15", "W", 0.1))
+        for i, mv in enumerate([-0.2, -0.2, 0.2, 0.2]):
+            specs.append((f"{2001+i}-05-15", "W", mv))
+        for i in range(12):
+            specs.append((f"{2015+i}-08-15", "W", 2.0))
+        df = _dec_df(specs)
+        dec = build_expiry_decision(df, "W", 5, pd.Timestamp("2027-01-01"),
+                                    recent_move_pct=None, risk_score=0.0)
+        assert dec["regime"]["regime"] == "volatile"
+        assert dec["top_strategy_id"] in (2, 3, 4)   # ניטרלי
+        assert "⚠️" in dec["note"]
+        assert "משטר תנודתי" in dec["note"]
+
+    def test_pure_no_mutation_of_input(self):
+        df = _structural_df()
+        before = df.copy()
+        build_expiry_decision(df, "W", 5, _EXP, recent_move_pct=None)
+        # טהורה — לא משנה את ה-DataFrame שהועבר
+        pd.testing.assert_frame_equal(df, before)
