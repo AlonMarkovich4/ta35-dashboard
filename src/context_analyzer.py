@@ -319,6 +319,7 @@ def build_expiry_decision(
     risk_score: Optional[float] = None,
     move_tolerance: float = 0.5,
     vol_window: int = 12,
+    before_date=None,
 ) -> dict:
     """
     מנוע ההחלטה (shadow mode) — מחבר את אבני הבניין לכדי החלטה מנומקת אחת.
@@ -326,6 +327,14 @@ def build_expiry_decision(
     טהורה: מחשבת ומחזירה בלבד — אינה פותחת עסקאות, אינה כותבת ל-DB, ואינה
     מסננת אסטרטגיות (מחזירה את כל 6 מדורגות לפי Win Rate מותנה יורד). ה-regime
     מתועד אך אינו משנה את הדירוג בשלב זה (יטויב בעתיד).
+
+    before_date — None (ברירת מחדל): כל ה-df משמש (התנהגות זהה לקיים; מתאים
+      לפקיעה קרובה שבה ממילא כל ההיסטוריה קודמת לה). אם מסופק: מסנן פנימית את
+      df לפקיעות שלפניו ומעביר את התוצאה לכל שלושת הרכיבים (regime, מקרים דומים,
+      win_rate גלובלי) → zero-lookahead מלא, חיוני ל-backtest היסטורי של החלטות.
+      בשימוש תקין before_date == expiry_date (מחליטים על פקיעה לפי מה שקדם לה);
+      recent_volatility ממילא מסנן שוב לפי expiry_date, אז כשהם מתלכדים הסינון
+      הפנימי שלו הוא no-op על df שכבר סונן (אין כפילות/אי-עקביות).
 
     משתמשת אך ורק בפונקציות הקיימות: recent_volatility, find_similar_expiries,
     conditional_win_rates, best_per_strategy + run_backtest.
@@ -345,12 +354,16 @@ def build_expiry_decision(
     # בין recent_volatility / find_similar_expiries / run_backtest.
     gt = expiry_type if expiry_type in ("W", "M") else None
 
-    # 1. משטר תנודתיות (zero-lookahead — לפני expiry_date)
-    vol = recent_volatility(df, gt, expiry_date, vol_window)
+    # zero-lookahead: אם before_date מסופק — כל הרכיבים רואים רק פקיעות שקדמו לו.
+    # None → כל ה-df (התנהגות זהה לקיים). מסנן פעם אחת, מעביר לכל שלושת הרכיבים.
+    work_df = df if before_date is None else df[df["expiry_date"] < pd.Timestamp(before_date)]
+
+    # 1. משטר תנודתיות (zero-lookahead — לפני expiry_date; ועל work_df המסונן)
+    vol = recent_volatility(work_df, gt, expiry_date, vol_window)
     regime = vol["regime"]
 
     # 2. דירוג Win Rate מותנה על מקרים דומים
-    similar = find_similar_expiries(df, gt, target_month, recent_move_pct, move_tolerance)
+    similar = find_similar_expiries(work_df, gt, target_month, recent_move_pct, move_tolerance)
     n_similar = len(similar)
     cond_best = conditional_win_rates(similar)
     cond_wr_by_id = (
@@ -363,8 +376,8 @@ def build_expiry_decision(
         if not cond_best.empty and "avg_intensity" in cond_best.columns else {}
     )
 
-    # 3. Win Rate גלובלי (כל ההיסטוריה מאותו סוג) ל-delta
-    global_best = best_per_strategy(run_backtest(df, expiry_type=gt))
+    # 3. Win Rate גלובלי (כל ההיסטוריה מאותו סוג, עד before_date) ל-delta
+    global_best = best_per_strategy(run_backtest(work_df, expiry_type=gt))
     global_wr_by_id = (
         {int(r["strategy_id"]): float(r["win_rate"]) for _, r in global_best.iterrows()}
         if not global_best.empty else {}

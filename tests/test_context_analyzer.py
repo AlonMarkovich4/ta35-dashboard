@@ -691,3 +691,62 @@ class TestDecisionIntensityTiebreaker:
         dec = build_expiry_decision(_structural_df(), "W", 11, _EXP, recent_move_pct=0.5)
         assert all(r["cond_intensity"] is None for r in dec["ranking"])
         assert "עוצמה ממוצעת" not in dec["ranking"][0]["reason"]
+
+
+# ─── before_date — zero-lookahead מלא בכל הרכיבים ──────────────────────
+
+def _ranking_sig(dec):
+    """חתימת דירוג להשוואה: (sid, rank, cond_wr, cond_intensity) לכל רשומה."""
+    return [(r["strategy_id"], r["rank"], r["cond_wr"], r["cond_intensity"])
+            for r in dec["ranking"]]
+
+
+class TestBuildExpiryDecisionBeforeDate:
+    def test_before_date_none_equals_omitting(self):
+        """before_date=None → פלט זהה לחלוטין לקריאה ללא הפרמטר (regression)."""
+        a = build_expiry_decision(_structural_df(), "W", 5, _EXP, recent_move_pct=None)
+        b = build_expiry_decision(_structural_df(), "W", 5, _EXP, recent_move_pct=None,
+                                  before_date=None)
+        assert _ranking_sig(a) == _ranking_sig(b)
+        assert a["top_strategy_id"] == b["top_strategy_id"]
+        assert a["regime"] == b["regime"]
+        assert a["n_similar"] == b["n_similar"]
+        assert a["note"] == b["note"]
+
+    def test_far_future_before_date_equals_full_df(self):
+        """before_date אחרי כל הנתונים → work_df = כל ה-df → זהה ל-None."""
+        base = build_expiry_decision(_structural_df(), "W", 5, _EXP, recent_move_pct=None)
+        future = build_expiry_decision(_structural_df(), "W", 5, _EXP, recent_move_pct=None,
+                                       before_date=pd.Timestamp("2099-01-01"))
+        assert _ranking_sig(future) == _ranking_sig(base)
+
+    def test_before_date_excludes_future_full_zero_lookahead(self):
+        """פקיעות אחרי before_date לא משפיעות על הדירוג — בכל הרכיבים.
+
+        prior (W-May, לפני cutoff): 5×0.2 → טווח-קצר מנצח (IC/Butterfly cond_wr=1.0).
+        future (W-May, אחרי cutoff): 10×8.0 — לו נכלל, היה משנה את הדירוג לחלוטין
+        (BCS/Straddle מנצחים על תנועות ענק).
+          • עם before_date=cutoff → הדירוג זהה ל-prior-only (העתיד מוחרג).
+          • בלי before_date → העתיד דולף פנימה והדירוג שונה (top אחר).
+        """
+        cutoff = pd.Timestamp("2020-01-01")
+        expiry = pd.Timestamp("2020-05-15")
+        prior  = [(f"{2010+i}-05-15", "W", 0.2) for i in range(5)]
+        future = [(f"{2030+i}-05-15", "W", 8.0) for i in range(10)]
+        prior_df = _dec_df(prior)
+        full_df  = _dec_df(prior + future)
+
+        filtered = build_expiry_decision(full_df, "W", 5, expiry,
+                                         recent_move_pct=None, before_date=cutoff)
+        prior_only = build_expiry_decision(prior_df, "W", 5, expiry, recent_move_pct=None)
+        leaked = build_expiry_decision(full_df, "W", 5, expiry, recent_move_pct=None)
+
+        # (א) עם הסינון → זהה בדיוק להרצה על ההיסטוריה-בלבד (העתיד לא השפיע)
+        assert _ranking_sig(filtered) == _ranking_sig(prior_only)
+        assert filtered["n_similar"] == prior_only["n_similar"] == 5
+        assert filtered["top_strategy_id"] == prior_only["top_strategy_id"] == 2  # Iron Condor
+
+        # (ב) בלי הסינון → העתיד דלף: n_similar גדל, וה-top השתנה (BCS על תנועות ענק)
+        assert leaked["n_similar"] == 15
+        assert leaked["top_strategy_id"] == 1            # Bull Call Spread
+        assert filtered["top_strategy_id"] != leaked["top_strategy_id"]  # ה-lookahead משנה
