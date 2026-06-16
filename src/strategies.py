@@ -12,6 +12,24 @@ from typing import Any
 
 
 # ────────────────────────────────────────────────────────────────────
+#  profit_intensity — מדד עוצמה משלים ל-is_success
+# ────────────────────────────────────────────────────────────────────
+# is_success הוא בינארי; profit_intensity ∈ [0,1] מבחין בין אסטרטגיות
+# שחולקות אותו תנאי ניצחון (למשל Iron Condor מול Butterfly — שתיהן
+# "abs(move) < X" אך עוצמתן שונה). מבוסס move_pct בלבד, לינארי, clamp ל-[0,1].
+
+# Bull Call Spread מגיע לעוצמה מלאה (1.0) בעלייה של +1.0%. נבחר כי תנועות
+# פקיעה ב-TA-35 הן בדרך-כלל תת-1% (calm ≈0.6%, normal ≈1.4%), כך ש-+1% הוא
+# מהלך שורי חזק שבו ה-spread קרוב לתקרת הרווח. ערך יחיד מכוונן.
+_BCS_FULL_UP_PCT = 1.0
+
+
+def _clamp01(x: float) -> float:
+    """כולא ערך לטווח [0.0, 1.0]."""
+    return max(0.0, min(1.0, float(x)))
+
+
+# ────────────────────────────────────────────────────────────────────
 #  Base class
 # ────────────────────────────────────────────────────────────────────
 
@@ -35,6 +53,15 @@ class Strategy(ABC):
 
         move_pct — תנועת הפקיעה עם סימן: (פקיעה - בסיס) / בסיס * 100.
         params   — פרמטרים ספציפיים; אם None, משתמש ב-default_params.
+        """
+
+    @abstractmethod
+    def profit_intensity(self, move_pct: float, params: dict[str, Any] | None = None) -> float:
+        """
+        עוצמת רווח ב-[0,1] לפי move_pct — "כמה עמוק בתוך אזור הרווח" היה המהלך.
+
+        מדד *משלים* ל-is_success (אינו מחליף אותו): is_success בינארי, ואילו
+        profit_intensity מבחין בין אסטרטגיות בעלות תנאי ניצחון זהה. תמיד מוחזר [0,1].
         """
 
     def win_rate(self, moves: list[float], params: dict[str, Any] | None = None) -> float:
@@ -69,6 +96,12 @@ class BullCallSpread(Strategy):
         """מנצחת אם move_pct > 0 (המדד עלה)."""
         return move_pct > 0
 
+    def profit_intensity(self, move_pct: float, params: dict[str, Any] | None = None) -> float:
+        """0 בירידה או 0; עולה לינארית ל-1.0 בעלייה של _BCS_FULL_UP_PCT%."""
+        if move_pct <= 0:
+            return 0.0
+        return _clamp01(move_pct / _BCS_FULL_UP_PCT)
+
 
 # ────────────────────────────────────────────────────────────────────
 #  Strategy 2 — Short Iron Condor
@@ -88,6 +121,14 @@ class ShortIronCondor(Strategy):
         """מנצחת אם |move_pct| < width_pct (הפקיעה בתוך הטווח)."""
         p = params if params is not None else self.default_params
         return abs(move_pct) < p["width_pct"]
+
+    def profit_intensity(self, move_pct: float, params: dict[str, Any] | None = None) -> float:
+        """1.0 ב-move=0, יורד לינארית ל-0 ב-|move|=width_pct (רחב → צונח לאט)."""
+        p = params if params is not None else self.default_params
+        width = p["width_pct"]
+        if width <= 0:
+            return 1.0 if move_pct == 0 else 0.0
+        return _clamp01(1.0 - abs(move_pct) / width)
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -110,6 +151,14 @@ class LongCallButterfly(Strategy):
         p = params if params is not None else self.default_params
         return abs(move_pct) < p["wing_pct"]
 
+    def profit_intensity(self, move_pct: float, params: dict[str, Any] | None = None) -> float:
+        """1.0 ב-move=0, יורד לינארית ל-0 ב-|move|=wing_pct (צר מ-IC → צונח מהר)."""
+        p = params if params is not None else self.default_params
+        wing = p["wing_pct"]
+        if wing <= 0:
+            return 1.0 if move_pct == 0 else 0.0
+        return _clamp01(1.0 - abs(move_pct) / wing)
+
 
 # ────────────────────────────────────────────────────────────────────
 #  Strategy 4 — Long Put Butterfly
@@ -129,6 +178,14 @@ class LongPutButterfly(Strategy):
         """מנצחת אם |move_pct| < wing_pct (תנועה קטנה מרוחב הכנף)."""
         p = params if params is not None else self.default_params
         return abs(move_pct) < p["wing_pct"]
+
+    def profit_intensity(self, move_pct: float, params: dict[str, Any] | None = None) -> float:
+        """זהה ל-Call Butterfly (סימטרי על move_pct): 1.0 ב-0, 0 ב-|move|=wing_pct."""
+        p = params if params is not None else self.default_params
+        wing = p["wing_pct"]
+        if wing <= 0:
+            return 1.0 if move_pct == 0 else 0.0
+        return _clamp01(1.0 - abs(move_pct) / wing)
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -151,6 +208,14 @@ class LongStraddle(Strategy):
         p = params if params is not None else self.default_params
         return abs(move_pct) > p["min_move_pct"]
 
+    def profit_intensity(self, move_pct: float, params: dict[str, Any] | None = None) -> float:
+        """0 עד |move|=min_move_pct, עולה לינארית ל-1.0 ב-|move|=2×min_move_pct."""
+        p = params if params is not None else self.default_params
+        m = p["min_move_pct"]
+        if m <= 0:
+            return 1.0 if abs(move_pct) > 0 else 0.0
+        return _clamp01((abs(move_pct) - m) / m)   # 0 ב-m, 1.0 ב-2m
+
 
 # ────────────────────────────────────────────────────────────────────
 #  Strategy 6 — Long Strangle
@@ -171,6 +236,18 @@ class LongStrangle(Strategy):
         """מנצחת אם |move_pct| > min_move_pct (תנועה גדולה, מרחק OTM)."""
         p = params if params is not None else self.default_params
         return abs(move_pct) > p["min_move_pct"]
+
+    def profit_intensity(self, move_pct: float, params: dict[str, Any] | None = None) -> float:
+        """0 עד |move|=min_move_pct, עולה לינארית ל-1.0 ב-|move|=2.5×min_move_pct.
+
+        מגיע לעוצמה מלאה רחוק יותר מ-Straddle (2.5× מול 2×) — כי האופציות OTM
+        דורשות תנועה גדולה יותר כדי להגיע לרווח מלא.
+        """
+        p = params if params is not None else self.default_params
+        m = p["min_move_pct"]
+        if m <= 0:
+            return 1.0 if abs(move_pct) > 0 else 0.0
+        return _clamp01((abs(move_pct) - m) / (1.5 * m))   # 0 ב-m, 1.0 ב-2.5m
 
 
 # ────────────────────────────────────────────────────────────────────

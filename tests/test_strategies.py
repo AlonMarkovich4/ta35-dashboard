@@ -360,3 +360,118 @@ class TestRunGrid:
     def test_strategy_name_in_result(self):
         results = run_grid(self.MOVES, 3)
         assert all(r["strategy"] == "Long Call Butterfly" for r in results)
+
+
+# ────────────────────────────────────────────────────────────────────
+#  profit_intensity — מדד עוצמה משלים
+# ────────────────────────────────────────────────────────────────────
+
+class TestProfitIntensity:
+    # ── Bull Call Spread (סף עלייה מלא = 1.0%) ──────────────────────────
+    def test_bcs_zero_and_negative_are_zero(self):
+        s = BullCallSpread()
+        assert s.profit_intensity(0.0)  == pytest.approx(0.0)
+        assert s.profit_intensity(-0.5) == pytest.approx(0.0)
+        assert s.profit_intensity(-2.0) == pytest.approx(0.0)
+
+    def test_bcs_peak_at_full_up_and_clamps(self):
+        s = BullCallSpread()
+        assert s.profit_intensity(1.0) == pytest.approx(1.0)   # סף מלא
+        assert s.profit_intensity(2.0) == pytest.approx(1.0)   # מעבר → clamp
+
+    def test_bcs_linear_mid(self):
+        s = BullCallSpread()
+        assert s.profit_intensity(0.5)  == pytest.approx(0.5)
+        assert s.profit_intensity(0.25) == pytest.approx(0.25)
+
+    # ── Short Iron Condor (width_pct=2.0) ───────────────────────────────
+    def test_ic_peak_at_zero(self):
+        assert ShortIronCondor().profit_intensity(0.0) == pytest.approx(1.0)
+
+    def test_ic_zero_at_edge_and_beyond(self):
+        s = ShortIronCondor()
+        assert s.profit_intensity(2.0) == pytest.approx(0.0)   # קצה
+        assert s.profit_intensity(3.0) == pytest.approx(0.0)   # מעבר → clamp
+        assert s.profit_intensity(-2.0) == pytest.approx(0.0)  # סימטרי
+
+    def test_ic_linear_mid(self):
+        s = ShortIronCondor()
+        assert s.profit_intensity(1.0)  == pytest.approx(0.5)    # 1-1/2
+        assert s.profit_intensity(0.5)  == pytest.approx(0.75)
+        assert s.profit_intensity(-1.0) == pytest.approx(0.5)    # סימטרי
+
+    # ── Long Call / Put Butterfly (wing_pct=1.0) — זהות וסימטריות ───────
+    def test_butterfly_peak_edge_and_linear(self):
+        for cls in (LongCallButterfly, LongPutButterfly):
+            s = cls()
+            assert s.profit_intensity(0.0)  == pytest.approx(1.0)
+            assert s.profit_intensity(1.0)  == pytest.approx(0.0)   # קצה
+            assert s.profit_intensity(2.0)  == pytest.approx(0.0)   # מעבר → clamp
+            assert s.profit_intensity(0.5)  == pytest.approx(0.5)
+            assert s.profit_intensity(-0.5) == pytest.approx(0.5)   # סימטרי
+
+    def test_call_and_put_butterfly_identical(self):
+        c, p = LongCallButterfly(), LongPutButterfly()
+        for m in (-1.5, -0.3, 0.0, 0.4, 0.9, 1.2):
+            assert c.profit_intensity(m) == pytest.approx(p.profit_intensity(m))
+
+    # ── ההבחנה שחיפשנו: על move קטן, Butterfly < Iron Condor ────────────
+    def test_butterfly_intensity_below_iron_condor_same_move(self):
+        ic = ShortIronCondor()
+        cb, pb = LongCallButterfly(), LongPutButterfly()
+        for m in (0.3, 0.5, 0.8):   # move קטן שבו שתיהן "מנצחות" (abs<X)
+            assert cb.profit_intensity(m) < ic.profit_intensity(m)
+            assert pb.profit_intensity(m) < ic.profit_intensity(m)
+        # ב-move=0.5 בדיוק: IC=0.75 מול Butterfly=0.5
+        assert ic.profit_intensity(0.5) == pytest.approx(0.75)
+        assert cb.profit_intensity(0.5) == pytest.approx(0.5)
+
+    # ── Long Straddle (min_move_pct=1.0, מלא ב-2×) ──────────────────────
+    def test_straddle_zero_until_threshold(self):
+        s = LongStraddle()
+        assert s.profit_intensity(0.0) == pytest.approx(0.0)
+        assert s.profit_intensity(1.0) == pytest.approx(0.0)   # קצה (=min)
+        assert s.profit_intensity(0.5) == pytest.approx(0.0)   # מתחת → clamp
+
+    def test_straddle_peak_at_2x_and_linear(self):
+        s = LongStraddle()
+        assert s.profit_intensity(2.0)  == pytest.approx(1.0)   # 2×min
+        assert s.profit_intensity(3.0)  == pytest.approx(1.0)   # מעבר → clamp
+        assert s.profit_intensity(1.5)  == pytest.approx(0.5)   # אמצע
+        assert s.profit_intensity(-2.0) == pytest.approx(1.0)   # סימטרי
+
+    # ── Long Strangle (min_move_pct=1.5, מלא ב-2.5×) ────────────────────
+    def test_strangle_zero_until_threshold(self):
+        s = LongStrangle()
+        assert s.profit_intensity(1.5) == pytest.approx(0.0)   # קצה (=min)
+        assert s.profit_intensity(1.0) == pytest.approx(0.0)   # מתחת
+
+    def test_strangle_peak_at_2p5x_and_linear(self):
+        s = LongStrangle()
+        assert s.profit_intensity(3.75) == pytest.approx(1.0)         # 2.5×1.5
+        assert s.profit_intensity(5.0)  == pytest.approx(1.0)         # מעבר → clamp
+        assert s.profit_intensity(3.0)  == pytest.approx(1.5 / 2.25)  # (3-1.5)/(1.5*1.5)=0.6667
+        assert s.profit_intensity(-3.75) == pytest.approx(1.0)        # סימטרי
+
+    def test_strangle_needs_bigger_move_than_straddle(self):
+        """באותו min ובאותו move, Strangle נמוך מ-Straddle (OTM → דורש יותר)."""
+        params = {"min_move_pct": 1.0}
+        straddle = LongStraddle().profit_intensity(2.0, params)   # 2×min → 1.0
+        strangle = LongStrangle().profit_intensity(2.0, params)   # (2-1)/(1.5)=0.6667
+        assert strangle < straddle
+        assert straddle == pytest.approx(1.0)
+        assert strangle == pytest.approx(1.0 / 1.5)
+
+    # ── clamp ל-[0,1] לכל האסטרטגיות על טווח קיצוני ─────────────────────
+    def test_all_strategies_clamped_to_unit_interval(self):
+        moves = [-50.0, -3.0, -0.5, 0.0, 0.5, 3.0, 50.0]
+        for s in STRATEGIES.values():
+            for m in moves:
+                v = s.profit_intensity(m)
+                assert 0.0 <= v <= 1.0, f"{s.name} @ {m} → {v} מחוץ ל-[0,1]"
+
+    def test_custom_params_respected(self):
+        """profit_intensity מכבד params מפורשים (לא רק default)."""
+        ic = ShortIronCondor()
+        # width_pct=4.0 → ב-move=2.0 העוצמה 1-2/4=0.5 (במקום 0.0 עם default 2.0)
+        assert ic.profit_intensity(2.0, {"width_pct": 4.0}) == pytest.approx(0.5)
