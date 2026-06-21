@@ -16,6 +16,7 @@ if str(_SRC) not in sys.path:
 from paper_db import (
     _make_engine,
     create_portfolio,
+    get_expiries_ready_to_close,
     get_portfolio,
     get_portfolios,
     get_trades,
@@ -26,10 +27,12 @@ from paper_trading import (
     build_legs_chart_data,
     build_track_record,
     build_trade_payoff_curve,
+    close_matured_expiry,
     compute_balance,
     group_trades_by_portfolio,
     nearest_expiry,
     open_trades_for_expiry,
+    summarize_closed_pnl,
     trade_expiries,
 )
 from strategies import STRATEGIES
@@ -109,6 +112,12 @@ def _cached_trades(portfolio_id: int | None = None) -> list[dict]:
 def _cached_expiries() -> list[str]:
     """פקיעות זמינות, cached (משתמש ב-engine המשותף)."""
     return get_available_expiries(engine=_engine())
+
+
+@st.cache_data(ttl=_CACHE_TTL, show_spinner=False)
+def _cached_ready_to_close() -> list[dict]:
+    """פקיעות שבשלו לסגירה (עסקאות פתוחות + סטלמנט זמין), cached."""
+    return get_expiries_ready_to_close(engine=_engine())
 
 
 def _clear_db_cache() -> None:
@@ -860,6 +869,195 @@ def _render_manual_actions(portfolios: list[dict]) -> None:
 
 
 # ════════════════════════════════════════════════════════════════════════
+#  Global performance (P&L מצטבר — תצוגה ללקוחות)
+# ════════════════════════════════════════════════════════════════════════
+
+def _render_global_performance(portfolios: list[dict], all_trades: list[dict]) -> None:
+    """ביצועים מצטברים חוצי-תיקים: סך P&L נטו בולט, Win Rate, עקומת שווי, ופילוח."""
+    st.markdown("### 💰 ביצועים מצטברים — כל התיקים")
+
+    summary = summarize_closed_pnl(all_trades)
+    n       = summary["closed_count"]
+
+    if n == 0:
+        st.info("עדיין אין עסקאות סגורות — הביצועים יוצגו כאן לאחר סגירת פקיעה ראשונה.")
+        return
+
+    total   = summary["total_pnl"]
+    avg     = summary["avg_pnl"]
+    color   = _pnl_color(total)
+    sign    = _sign(total)
+
+    # ── סך רווח/הפסד נטו — כרטיס בולט ───────────────────────────────
+    st.markdown(
+        f"""
+        <div style='background:#1a2744;border:1px solid #2a3d6b;border-radius:12px;
+                    border-top:3px solid {color};padding:16px 20px;margin-bottom:12px;
+                    text-align:center'>
+          <div style='color:#7a9ab8;font-size:0.9rem'>סך רווח/הפסד נטו (כל העסקאות הסגורות)</div>
+          <div style='color:{color};font-size:2.1rem;font-weight:800;margin-top:4px'>
+            {sign}₪{abs(total):,.0f}
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("עסקאות סגורות", n)
+    c2.metric("Win Rate", f"{summary['win_rate']*100:.0f}%",
+              help=f"{summary['wins']} רווחיות מתוך {n} סגורות")
+    c3.metric("ממוצע לעסקה", f"{_sign(avg)}₪{abs(avg):,.0f}")
+
+    # ── עקומת שווי כוללת (סכום ההון ההתחלתי של כל התיקים) ───────────
+    total_initial = sum(float(p.get("initial_balance") or 0) for p in portfolios)
+    st.markdown("#### 📈 עקומת שווי כוללת")
+    _render_equity_curve(all_trades, total_initial)
+
+    # ── ביצועים לפי אסטרטגיה (חוצה תיקים) ───────────────────────────
+    st.markdown("#### 🏆 ביצועים לפי אסטרטגיה")
+    _render_track_record(all_trades)
+
+
+# ════════════════════════════════════════════════════════════════════════
+#  Close matured expiries (סגירה אמיתית — כתיבה בלתי-הפיכה)
+# ════════════════════════════════════════════════════════════════════════
+
+def _do_close(ready_items: list[dict]) -> None:
+    """סוגר רשימת פקיעות בשלות דרך close_matured_expiry, שומר סיכום ומרענן.
+
+    מעביר את התאריך כמחרוזת (str) — בטוח מול שני טיפוסי העמודה (date/text),
+    כי literal מסוג unknown מומר אוטומטית לטיפוס העמודה. קורא ל-close_matured_expiry
+    הקיים — לא משכפל לוגיקת P&L.
+    """
+    results = []
+    with st.spinner("סוגר עסקאות..."):
+        for r in ready_items:
+            results.append(
+                close_matured_expiry(str(r["expiry_date"]), engine=_engine())
+            )
+    st.session_state["close_matured_summary"] = {
+        "ran_at":  datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
+        "results": results,
+    }
+    _clear_db_cache()   # כתיבה בוצעה — לרענן עסקאות + ready-to-close
+    st.rerun()
+
+
+def _render_close_summary(summary: dict) -> None:
+    """מציג סיכום פעולת הסגירה האחרונה (נשמר מעבר ל-rerun)."""
+    st.markdown(f"#### 🧾 תוצאות הסגירה האחרונה — {summary.get('ran_at', '')}")
+
+    for res in summary.get("results", []):
+        exp    = res.get("expiry_date", "—")
+        closed = res.get("closed", 0)
+        errors = res.get("errors", 0)
+        total  = res.get("total_pnl", 0.0)
+        si     = res.get("settlement_index")
+        si_txt = f"{si:,.2f}" if si is not None else "—"
+
+        if closed == 0:
+            st.warning(f"⚠️ פקיעה {exp}: {res.get('message', 'לא נסגרו עסקאות')}")
+            continue
+
+        color = _pnl_color(total)
+        sign  = _sign(total)
+        st.success(
+            f"✅ פקיעה {exp} — נסגרו {closed} עסקאות (סטלמנט {si_txt})"
+            + (f" · {errors} נכשלו" if errors else "")
+        )
+        st.markdown(
+            f"<div style='font-size:1.05rem;margin-bottom:6px'>סך P&L לפקיעה: "
+            f"<strong style='color:{color}'>{sign}₪{abs(total):,.0f}</strong></div>",
+            unsafe_allow_html=True,
+        )
+
+        rows = []
+        for t in res.get("results", []):
+            pnlp = t.get("pnl_pct")
+            rows.append({
+                "אסטרטגיה":   t.get("strategy_name") or "—",
+                "Payoff (₪)": t.get("payoff"),
+                "PnL (₪)":    t.get("pnl"),
+                "PnL%":       f"{pnlp*100:+.1f}%" if pnlp is not None else "—",
+                "סטטוס":      _STATUS_HE.get(t.get("status", ""), t.get("status", "—")),
+            })
+        if rows:
+            df = pd.DataFrame(rows)
+
+            def _color_pnl(v):
+                if not isinstance(v, (int, float)):
+                    return ""
+                return f"color: {_GREEN}" if v > 0 else (f"color: {_RED}" if v < 0 else "")
+
+            styled = (
+                df.style
+                .map(_color_pnl, subset=["PnL (₪)"])
+                .format({
+                    "Payoff (₪)": lambda v: f"₪{v:,.0f}" if v is not None else "—",
+                    "PnL (₪)":    lambda v: f"₪{v:+,.0f}" if v is not None else "—",
+                })
+            )
+            st.dataframe(styled, use_container_width=True, hide_index=True)
+
+
+def _render_close_matured() -> None:
+    """אזור 'סגירת פקיעות שהבשילו' — סגירה אמיתית (בלתי-הפיכה) של עסקאות בפקיעה.
+
+    מציג כל פקיעה בשלה (עסקאות פתוחות + סטלמנט זמין) עם כפתור סגירה. הסגירה
+    דורשת אישור מפורש (checkbox) כי היא כותבת ל-DB ואינה הפיכה. הכפתור קורא
+    ל-close_matured_expiry הקיים — לא משכפל לוגיקה.
+    """
+    st.markdown("### 🔔 סגירת פקיעות שהבשילו")
+
+    # ── תוצאת סגירה אחרונה (נשמרת מעבר ל-rerun) ───────────────────────
+    last = st.session_state.get("close_matured_summary")
+    if last:
+        _render_close_summary(last)
+        if st.button("✖️ נקה תוצאות", key="clear_close_summary"):
+            st.session_state["close_matured_summary"] = None
+            st.rerun()
+
+    try:
+        ready = _cached_ready_to_close()
+    except Exception:
+        st.error("❌ שגיאה בשליפת הפקיעות הבשלות.")
+        return
+
+    if not ready:
+        st.info("אין פקיעות שהבשילו לסגירה — אין פקיעה עם עסקאות פתוחות ומחיר סטלמנט זמין.")
+        return
+
+    st.warning(
+        "⚠️ סגירת פקיעה היא פעולה **בלתי-הפיכה**: היא מעדכנת את העסקאות הפתוחות "
+        "ל'סגור' עם P&L סופי לפי מחיר הסטלמנט. ודא/י את הנתונים לפני הסגירה."
+    )
+    confirm = st.checkbox(
+        "✅ אני מאשר/ת סגירה אמיתית של עסקאות בפקיעות שייבחרו",
+        key="confirm_close_matured",
+    )
+
+    for r in ready:
+        exp    = str(r["expiry_date"])
+        si     = r.get("settlement_index")
+        n      = r.get("open_trades", 0)
+        si_txt = f"{si:,.2f}" if si is not None else "—"
+        c1, c2 = st.columns([3, 1])
+        with c1:
+            st.markdown(f"**פקיעה {exp}** — סטלמנט `{si_txt}` · {n} עסקאות פתוחות")
+        with c2:
+            if st.button(f"🔒 סגור {exp}", key=f"close_exp_{exp}",
+                         type="primary", disabled=not confirm):
+                _do_close([r])
+
+    if len(ready) > 1:
+        st.markdown("")
+        if st.button("🔒 סגור את כל הבשלות", key="close_all_ready",
+                     disabled=not confirm):
+            _do_close(ready)
+
+
+# ════════════════════════════════════════════════════════════════════════
 #  Page entry point
 # ════════════════════════════════════════════════════════════════════════
 
@@ -928,7 +1126,8 @@ if not portfolios:
     st.stop()
 
 # שאילתה אחת לכל העסקאות, ואז קיבוץ לפי תיק ב-Python — במקום שאילתה לכל כרטיס.
-trades_by_pid = group_trades_by_portfolio(_cached_trades())
+all_trades    = _cached_trades()
+trades_by_pid = group_trades_by_portfolio(all_trades)
 
 st.markdown(f"### תיקים פעילים ({len(portfolios)})")
 
@@ -942,6 +1141,14 @@ for row_start in range(0, len(portfolios), _COLS):
         with col:
             p = portfolios[idx]
             _portfolio_card(p, trades_by_pid.get(p["id"], []))
+
+# ─── ביצועים מצטברים (כל התיקים) ────────────────────────────────────
+st.divider()
+_render_global_performance(portfolios, all_trades)
+
+# ─── סגירת פקיעות שהבשילו (סגירה אמיתית) ────────────────────────────
+st.divider()
+_render_close_matured()
 
 # ─── פעולות ידניות (בדיקה) ──────────────────────────────────────────
 st.divider()

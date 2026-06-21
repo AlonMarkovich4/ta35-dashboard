@@ -30,9 +30,11 @@ from paper_db import (
     close_trade,
     create_portfolio,
     get_decision_logs,
+    get_expiries_ready_to_close,
     get_open_trades_for_expiry,
     get_portfolio,
     get_portfolios,
+    get_settlement_index,
     get_trades,
     has_paper_db,
     insert_decision_log,
@@ -896,3 +898,118 @@ class TestGetDecisionLogs:
         eng = MagicMock()
         eng.connect.side_effect = Exception("read failed")
         assert get_decision_logs(engine=eng) == []
+
+
+# ─── get_settlement_index ──────────────────────────────────────────────
+
+class TestGetSettlementIndex:
+    def test_returns_value_when_present(self):
+        eng = _mock_engine(fetchone=_make_row(actual_index_close=4258.3))
+        assert get_settlement_index("2026-06-16", engine=eng) == pytest.approx(4258.3)
+
+    def test_returns_none_when_no_row(self):
+        """פקיעה ללא שורת סטלמנט (כמו 2026-06-19) → None."""
+        eng = _mock_engine(fetchone=None)
+        assert get_settlement_index("2026-06-19", engine=eng) is None
+
+    def test_returns_none_when_value_is_null(self):
+        eng = _mock_engine(fetchone=_make_row(actual_index_close=None))
+        assert get_settlement_index("2026-06-19", engine=eng) is None
+
+    def test_returns_none_without_engine(self, monkeypatch):
+        monkeypatch.delenv("DATABASE_URL", raising=False)
+        assert get_settlement_index("2026-06-16") is None
+
+    def test_returns_none_on_db_error(self):
+        eng = MagicMock()
+        eng.connect.side_effect = Exception("read error")
+        assert get_settlement_index("2026-06-16", engine=eng) is None
+
+    def test_value_coerced_to_float(self):
+        """ערך שמגיע כמחרוזת/Decimal עדיין מוחזר כ-float."""
+        eng = _mock_engine(fetchone=_make_row(actual_index_close="4200"))
+        out = get_settlement_index("2026-06-16", engine=eng)
+        assert isinstance(out, float)
+        assert out == pytest.approx(4200.0)
+
+    def test_sql_queries_condor_settled_detail(self):
+        conn = _mock_conn(fetchone=_make_row(actual_index_close=4200.0))
+        eng  = MagicMock()
+        eng.connect.return_value = conn
+        get_settlement_index("2026-06-16", engine=eng)
+        sql = str(conn.execute.call_args[0][0])
+        assert "condor_settled_detail" in sql
+        assert "actual_index_close" in sql
+        params = conn.execute.call_args[0][1]
+        assert params["expiry_date"] == "2026-06-16"
+
+
+# ─── get_expiries_ready_to_close ───────────────────────────────────────
+
+class TestGetExpiriesReadyToClose:
+    def test_returns_ready_expiries(self):
+        eng = _mock_engine(fetchall=[
+            _make_row(expiry_date="2026-06-16", open_trades=6, settlement_index=4258.3),
+            _make_row(expiry_date="2026-06-17", open_trades=6, settlement_index=4260.0),
+            _make_row(expiry_date="2026-06-18", open_trades=6, settlement_index=4271.5),
+        ])
+        out = get_expiries_ready_to_close(engine=eng)
+        assert [r["expiry_date"] for r in out] == ["2026-06-16", "2026-06-17", "2026-06-18"]
+        assert out[0]["settlement_index"] == pytest.approx(4258.3)
+        assert out[0]["open_trades"] == 6
+
+    def test_excludes_expiry_without_settlement(self):
+        """פקיעה ללא סטלמנט (06-19) לא חוזרת מה-DB — ה-JOIN+IS NOT NULL מסנן אותה."""
+        # ה-DB (לפי ה-SQL) מחזיר רק את הפקיעות הבשלות; 06-19 לא ביניהן.
+        eng = _mock_engine(fetchall=[
+            _make_row(expiry_date="2026-06-16", open_trades=6, settlement_index=4258.3),
+        ])
+        out = get_expiries_ready_to_close(engine=eng)
+        assert all(r["expiry_date"] != "2026-06-19" for r in out)
+        # והשאילתה אכן כוללת את התנאי שמסנן פקיעות בלי סטלמנט:
+        # (נבדק במפורש ב-test_sql_joins_filters_open_and_not_null)
+
+    def test_empty_when_none_ready(self):
+        eng = _mock_engine(fetchall=[])
+        assert get_expiries_ready_to_close(engine=eng) == []
+
+    def test_returns_empty_without_engine(self, monkeypatch):
+        monkeypatch.delenv("DATABASE_URL", raising=False)
+        assert get_expiries_ready_to_close() == []
+
+    def test_returns_empty_on_db_error(self):
+        eng = MagicMock()
+        eng.connect.side_effect = Exception("join failed")
+        assert get_expiries_ready_to_close(engine=eng) == []
+
+    def test_settlement_index_none_safe(self):
+        eng = _mock_engine(fetchall=[
+            _make_row(expiry_date="2026-06-16", open_trades=3, settlement_index=None),
+        ])
+        out = get_expiries_ready_to_close(engine=eng)
+        assert out[0]["settlement_index"] is None
+        assert out[0]["open_trades"] == 3
+
+    def test_sql_joins_filters_open_and_not_null(self):
+        conn = _mock_conn(fetchall=[])
+        eng  = MagicMock()
+        eng.connect.return_value = conn
+        get_expiries_ready_to_close(engine=eng)
+        sql = str(conn.execute.call_args[0][0])
+        assert "paper_trades" in sql
+        assert "condor_settled_detail" in sql
+        assert "'open'" in sql
+        assert "actual_index_close IS NOT NULL" in sql
+
+    def test_join_casts_both_sides_to_date(self):
+        """רגרסיה: ה-JOIN חייב להמיר את שני צידי expiry_date ל-::date.
+
+        בלי ההמרה Postgres נכשל ב-'operator does not exist: text = date' כי
+        עמודות expiry_date בשתי הטבלאות אינן מאותו טיפוס. נועל את ה-CAST המדויק.
+        """
+        conn = _mock_conn(fetchall=[])
+        eng  = MagicMock()
+        eng.connect.return_value = conn
+        get_expiries_ready_to_close(engine=eng)
+        sql = str(conn.execute.call_args[0][0])
+        assert "s.expiry_date::date = pt.expiry_date::date" in sql

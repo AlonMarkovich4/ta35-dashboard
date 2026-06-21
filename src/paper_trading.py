@@ -20,8 +20,10 @@ paper_trading.py — מנוע פתיחה וסגירה של עסקאות Paper Tr
   compute_balance(portfolio, trades)                                   → float
   open_trades_for_expiry(expiry_date, chain, portfolios, engine=None)  → list[dict]
   close_trades_for_expiry(expiry_date, close_index, engine=None)       → list[dict]
+  close_matured_expiry(expiry_date, engine=None)                       → dict
   build_equity_curve(trades, initial_balance)                          → list[dict]
   build_track_record(trades)                                           → list[dict]
+  summarize_closed_pnl(trades)                                         → dict
 """
 from __future__ import annotations
 
@@ -46,6 +48,7 @@ from paper_db import (
     close_trade,
     get_open_trades_for_expiry,
     get_portfolio,
+    get_settlement_index,
     get_trades,
     insert_trade,
 )
@@ -450,6 +453,55 @@ def close_trades_for_expiry(
     return results
 
 
+def close_matured_expiry(expiry_date, engine=None) -> dict:
+    """סוגרת פקיעה שבשלה: מושכת את מחיר הסטלמנט מ-DB ומפעילה את מנגנון ה-P&L הקיים.
+
+    שני שלבים, ללא שכפול לוגיקת חישוב:
+      1. get_settlement_index(expiry_date) → actual_index_close (מחיר הנעילה הקובע).
+         אם אין סטלמנט (None) — לא סוגרת כלום ומחזירה closed=0 עם הודעה.
+      2. close_trades_for_expiry(expiry_date, settlement) — *אותו* מנגנון P&L קיים
+         (payoff מהרגליים − עלות − עמלות) שמעדכן את העסקאות ל-status='closed'.
+
+    מחזיר dict סיכום:
+      {expiry_date, settlement_index, closed, errors, total_pnl, results, message}
+    """
+    eng        = _make_engine(engine)
+    settlement = get_settlement_index(expiry_date, engine=eng)
+
+    if settlement is None:
+        return {
+            "expiry_date":      str(expiry_date),
+            "settlement_index": None,
+            "closed":           0,
+            "errors":           0,
+            "total_pnl":        0.0,
+            "results":          [],
+            "message": (
+                f"אין מחיר סטלמנט (actual_index_close) לפקיעה {expiry_date} — "
+                f"לא נסגרו עסקאות"
+            ),
+        }
+
+    results   = close_trades_for_expiry(expiry_date, settlement, engine=eng)
+    closed    = [r for r in results if r.get("status") == "closed"]
+    errors    = [r for r in results if r.get("status") == "error"]
+    total_pnl = round(sum(float(r.get("pnl") or 0.0) for r in closed), 2)
+
+    return {
+        "expiry_date":      str(expiry_date),
+        "settlement_index": settlement,
+        "closed":           len(closed),
+        "errors":           len(errors),
+        "total_pnl":        total_pnl,
+        "results":          results,
+        "message": (
+            f"נסגרו {len(closed)} עסקאות לפקיעה {expiry_date} "
+            f"במחיר סטלמנט {settlement:,.2f}"
+            + (f" ({len(errors)} נכשלו)" if errors else "")
+        ),
+    }
+
+
 # ─── Analytics helpers ─────────────────────────────────────────────────
 
 def _norm_ts(ts) -> datetime:
@@ -522,6 +574,33 @@ def build_track_record(trades: list[dict]) -> list[dict]:
         })
 
     return sorted(rows, key=lambda r: r["total_pnl"], reverse=True)
+
+
+def summarize_closed_pnl(trades: list[dict]) -> dict:
+    """מסכם ביצועי P&L מצטברים מכל העסקאות הסגורות (חוצה-תיקים/אסטרטגיות).
+
+    עסקה נספרת רק אם status=='closed' ו-pnl אינו None. מחזיר:
+      {closed_count, wins, losses, total_pnl, avg_pnl, win_rate}
+    win_rate ב-[0,1] (רווחיות מתוך כלל הסגורות; pnl>0 = רווח, 0 אינו רווח).
+    כשאין עסקאות סגורות — כל הערכים 0 (win_rate=0.0). תואם ל-build_track_record.
+    """
+    closed = [
+        t for t in (trades or [])
+        if t.get("status") == "closed" and t.get("pnl") is not None
+    ]
+    pnls   = [float(t["pnl"]) for t in closed]
+    n      = len(pnls)
+    wins   = sum(1 for p in pnls if p > 0)
+    losses = sum(1 for p in pnls if p < 0)
+    total  = round(sum(pnls), 2) if pnls else 0.0
+    return {
+        "closed_count": n,
+        "wins":         wins,
+        "losses":       losses,
+        "total_pnl":    total,
+        "avg_pnl":      round(total / n, 2) if n else 0.0,
+        "win_rate":     round(wins / n, 4) if n else 0.0,
+    }
 
 
 # ─── Trade-detail helpers (תצוגת פירוט לפי פקיעה) ──────────────────────

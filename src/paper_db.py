@@ -13,6 +13,8 @@ paper_db.py — שכבת DB לתיקי Paper Trading.
   insert_trade(trade, engine=None)                                      → dict | None
   get_trades(portfolio_id, status, expiry_date, engine=None)            → list[dict]
   get_open_trades_for_expiry(expiry_date, engine=None)                  → list[dict]
+  get_settlement_index(expiry_date, engine=None)                        → float | None
+  get_expiries_ready_to_close(engine=None)                              → list[dict]
   close_trade(trade_id, close_index, pnl, pnl_pct, exit_commission, engine) → bool
   insert_decision_log(decision, trigger, engine_version, engine)        → int | None
   get_decision_logs(limit, engine)                                      → list[dict]
@@ -388,6 +390,101 @@ def close_trade(
         return True
     except Exception:
         return False
+
+
+# ─── Settlement source (read-only) ──────────────────────────────────────
+
+def get_settlement_index(expiry_date, engine=None) -> Optional[float]:
+    """מחזיר את מחיר הסטלמנט (actual_index_close) של פקיעה מ-condor_settled_detail.
+
+    קריאה בלבד. מחזיר float אם קיים מחיר נעילה קובע לפקיעה, אחרת None
+    (למשל פקיעה שטרם נקבע לה סטלמנט — כמו 2026-06-19 כרגע).
+
+    טבלת ה-detail עשויה להחזיק כמה שורות לפקיעה (פירוט לפי סטרייק), אך מחיר
+    הנעילה הקובע זהה לכולן — לכן נשלפת שורה תקפה אחת (LIMIT 1).
+    """
+    eng = _make_engine(engine)
+    if eng is None:
+        return None
+    try:
+        with eng.connect() as conn:
+            row = conn.execute(
+                text("""
+                    SELECT actual_index_close
+                    FROM condor_settled_detail
+                    WHERE expiry_date = :expiry_date
+                      AND actual_index_close IS NOT NULL
+                    LIMIT 1
+                """),
+                {"expiry_date": expiry_date},
+            ).fetchone()
+        if row is None:
+            return None
+        val = row._mapping.get("actual_index_close")
+        return float(val) if val is not None else None
+    except Exception as exc:
+        logger.warning(
+            "get_settlement_index נכשל (expiry_date=%s): %s",
+            expiry_date, exc, exc_info=True,
+        )
+        return None
+
+
+def get_expiries_ready_to_close(engine=None) -> list[dict]:
+    """מחזיר פקיעות שבשלו לסגירה: יש להן עסקאות פתוחות *וגם* מחיר סטלמנט זמין.
+
+    קריאה בלבד. פקיעה "בשלה" = קיימות לה שורות status='open' ב-paper_trades,
+    וגם קיים actual_index_close ב-condor_settled_detail. פקיעה עם עסקאות
+    פתוחות אך ללא סטלמנט (כמו 2026-06-19) לא תיכלל — זה התנאי שמגן מסגירה
+    מוקדמת.
+
+    לכל פקיעה: {expiry_date, settlement_index, open_trades}, ממוין לפי תאריך.
+
+    ה-condor_settled_detail מצומצם לשורה-אחת-לפקיעה בתת-שאילתה *לפני* ה-JOIN,
+    כדי שספירת העסקאות הפתוחות (COUNT) לא תוכפל ע"י ריבוי שורות הפירוט.
+
+    ה-JOIN ממיר את שני צידי expiry_date ל-::date: העמודות בשתי הטבלאות אינן
+    מאותו טיפוס (אחת date ואחת text בפורמט 'YYYY-MM-DD'), ו-Postgres מסרב
+    להשוות text=date בלי המרה מפורשת. השוואה כ-date היא נכונה סמנטית, היא
+    no-op על עמודת date אמיתית, מפרסרת נכון מחרוזת ISO, ועמידה בפני הבדלי
+    פורמט-מחרוזת (רכיב שעה/רווחים) שהשוואת ::text הייתה נכשלת עליהם.
+    """
+    eng = _make_engine(engine)
+    if eng is None:
+        return []
+    try:
+        with eng.connect() as conn:
+            rows = conn.execute(
+                text("""
+                    SELECT pt.expiry_date     AS expiry_date,
+                           COUNT(*)           AS open_trades,
+                           s.settlement_index AS settlement_index
+                    FROM paper_trades pt
+                    JOIN (
+                        SELECT expiry_date,
+                               MAX(actual_index_close) AS settlement_index
+                        FROM condor_settled_detail
+                        WHERE actual_index_close IS NOT NULL
+                        GROUP BY expiry_date
+                    ) s ON s.expiry_date::date = pt.expiry_date::date
+                    WHERE pt.status = 'open'
+                    GROUP BY pt.expiry_date, s.settlement_index
+                    ORDER BY pt.expiry_date
+                """),
+            ).fetchall()
+        out: list[dict] = []
+        for r in rows:
+            m  = r._mapping
+            si = m.get("settlement_index")
+            out.append({
+                "expiry_date":      m.get("expiry_date"),
+                "settlement_index": float(si) if si is not None else None,
+                "open_trades":      int(m.get("open_trades") or 0),
+            })
+        return out
+    except Exception as exc:
+        logger.warning("get_expiries_ready_to_close נכשל: %s", exc, exc_info=True)
+        return []
 
 
 # ─── Decision log (append-only) ─────────────────────────────────────────

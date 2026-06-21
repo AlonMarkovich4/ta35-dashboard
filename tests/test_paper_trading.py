@@ -31,9 +31,11 @@ from paper_trading import (
     trade_expiries,
     build_equity_curve,
     build_track_record,
+    close_matured_expiry,
     close_trades_for_expiry,
     compute_balance,
     open_trades_for_expiry,
+    summarize_closed_pnl,
 )
 
 
@@ -1418,3 +1420,144 @@ class TestBuildTradePayoffCurve:
         mid = c["y"][len(c["y"]) // 2]                      # ≈ 4300 (המרכז)
         assert mid == pytest.approx(500.0)
         assert c["max_profit"] == pytest.approx(500.0)      # הרווח המרבי = ה-credit
+
+
+# ─── close_matured_expiry (wrapper סביב close_trades_for_expiry) ────────
+
+class TestCloseMaturedExpiry:
+    """wrapper שמושך סטלמנט מ-DB ומפעיל את מנגנון ה-P&L הקיים — בלי לשכפל חישוב."""
+
+    def test_passes_settlement_as_close_index(self):
+        """מושך actual_index_close ומעביר אותו *בדיוק* כ-close_index ל-close_trades_for_expiry."""
+        fake_results = [{"trade_id": 1, "status": "closed", "pnl": 1500.0}]
+        with patch("paper_trading.get_settlement_index", return_value=4258.3) as gs, \
+             patch("paper_trading.close_trades_for_expiry", return_value=fake_results) as ct:
+            out = close_matured_expiry("2026-06-16", engine=MagicMock())
+
+        gs.assert_called_once()
+        assert gs.call_args[0][0] == "2026-06-16"
+        # close_trades_for_expiry נקראה עם ה-close_index שהגיע מהסטלמנט:
+        assert ct.call_args[0][0] == "2026-06-16"
+        assert ct.call_args[0][1] == pytest.approx(4258.3)
+        assert out["settlement_index"] == pytest.approx(4258.3)
+        assert out["closed"] == 1
+        assert out["total_pnl"] == pytest.approx(1500.0)
+
+    def test_no_settlement_does_not_close(self):
+        """אין סטלמנט (None, כמו 06-19) → close_trades_for_expiry לא נקראת כלל."""
+        with patch("paper_trading.get_settlement_index", return_value=None), \
+             patch("paper_trading.close_trades_for_expiry") as ct:
+            out = close_matured_expiry("2026-06-19", engine=MagicMock())
+
+        ct.assert_not_called()
+        assert out["closed"] == 0
+        assert out["settlement_index"] is None
+        assert out["total_pnl"] == 0.0
+        assert out["results"] == []
+        assert "אין מחיר סטלמנט" in out["message"]
+
+    def test_total_pnl_sums_only_closed(self):
+        """total_pnl מסכם רק עסקאות שנסגרו (status='closed') — מתעלם מ-error."""
+        fake_results = [
+            {"trade_id": 1, "status": "closed", "pnl": 1500.0},
+            {"trade_id": 2, "status": "closed", "pnl": -400.0},
+            {"trade_id": 3, "status": "error"},                 # לא נספר
+        ]
+        with patch("paper_trading.get_settlement_index", return_value=4260.0), \
+             patch("paper_trading.close_trades_for_expiry", return_value=fake_results):
+            out = close_matured_expiry("2026-06-17", engine=MagicMock())
+
+        assert out["closed"] == 2
+        assert out["errors"] == 1
+        assert out["total_pnl"] == pytest.approx(1100.0)        # 1500 − 400
+        assert "נכשלו" in out["message"]                        # מוזכר שהיו כשלים
+
+    def test_message_reports_count_and_settlement(self):
+        fake_results = [{"trade_id": 1, "status": "closed", "pnl": 100.0}]
+        with patch("paper_trading.get_settlement_index", return_value=4258.3), \
+             patch("paper_trading.close_trades_for_expiry", return_value=fake_results):
+            out = close_matured_expiry("2026-06-16", engine=MagicMock())
+        assert "נסגרו 1 עסקאות" in out["message"]
+        assert "2026-06-16" in out["message"]
+
+    def test_returns_results_passthrough(self):
+        """ה-results המלאים מ-close_trades_for_expiry מוחזרים כמו שהם (לתצוגה/לוג)."""
+        fake_results = [
+            {"trade_id": 1, "strategy_name": "Long Straddle", "status": "closed", "pnl": 5000.0},
+        ]
+        with patch("paper_trading.get_settlement_index", return_value=4500.0), \
+             patch("paper_trading.close_trades_for_expiry", return_value=fake_results):
+            out = close_matured_expiry("2026-06-16", engine=MagicMock())
+        assert out["results"] == fake_results
+
+
+# ─── summarize_closed_pnl ──────────────────────────────────────────────
+
+class TestSummarizeClosedPnl:
+    def test_empty_returns_zeros(self):
+        out = summarize_closed_pnl([])
+        assert out == {
+            "closed_count": 0, "wins": 0, "losses": 0,
+            "total_pnl": 0.0, "avg_pnl": 0.0, "win_rate": 0.0,
+        }
+
+    def test_none_input_safe(self):
+        assert summarize_closed_pnl(None)["closed_count"] == 0
+
+    def test_only_closed_counted(self):
+        """open/skipped אינם נספרים — רק status=='closed'."""
+        trades = [
+            {"status": "closed",  "pnl": 1000.0},
+            {"status": "open",    "pnl": None},
+            {"status": "skipped", "pnl": None},
+            {"status": "closed",  "pnl": -400.0},
+        ]
+        out = summarize_closed_pnl(trades)
+        assert out["closed_count"] == 2
+        assert out["total_pnl"] == pytest.approx(600.0)
+
+    def test_none_pnl_excluded(self):
+        """עסקה 'closed' אך עם pnl=None (לא אמורה לקרות) — לא נספרת."""
+        trades = [
+            {"status": "closed", "pnl": None},
+            {"status": "closed", "pnl": 250.0},
+        ]
+        out = summarize_closed_pnl(trades)
+        assert out["closed_count"] == 1
+        assert out["total_pnl"] == pytest.approx(250.0)
+
+    def test_win_rate_and_avg(self):
+        trades = [
+            {"status": "closed", "pnl": 1500.0},
+            {"status": "closed", "pnl": 500.0},
+            {"status": "closed", "pnl": -1000.0},
+            {"status": "closed", "pnl": -200.0},
+        ]
+        out = summarize_closed_pnl(trades)
+        assert out["closed_count"] == 4
+        assert out["wins"] == 2
+        assert out["losses"] == 2
+        assert out["win_rate"] == pytest.approx(0.5)
+        assert out["total_pnl"] == pytest.approx(800.0)
+        assert out["avg_pnl"] == pytest.approx(200.0)
+
+    def test_zero_pnl_not_counted_as_win(self):
+        trades = [
+            {"status": "closed", "pnl": 0.0},
+            {"status": "closed", "pnl": 100.0},
+        ]
+        out = summarize_closed_pnl(trades)
+        assert out["wins"] == 1
+        assert out["losses"] == 0
+        assert out["win_rate"] == pytest.approx(0.5)   # 1 רווח מתוך 2 סגורות
+
+    def test_matches_track_record_totals(self):
+        """סך ה-P&L זהה לסכום total_pnl של build_track_record (מקור אמת אחד)."""
+        trades = [
+            {"status": "closed", "pnl": 1500.0, "strategy_name": "A"},
+            {"status": "closed", "pnl": -300.0, "strategy_name": "B"},
+            {"status": "closed", "pnl": 200.0,  "strategy_name": "A"},
+        ]
+        summary = summarize_closed_pnl(trades)
+        record_total = round(sum(r["total_pnl"] for r in build_track_record(trades)), 2)
+        assert summary["total_pnl"] == pytest.approx(record_total)
