@@ -1,0 +1,61 @@
+# ─────────────────────────────────────────────────────────────────────────
+# Auto-close matured TA-35 expiries
+#
+# מריץ scripts/auto_close_expiries.py מתוזמן. הסקריפט סוגר רק פקיעות שבשלו
+# (עסקאות status='open' + actual_index_close קיים ב-condor_settled_detail) —
+# הטריגר הוא *קיום הסטלמנט*, לא שעה. idempotent: ריצה ללא פקיעות בשלות
+# מסתיימת ב-exit 0 ("אין פקיעות לסגירה") = הצלחה ירוקה רגילה.
+#
+# ⚠️ דרוש secret אחד ב-GitHub כדי שה-Action יעבוד:
+#     Settings → Secrets and variables → Actions → New repository secret
+#       Name:  DATABASE_URL
+#       Value: <מחרוזת החיבור ל-Supabase>   (אותו ערך כמו ב-Render)
+#   בלי ה-secret הריצה נכשלת ב-exit 2 ("DATABASE_URL לא מוגדר").
+#   ה-secret מוזרק כ-env לצעד ההרצה בלבד — לעולם לא נכתב ללוג.
+# ─────────────────────────────────────────────────────────────────────────
+name: Auto-close matured expiries
+
+on:
+  schedule:
+    # GitHub cron הוא ב-UTC. הפקיעה ~10:00 שעון ישראל; ישראל היא UTC+3 (קיץ/IDT)
+    # או UTC+2 (חורף/IST). חלון 07:00–13:00 UTC תופס "10:00–15:00 מקומי" בשני המצבים:
+    #   קיץ  (UTC+3): 07–13 UTC = 10:00–16:00 IDT
+    #   חורף (UTC+2): 07–13 UTC = 09:00–15:00 IST
+    # ריצה כל שעה בימי מסחר בישראל (ראשון–חמישי = day-of-week 0–4).
+    - cron: '0 7-13 * * 0-4'
+  workflow_dispatch: {}   # הרצה ידנית מ-Actions UI — לבדיקות
+
+# הרשאות מינימליות — הסקריפט נוגע רק ב-DB חיצוני, לא ב-repo עצמו.
+permissions:
+  contents: read
+
+# לא להריץ שתי ריצות במקביל (הסקריפט כותב ל-DB); לא לקטוע ריצה פעילה.
+concurrency:
+  group: auto-close-expiries
+  cancel-in-progress: false
+
+jobs:
+  close:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'   # תואם runtime.txt (production/Render); אומת גם על 3.13 מקומית
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run auto-close
+        # ה-Action נכשל (אדום) רק אם הסקריפט מחזיר exit != 0.
+        # exit 0 (כולל "אין פקיעות לסגירה") = הצלחה ירוקה.
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python scripts/auto_close_expiries.py
