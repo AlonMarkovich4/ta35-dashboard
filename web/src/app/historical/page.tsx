@@ -4,6 +4,8 @@ import { useState, type ReactNode } from "react";
 import { Kpi } from "@/components/ui/Kpi";
 import { Panel } from "@/components/ui/Panel";
 import { FilterRow } from "@/components/ui/FilterRow";
+import { Disclaimer } from "@/components/ui/Disclaimer";
+import { SvgChart } from "@/components/charts/SvgChart";
 
 // ─── Mock (נאמן-צורה; יוחלף ב-Supabase בשלב 4) ──────────────────────
 const SUMMARY = { total: "965", up: "58.3%", down: "41.7%", avgAbs: "0.94%", medAbs: "0.71%" };
@@ -45,32 +47,30 @@ function Histogram({ bins }: { bins: { c: number; n: number }[] }) {
   const yTicks = [0, Math.round(nMax / 2), nMax];
   const sy = (n: number) => pad.t + ih - (n / nMax) * ih;
   return (
-    <div dir="ltr" className="w-full overflow-x-auto">
-      <svg viewBox={`0 0 ${W} ${H}`} className="w-full min-w-[640px]" role="img">
-        {yTicks.map((t) => (
-          <g key={t}>
-            <line x1={pad.l} y1={sy(t)} x2={W - pad.r} y2={sy(t)} stroke="var(--color-grid)" />
-            <text x={pad.l - 8} y={sy(t) + 3} textAnchor="end" fontSize="10" fill="var(--color-text3)">{t}</text>
-          </g>
-        ))}
-        {bins.map((b, i) => {
-          const h = (b.n / nMax) * ih;
-          return (
-            <rect key={i} x={pad.l + i * bw + 1} y={pad.t + ih - h} width={bw - 2} height={h}
-              fill={b.c >= 0 ? "var(--color-pos)" : "var(--color-neg)"} opacity="0.85" rx="1" />
-          );
-        })}
-        <line x1={zeroX} y1={pad.t} x2={zeroX} y2={pad.t + ih} stroke="var(--color-text3)" strokeWidth="1.5" strokeDasharray="4 4" />
-        <text x={zeroX + 4} y={pad.t + 10} fontSize="10" fill="var(--color-text2)">0%</text>
-        {bins.map((b, i) =>
-          i % 4 === 0 ? (
-            <text key={`x${i}`} x={pad.l + i * bw + bw / 2} y={H - pad.b + 16} textAnchor="middle" fontSize="9" fill="var(--color-text3)">
-              {b.c > 0 ? "+" : ""}{b.c}
-            </text>
-          ) : null
-        )}
-      </svg>
-    </div>
+    <SvgChart w={W} h={H} label="התפלגות תנועות פקיעה לפי אחוז תנועה">
+      {yTicks.map((t) => (
+        <g key={t}>
+          <line x1={pad.l} y1={sy(t)} x2={W - pad.r} y2={sy(t)} stroke="var(--color-grid)" />
+          <text x={pad.l - 8} y={sy(t) + 3} textAnchor="end" fontSize="10" fill="var(--color-text3)">{t}</text>
+        </g>
+      ))}
+      {bins.map((b, i) => {
+        const h = (b.n / nMax) * ih;
+        return (
+          <rect key={i} x={pad.l + i * bw + 1} y={pad.t + ih - h} width={bw - 2} height={h}
+            fill={b.c >= 0 ? "var(--color-pos)" : "var(--color-neg)"} opacity="0.85" rx="1" />
+        );
+      })}
+      <line x1={zeroX} y1={pad.t} x2={zeroX} y2={pad.t + ih} stroke="var(--color-text3)" strokeWidth="1.5" strokeDasharray="4 4" />
+      <text x={zeroX + 4} y={pad.t + 10} fontSize="10" fill="var(--color-text2)">0%</text>
+      {bins.map((b, i) =>
+        i % 4 === 0 ? (
+          <text key={`x${i}`} x={pad.l + i * bw + bw / 2} y={H - pad.b + 16} textAnchor="middle" fontSize="9" fill="var(--color-text3)">
+            {b.c > 0 ? "+" : ""}{b.c}
+          </text>
+        ) : null
+      )}
+    </SvgChart>
   );
 }
 
@@ -82,30 +82,28 @@ function YearlyAvg({ data }: { data: { year: number; avg: number }[] }) {
   const baseY = pad.t + ih / 2;
   const scale = (v: number) => (v / maxAbs) * (ih / 2);
   return (
-    <div dir="ltr" className="w-full overflow-x-auto">
-      <svg viewBox={`0 0 ${W} ${H}`} className="w-full min-w-[640px]" role="img">
-        <line x1={pad.l} y1={baseY} x2={W - pad.r} y2={baseY} stroke="var(--color-text3)" strokeDasharray="3 3" />
-        {data.map((d, i) => {
-          const x = pad.l + i * bw;
-          const h = Math.abs(scale(d.avg));
-          const up = d.avg >= 0;
-          const y = up ? baseY - h : baseY;
-          const cx = x + bw / 2;
-          return (
-            <g key={d.year}>
-              <rect x={x + 4} y={y} width={bw - 8} height={h} rx="2"
-                fill={up ? "var(--color-pos)" : "var(--color-neg)"} opacity="0.85" />
-              <text x={cx} y={up ? y - 4 : y + h + 11} textAnchor="middle" fontSize="8"
-                fill={up ? "var(--color-pos)" : "var(--color-neg)"}>
-                {d.avg > 0 ? "+" : ""}{d.avg.toFixed(2)}
-              </text>
-              <text x={cx} y={H - pad.b + 16} textAnchor="middle" fontSize="9" fill="var(--color-text3)"
-                transform={`rotate(-45 ${cx} ${H - pad.b + 16})`}>{d.year}</text>
-            </g>
-          );
-        })}
-      </svg>
-    </div>
+    <SvgChart w={W} h={H} label="תנועה ממוצעת לפי שנה">
+      <line x1={pad.l} y1={baseY} x2={W - pad.r} y2={baseY} stroke="var(--color-text3)" strokeDasharray="3 3" />
+      {data.map((d, i) => {
+        const x = pad.l + i * bw;
+        const h = Math.abs(scale(d.avg));
+        const up = d.avg >= 0;
+        const y = up ? baseY - h : baseY;
+        const cx = x + bw / 2;
+        return (
+          <g key={d.year}>
+            <rect x={x + 4} y={y} width={bw - 8} height={h} rx="2"
+              fill={up ? "var(--color-pos)" : "var(--color-neg)"} opacity="0.85" />
+            <text x={cx} y={up ? y - 4 : y + h + 11} textAnchor="middle" fontSize="8"
+              fill={up ? "var(--color-pos)" : "var(--color-neg)"}>
+              {d.avg > 0 ? "+" : ""}{d.avg.toFixed(2)}
+            </text>
+            <text x={cx} y={H - pad.b + 16} textAnchor="middle" fontSize="9" fill="var(--color-text3)"
+              transform={`rotate(-45 ${cx} ${H - pad.b + 16})`}>{d.year}</text>
+          </g>
+        );
+      })}
+    </SvgChart>
   );
 }
 
@@ -118,30 +116,28 @@ function YearlyRange({ data }: { data: { year: number; min: number; max: number;
   const sy = (v: number) => pad.t + ih - ((v - lo) / (hi - lo)) * ih;
   const yTicks = [Math.ceil(lo), 0, Math.floor(hi)];
   return (
-    <div dir="ltr" className="w-full overflow-x-auto">
-      <svg viewBox={`0 0 ${W} ${H}`} className="w-full min-w-[640px]" role="img">
-        {yTicks.map((t) => (
-          <g key={t}>
-            <line x1={pad.l} y1={sy(t)} x2={W - pad.r} y2={sy(t)} stroke="var(--color-grid)" />
-            <text x={pad.l - 8} y={sy(t) + 3} textAnchor="end" fontSize="10" fill="var(--color-text3)">
-              {t > 0 ? "+" : ""}{t}
-            </text>
+    <SvgChart w={W} h={H} label="טווח תנועות שנתי — מינימום, מקסימום וממוצע">
+      {yTicks.map((t) => (
+        <g key={t}>
+          <line x1={pad.l} y1={sy(t)} x2={W - pad.r} y2={sy(t)} stroke="var(--color-grid)" />
+          <text x={pad.l - 8} y={sy(t) + 3} textAnchor="end" fontSize="10" fill="var(--color-text3)">
+            {t > 0 ? "+" : ""}{t}
+          </text>
+        </g>
+      ))}
+      <line x1={pad.l} y1={sy(0)} x2={W - pad.r} y2={sy(0)} stroke="var(--color-text3)" strokeDasharray="3 3" />
+      {data.map((d, i) => {
+        const x = pad.l + i * bw + bw / 2;
+        return (
+          <g key={d.year}>
+            <line x1={x} y1={sy(d.max)} x2={x} y2={sy(d.min)} stroke="var(--color-accent2)" strokeWidth="2" strokeLinecap="round" />
+            <circle cx={x} cy={sy(d.avg)} r="3" fill={d.avg >= 0 ? "var(--color-pos)" : "var(--color-neg)"} />
+            <text x={x} y={H - pad.b + 16} textAnchor="middle" fontSize="9" fill="var(--color-text3)"
+              transform={`rotate(-45 ${x} ${H - pad.b + 16})`}>{d.year}</text>
           </g>
-        ))}
-        <line x1={pad.l} y1={sy(0)} x2={W - pad.r} y2={sy(0)} stroke="var(--color-text3)" strokeDasharray="3 3" />
-        {data.map((d, i) => {
-          const x = pad.l + i * bw + bw / 2;
-          return (
-            <g key={d.year}>
-              <line x1={x} y1={sy(d.max)} x2={x} y2={sy(d.min)} stroke="var(--color-accent2)" strokeWidth="2" strokeLinecap="round" />
-              <circle cx={x} cy={sy(d.avg)} r="3" fill={d.avg >= 0 ? "var(--color-pos)" : "var(--color-neg)"} />
-              <text x={x} y={H - pad.b + 16} textAnchor="middle" fontSize="9" fill="var(--color-text3)"
-                transform={`rotate(-45 ${x} ${H - pad.b + 16})`}>{d.year}</text>
-            </g>
-          );
-        })}
-      </svg>
-    </div>
+        );
+      })}
+    </SvgChart>
   );
 }
 
@@ -247,16 +243,16 @@ export default function HistoricalPage() {
       <Panel title="תנועות לפי שנה">
         <Tabs
           tabs={[
-            { label: "📊 ממוצע שנתי", content: <YearlyAvg data={YEARLY} /> },
-            { label: "📦 התפלגות שנתית", content: <YearlyRange data={YEARLY} /> },
+            { label: "ממוצע שנתי", content: <YearlyAvg data={YEARLY} /> },
+            { label: "התפלגות שנתית", content: <YearlyRange data={YEARLY} /> },
           ]}
         />
       </Panel>
 
-      <p className="pt-1 text-xs text-text3">
-        ⚠️ כלי מחקר בלבד. הנתונים לניתוח סטטיסטי היסטורי בלבד ואינם המלצת מסחר, ייעוץ
+      <Disclaimer>
+        כלי מחקר בלבד. הנתונים לניתוח סטטיסטי היסטורי בלבד ואינם המלצת מסחר, ייעוץ
         השקעות או תחזית. מסחר באופציות כרוך בסיכון של אובדן מלא.
-      </p>
+      </Disclaimer>
     </div>
   );
 }

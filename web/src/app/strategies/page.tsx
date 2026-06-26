@@ -4,6 +4,7 @@ import { useState } from "react";
 import { Panel } from "@/components/ui/Panel";
 import { AccordionItem } from "@/components/ui/Accordion";
 import { FilterRow } from "@/components/ui/FilterRow";
+import { Disclaimer } from "@/components/ui/Disclaimer";
 
 // ─── Mock data (נאמן-צורה; יוחלף בנתוני Supabase בשלב 4) ─────────────
 const TOTAL = 965;
@@ -332,10 +333,10 @@ export default function StrategiesPage() {
         })}
       </div>
 
-      <p className="pt-2 text-xs text-text3">
-        ⚠️ Win Rate היסטורי אינו מבטיח תוצאות עתידיות. הניתוח מבוסס על כיוון
-        התנועה בלבד — אינו מחשב פרמיות, עלויות עסקה או סיכון אמיתי. כלי מחקר בלבד.
-      </p>
+      <Disclaimer>
+        Win Rate היסטורי אינו מבטיח תוצאות עתידיות. הניתוח מבוסס על כיוון התנועה
+        בלבד — אינו מחשב פרמיות, עלויות עסקה או סיכון אמיתי. כלי מחקר בלבד.
+      </Disclaimer>
     </div>
   );
 }

@@ -6,9 +6,11 @@ import { useState } from "react";
 import { Kpi } from "@/components/ui/Kpi";
 import { Panel } from "@/components/ui/Panel";
 import { FilterRow } from "@/components/ui/FilterRow";
+import { Disclaimer } from "@/components/ui/Disclaimer";
 import { EquityCurve } from "@/components/charts/EquityCurve";
 import { TrackRecord, type TrackRow } from "@/components/paper/TrackRecord";
-import { ArrowLeft } from "@/components/icons";
+import { ArrowLeft, Trending, BarChart } from "@/components/icons";
+import { en, money, pnlTone } from "@/lib/format";
 
 // ─── Mock (נאמן-צורה; יוחלף ב-Supabase בשלב 4) ──────────────────────
 type Meta = {
@@ -78,10 +80,6 @@ const STATUS = {
   closed: { label: "סגור", tone: "text-text2" },
   skipped: { label: "דולג", tone: "text-text3" },
 } as const;
-
-const en = (v: number) => Math.round(v).toLocaleString("en-US");
-const money = (v: number) => `${v > 0 ? "+" : v < 0 ? "-" : ""}₪${en(Math.abs(v))}`;
-const pnlTone = (v: number) => (v > 0 ? "text-pos" : v < 0 ? "text-neg" : "text-text2");
 
 function makeCurve(initial: number, current: number) {
   const labels = ["ינו", "פבר", "מרץ", "אפר", "מאי", "יונ", "יול", "אוג", "ספט", "אוק", "נוב", "דצמ"];
@@ -155,12 +153,12 @@ export default function PortfolioDetailPage() {
       </Link>
 
       <div>
-        <h1 className="text-2xl font-bold tracking-tight">📁 {meta.name}</h1>
-        <p className="mt-1 text-sm text-text2">🎯 אסטרטגיות התיק: {meta.strategies}</p>
+        <h1 className="text-2xl font-bold tracking-tight">{meta.name}</h1>
+        <p className="mt-1 text-sm text-text2">אסטרטגיות התיק: {meta.strategies}</p>
       </div>
 
       <div className="rounded-xl border border-warn/30 bg-warn/5 px-4 py-3 text-sm">
-        <span className="font-bold text-warn">⚠️ כלי מחקר בלבד — לא ייעוץ השקעות</span>
+        <span className="font-bold text-warn">כלי מחקר בלבד — לא ייעוץ השקעות</span>
         <span className="text-text2"> — כל הנתונים הם סימולציה היסטורית בלבד.</span>
       </div>
 
@@ -174,12 +172,12 @@ export default function PortfolioDetailPage() {
       </div>
 
       {/* equity */}
-      <Panel title="📈 עקומת שווי התיק">
+      <Panel title={<span className="flex items-center gap-2"><Trending className="text-pos" /> עקומת שווי התיק</span>}>
         <EquityCurve points={makeCurve(meta.initial, meta.current)} initial={meta.initial} />
       </Panel>
 
       {/* trades table */}
-      <Panel title="📋 עסקאות">
+      <Panel title="עסקאות">
         <div className="mb-4">
           <FilterRow
             options={STATUS_OPTS.map((o) => ({ v: o.v, l: o.l }))}
@@ -222,7 +220,7 @@ export default function PortfolioDetailPage() {
       </Panel>
 
       {/* expiry breakdown */}
-      <Panel title="🔍 פירוט לפי פקיעה">
+      <Panel title="פירוט לפי פקיעה">
         <div className="mb-4 flex items-center gap-3">
           <label className="text-xs text-text3">בחר פקיעה</label>
           <select
@@ -245,7 +243,7 @@ export default function PortfolioDetailPage() {
               </div>
               <LegsTable legs={t.legs} />
               <div className="mt-3 rounded-lg border border-border px-3 py-2 text-xs text-text3">
-                📈 מבנה רגליים + Payoff Diagram — ייבנו בשלב 5
+                מבנה רגליים + Payoff Diagram — ייבנו בשלב 5
               </div>
             </div>
           ))}
@@ -253,11 +251,11 @@ export default function PortfolioDetailPage() {
       </Panel>
 
       {/* track record */}
-      <Panel title="🏆 Track Record לפי אסטרטגיה">
+      <Panel title={<span className="flex items-center gap-2"><BarChart className="text-accent" /> Track Record לפי אסטרטגיה</span>}>
         <TrackRecord records={TRACK} />
       </Panel>
 
-      <p className="pt-1 text-xs text-text3">⚠️ כלי מחקר בלבד — לא ייעוץ השקעות. כל הנתונים הם סימולציה היסטורית.</p>
+      <Disclaimer>כלי מחקר בלבד — לא ייעוץ השקעות. כל הנתונים הם סימולציה היסטורית.</Disclaimer>
     </div>
   );
 }

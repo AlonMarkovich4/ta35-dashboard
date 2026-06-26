@@ -3,6 +3,9 @@
 import { useState } from "react";
 import { Kpi } from "@/components/ui/Kpi";
 import { Panel } from "@/components/ui/Panel";
+import { Disclaimer } from "@/components/ui/Disclaimer";
+import { SvgChart } from "@/components/charts/SvgChart";
+import { Sprout, Refresh, Trash, Plus, Dot } from "@/components/icons";
 
 // ─── Mock (נאמן-צורה; יוחלף ב-Supabase בשלב 4) ──────────────────────
 const CAT_COLOR: Record<string, string> = {
@@ -88,34 +91,32 @@ function Timeline({ points }: { points: { t: number; move: number; event: boolea
   const years = [2010, 2014, 2018, 2022, 2026];
   const yTicks = [maxAbs, 0, -maxAbs];
   return (
-    <div dir="ltr" className="w-full overflow-x-auto">
-      <svg viewBox={`0 0 ${W} ${H}`} className="w-full min-w-[640px]" role="img">
-        {yTicks.map((t) => (
-          <g key={t}>
-            <line x1={pad.l} y1={sy(t)} x2={W - pad.r} y2={sy(t)} stroke="var(--color-grid)" />
-            <text x={pad.l - 8} y={sy(t) + 3} textAnchor="end" fontSize="10" fill="var(--color-text3)">
-              {t > 0 ? "+" : ""}{t.toFixed(1)}
-            </text>
-          </g>
-        ))}
-        {points.filter((p) => p.event).map((p, i) => (
-          <line key={`v${i}`} x1={sx(p.t)} y1={pad.t} x2={sx(p.t)} y2={pad.t + ih}
-            stroke="var(--color-neg)" strokeWidth="1" strokeDasharray="2 3" opacity="0.4" />
-        ))}
-        <line x1={pad.l} y1={sy(0)} x2={W - pad.r} y2={sy(0)} stroke="var(--color-text3)" strokeDasharray="4 4" />
-        {points.map((p, i) => (
-          <circle key={i} cx={sx(p.t)} cy={sy(p.move)} r={p.event ? 4.5 : 2.6}
-            fill={p.event ? "var(--color-neg)" : "var(--color-text3)"} opacity={p.event ? 0.9 : 0.55} />
-        ))}
-        {years.map((y) => (
-          <text key={y} x={sx((y - 2010) / 16)} y={H - pad.b + 16} textAnchor="middle" fontSize="10" fill="var(--color-text3)">{y}</text>
-        ))}
-        <circle cx={pad.l + 6} cy={9} r="3.5" fill="var(--color-text3)" opacity="0.55" />
-        <text x={pad.l + 15} y={12} fontSize="11" fill="var(--color-text2)">רגיל</text>
-        <circle cx={pad.l + 62} cy={9} r="4.5" fill="var(--color-neg)" />
-        <text x={pad.l + 72} y={12} fontSize="11" fill="var(--color-text2)">עם אירוע</text>
-      </svg>
-    </div>
+    <SvgChart w={W} h={H} label="ציר זמן — תנועות פקיעה לצד אירועים היסטוריים">
+      {yTicks.map((t) => (
+        <g key={t}>
+          <line x1={pad.l} y1={sy(t)} x2={W - pad.r} y2={sy(t)} stroke="var(--color-grid)" />
+          <text x={pad.l - 8} y={sy(t) + 3} textAnchor="end" fontSize="10" fill="var(--color-text3)">
+            {t > 0 ? "+" : ""}{t.toFixed(1)}
+          </text>
+        </g>
+      ))}
+      {points.filter((p) => p.event).map((p, i) => (
+        <line key={`v${i}`} x1={sx(p.t)} y1={pad.t} x2={sx(p.t)} y2={pad.t + ih}
+          stroke="var(--color-neg)" strokeWidth="1" strokeDasharray="2 3" opacity="0.4" />
+      ))}
+      <line x1={pad.l} y1={sy(0)} x2={W - pad.r} y2={sy(0)} stroke="var(--color-text3)" strokeDasharray="4 4" />
+      {points.map((p, i) => (
+        <circle key={i} cx={sx(p.t)} cy={sy(p.move)} r={p.event ? 4.5 : 2.6}
+          fill={p.event ? "var(--color-neg)" : "var(--color-text3)"} opacity={p.event ? 0.9 : 0.55} />
+      ))}
+      {years.map((y) => (
+        <text key={y} x={sx((y - 2010) / 16)} y={H - pad.b + 16} textAnchor="middle" fontSize="10" fill="var(--color-text3)">{y}</text>
+      ))}
+      <circle cx={pad.l + 6} cy={9} r="3.5" fill="var(--color-text3)" opacity="0.55" />
+      <text x={pad.l + 15} y={12} fontSize="11" fill="var(--color-text2)">רגיל</text>
+      <circle cx={pad.l + 62} cy={9} r="4.5" fill="var(--color-neg)" />
+      <text x={pad.l + 72} y={12} fontSize="11" fill="var(--color-text2)">עם אירוע</text>
+    </SvgChart>
   );
 }
 
@@ -127,37 +128,42 @@ function CategoryBars({ data, baseline }: { data: { cat: string; avg: number }[]
   const sy = (v: number) => pad.t + ih - (v / yMax) * ih;
   const yTicks = [0, +(yMax / 2).toFixed(1), +yMax.toFixed(1)];
   return (
-    <div dir="ltr" className="w-full overflow-x-auto">
-      <svg viewBox={`0 0 ${W} ${H}`} className="w-full min-w-[640px]" role="img">
-        {yTicks.map((t) => (
-          <g key={t}>
-            <line x1={pad.l} y1={sy(t)} x2={W - pad.r} y2={sy(t)} stroke="var(--color-grid)" />
-            <text x={pad.l - 8} y={sy(t) + 3} textAnchor="end" fontSize="10" fill="var(--color-text3)">{t}%</text>
+    <SvgChart w={W} h={H} label="תנועה ממוצעת לפי קטגוריית אירוע מול בסיס">
+      {yTicks.map((t) => (
+        <g key={t}>
+          <line x1={pad.l} y1={sy(t)} x2={W - pad.r} y2={sy(t)} stroke="var(--color-grid)" />
+          <text x={pad.l - 8} y={sy(t) + 3} textAnchor="end" fontSize="10" fill="var(--color-text3)">{t}%</text>
+        </g>
+      ))}
+      {data.map((d, i) => {
+        const x = pad.l + i * bw;
+        const h = (d.avg / yMax) * ih;
+        const cx = x + bw / 2;
+        return (
+          <g key={d.cat}>
+            <rect x={x + 8} y={pad.t + ih - h} width={bw - 16} height={h} rx="2"
+              fill={CAT_COLOR[d.cat] ?? "var(--color-text3)"} opacity="0.85" />
+            <text x={cx} y={pad.t + ih - h - 5} textAnchor="middle" fontSize="10" fill="var(--color-text2)">
+              {d.avg.toFixed(2)}%
+            </text>
+            <text x={cx} y={H - pad.b + 16} textAnchor="middle" fontSize="11" fill="var(--color-text3)">{d.cat}</text>
           </g>
-        ))}
-        {data.map((d, i) => {
-          const x = pad.l + i * bw;
-          const h = (d.avg / yMax) * ih;
-          const cx = x + bw / 2;
-          return (
-            <g key={d.cat}>
-              <rect x={x + 8} y={pad.t + ih - h} width={bw - 16} height={h} rx="2"
-                fill={CAT_COLOR[d.cat] ?? "var(--color-text3)"} opacity="0.85" />
-              <text x={cx} y={pad.t + ih - h - 5} textAnchor="middle" fontSize="10" fill="var(--color-text2)">
-                {d.avg.toFixed(2)}%
-              </text>
-              <text x={cx} y={H - pad.b + 16} textAnchor="middle" fontSize="11" fill="var(--color-text3)">{d.cat}</text>
-            </g>
-          );
-        })}
-        <line x1={pad.l} y1={sy(baseline)} x2={W - pad.r} y2={sy(baseline)} stroke="var(--color-text3)" strokeWidth="1.5" strokeDasharray="5 4" />
-        <text x={W - pad.r} y={sy(baseline) - 5} textAnchor="end" fontSize="10" fill="var(--color-text2)">
-          בסיס (ללא אירוע): {baseline.toFixed(2)}%
-        </text>
-      </svg>
-    </div>
+        );
+      })}
+      <line x1={pad.l} y1={sy(baseline)} x2={W - pad.r} y2={sy(baseline)} stroke="var(--color-text3)" strokeWidth="1.5" strokeDasharray="5 4" />
+      <text x={W - pad.r} y={sy(baseline) - 5} textAnchor="end" fontSize="10" fill="var(--color-text2)">
+        בסיס (ללא אירוע): {baseline.toFixed(2)}%
+      </text>
+    </SvgChart>
   );
 }
+
+const QUICK_ACTIONS = [
+  { Icon: Sprout, label: "הזרע אירועים (ברירת מחדל)" },
+  { Icon: Refresh, label: "רענן חדשות (RSS)" },
+  { Icon: Trash, label: "מחק אירוע" },
+  { Icon: Plus, label: "הוסף אירוע חדש" },
+];
 
 // ─── Page ───────────────────────────────────────────────────────────
 export default function EventsPage() {
@@ -204,10 +210,10 @@ export default function EventsPage() {
 
         <Panel title="פעולות מהירות">
           <div className="space-y-2">
-            {["🌱 הזרע אירועים (ברירת מחדל)", "📰 רענן חדשות (RSS)", "🗑️ מחק אירוע", "➕ הוסף אירוע חדש"].map((label) => (
+            {QUICK_ACTIONS.map(({ Icon, label }) => (
               <button key={label}
-                className="w-full rounded-lg border border-border bg-surface2 px-3 py-2 text-right text-sm text-text2 transition hover:text-text1">
-                {label}
+                className="flex w-full items-center gap-2 rounded-lg border border-border bg-surface2 px-3 py-2 text-right text-sm text-text2 transition hover:text-text1">
+                <Icon className="shrink-0 text-text3" /> {label}
               </button>
             ))}
             <p className="pt-1 text-xs text-text3">
@@ -295,8 +301,11 @@ export default function EventsPage() {
           <Panel>
             <div className="rounded-xl border border-warn/30 bg-warn/5 p-5">
               <div className="text-xs text-text3">ציון סיכון תנודתיות — פקיעה 03/07/2026</div>
-              <div className="mt-1 text-3xl font-extrabold text-warn">
-                4.2 / 10 <span className="text-2xl">🟡 בינוני</span>
+              <div className="mt-1 flex items-center gap-2 text-3xl font-extrabold text-warn">
+                4.2 / 10
+                <span className="inline-flex items-center gap-1.5 text-2xl">
+                  <Dot /> בינוני
+                </span>
               </div>
               <div className="mt-2 text-sm text-text2">
                 <b className="text-text1">אירועים בחלון:</b> החלטת ריבית בנק ישראל · פקיעת חוזים בארה״ב
@@ -307,7 +316,7 @@ export default function EventsPage() {
               </div>
             </div>
             <div className="mt-3 rounded-xl border border-accent/20 bg-accent/5 p-4 text-sm text-text2">
-              💡 <b className="text-text1">סיכון בינוני</b> — בדוק את אופי האירוע. אירועי ריבית לרוב
+              <b className="text-text1">סיכון בינוני</b> — בדוק את אופי האירוע. אירועי ריבית לרוב
               מניעים שוק מכוון; אירועי מלחמה מוסיפים אי-ודאות. שמור על גמישות בין Iron Condor
               ל-Straddle.
             </div>
@@ -363,7 +372,7 @@ export default function EventsPage() {
 
       {/* Section 7: telegram */}
       <div className="space-y-3">
-        <h2 className="text-lg font-bold tracking-tight">📡 חדשות מטלגרם אחרונות</h2>
+        <h2 className="text-lg font-bold tracking-tight">חדשות מטלגרם אחרונות</h2>
         <Panel>
           <div className="overflow-x-auto">
             <table className="w-full text-right text-sm">
@@ -388,10 +397,10 @@ export default function EventsPage() {
         </Panel>
       </div>
 
-      <p className="pt-1 text-xs text-text3">
-        ⚠️ הניתוח מבוסס על קישור סטטיסטי בין פקיעות לאירועים — לא קשר סיבתי מוכח. ציון
+      <Disclaimer>
+        הניתוח מבוסס על קישור סטטיסטי בין פקיעות לאירועים — לא קשר סיבתי מוכח. ציון
         הסיכון הוא אינדיקטור תיאורטי בלבד, לא המלצת מסחר. מסחר באופציות כרוך בסיכון של אובדן מלא.
-      </p>
+      </Disclaimer>
     </div>
   );
 }

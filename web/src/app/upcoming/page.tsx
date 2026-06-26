@@ -6,6 +6,7 @@ import { Panel } from "@/components/ui/Panel";
 import { Refresh } from "@/components/icons";
 import { StrategyCard, type Strategy } from "@/components/options/StrategyCard";
 import { ChainChart } from "@/components/charts/ChainChart";
+import { Disclaimer } from "@/components/ui/Disclaimer";
 
 // ─── Mock (נאמן-צורה; יוחלף ב-Supabase בשלב 4) ──────────────────────
 const ATM = { indexEstimate: "2,087.4", strike: "2,090", callPts: "31.5", putPts: "34.2", straddle: "65.7" };
@@ -375,11 +376,11 @@ export default function UpcomingPage() {
         </div>
       </div>
 
-      <p className="pt-1 text-xs text-text3">
-        ⚠️ מידע למחקר וניתוח בלבד. הסטרייקים והמלצות הם הצעה תיאורטית מבוססת פרמטרים
+      <Disclaimer>
+        מידע למחקר וניתוח בלבד. הסטרייקים והמלצות הם הצעה תיאורטית מבוססת פרמטרים
         סטנדרטיים — אינם המלצת מסחר. ערכי P&amp;L הם אומדן גס ואינם כוללים עמלות,
         רוחב ספרד או סיכון נוסף. מסחר באופציות כרוך בסיכון של אובדן מלא.
-      </p>
+      </Disclaimer>
     </div>
   );
 }

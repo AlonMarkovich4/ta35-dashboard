@@ -1,3 +1,5 @@
+import { SvgChart } from "@/components/charts/SvgChart";
+
 type Pt = { strike: number; call: number | null; put: number | null };
 
 export function ChainChart({
@@ -35,8 +37,7 @@ export function ChainChart({
   const yTicks = [0, yMax / 2, yMax];
 
   return (
-    <div dir="ltr" className="w-full overflow-x-auto">
-      <svg viewBox={`0 0 ${W} ${H}`} className="w-full min-w-[640px]" role="img">
+    <SvgChart w={W} h={H} label="שרשרת אופציות — מחירי Call ו-Put לפי סטרייק">
         {yTicks.map((t) => (
           <g key={t}>
             <line x1={pad.l} y1={sy(t)} x2={W - pad.r} y2={sy(t)} stroke="var(--color-grid)" strokeWidth="1" />
@@ -77,7 +78,6 @@ export function ChainChart({
         <text x={pad.l + 15} y={15} fontSize="11" fill="var(--color-text2)">Call</text>
         <rect x={pad.l + 56} y={6} width="10" height="10" rx="2" fill="var(--color-neg)" />
         <text x={pad.l + 71} y={15} fontSize="11" fill="var(--color-text2)">Put</text>
-      </svg>
-    </div>
+    </SvgChart>
   );
 }

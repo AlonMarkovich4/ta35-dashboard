@@ -1,4 +1,5 @@
-import { ils } from "@/lib/format";
+import { ils, en, money, pnlTone } from "@/lib/format";
+import { Dot } from "@/components/icons";
 
 type Leg = {
   action: string;
@@ -27,11 +28,11 @@ export type Strategy = {
 
 const STATUS: Record<
   Strategy["status"],
-  { dot: string; border: string; ring: string }
+  { tone: string; border: string; ring: string }
 > = {
-  profit_zone: { dot: "🟢", border: "border-pos/40", ring: "ring-pos/15" },
-  near_breakeven: { dot: "🟡", border: "border-warn/40", ring: "ring-warn/15" },
-  loss_zone: { dot: "🔴", border: "border-neg/40", ring: "ring-neg/15" },
+  profit_zone: { tone: "text-pos", border: "border-pos/40", ring: "ring-pos/15" },
+  near_breakeven: { tone: "text-warn", border: "border-warn/40", ring: "ring-warn/15" },
+  loss_zone: { tone: "text-neg", border: "border-neg/40", ring: "ring-neg/15" },
 };
 
 function wrColor(wr: number | null) {
@@ -40,8 +41,6 @@ function wrColor(wr: number | null) {
   if (wr < 0.45) return "text-neg";
   return "text-warn";
 }
-
-const en = (n: number) => n.toLocaleString("en-US");
 
 export function StrategyCard({ s }: { s: Strategy }) {
   const st = STATUS[s.status];
@@ -71,7 +70,7 @@ export function StrategyCard({ s }: { s: Strategy }) {
           >
             {wrStr}
           </span>
-          <span className="text-xl leading-none">{st.dot}</span>
+          <Dot className={`text-lg ${st.tone}`} />
         </div>
       </div>
 
@@ -127,11 +126,10 @@ export function StrategyCard({ s }: { s: Strategy }) {
               <tr className="border-b border-border">
                 <td className="py-1.5 text-text3">P&amp;L במחיר הנוכחי</td>
                 <td
-                  className={`py-1.5 text-left font-semibold tabular-nums ${s.yNowNis >= 0 ? "text-pos" : "text-neg"}`}
+                  className={`py-1.5 text-left font-semibold tabular-nums ${pnlTone(s.yNowNis)}`}
                   dir="ltr"
                 >
-                  {s.yNowNis >= 0 ? "+" : ""}
-                  {en(s.yNowNis)} ₪
+                  {money(s.yNowNis)}
                 </td>
               </tr>
               <tr>

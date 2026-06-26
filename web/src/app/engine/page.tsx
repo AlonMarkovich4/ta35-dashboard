@@ -1,13 +1,16 @@
 import { Panel } from "@/components/ui/Panel";
 import { Kpi } from "@/components/ui/Kpi";
 import { AccordionItem } from "@/components/ui/Accordion";
+import { Disclaimer } from "@/components/ui/Disclaimer";
+import { Cpu, Calendar, Dot } from "@/components/icons";
+import { pctFrac, signedPctFrac } from "@/lib/format";
 
 // ─── Mock (נאמן-צורה; יוחלף ב-Supabase בשלב 4) ──────────────────────
 const DECISION = {
   expiry: "02/07/2026",
   type: "W",
   source: "פקיעה קרובה אמיתית",
-  regime: { dot: "🔵", label: "רגיל", tone: "text-accent2" },
+  regime: { label: "רגיל", tone: "text-accent2" },
   riskScore: 4.2,
   nSimilar: 12,
 };
@@ -37,9 +40,9 @@ const RANKING: Rank[] = [
 ];
 
 const REGIME = {
-  calm: { dot: "🟢", label: "רגוע" },
-  normal: { dot: "🔵", label: "רגיל" },
-  volatile: { dot: "🔴", label: "תנודתי" },
+  calm: { tone: "text-pos", label: "רגוע" },
+  normal: { tone: "text-accent2", label: "רגיל" },
+  volatile: { tone: "text-neg", label: "תנודתי" },
 } as const;
 
 type Log = {
@@ -63,18 +66,17 @@ const LOG: Log[] = [
   { at: "2026-05-14 09:00", expiry: "21/05/2026", type: "W", regime: "normal",   top: "Short Iron Condor",   nSim: 13, risk: 4.0, trigger: "manual",    version: "v1.0" },
 ];
 
-const pct0 = (v: number) => `${Math.round(v * 100)}%`;
-const signed = (v: number) => `${v >= 0 ? "+" : ""}${(v * 100).toFixed(1)}%`;
-
 export default function EnginePage() {
   return (
     <div className="space-y-6">
-      <h1 className="text-2xl font-bold tracking-tight">🧭 מנוע ההחלטה</h1>
+      <h1 className="flex items-center gap-2 text-2xl font-bold tracking-tight">
+        <Cpu className="text-accent" /> מנוע ההחלטה
+      </h1>
 
       {/* shadow mode banner */}
       <div className="rounded-xl border border-warn/30 bg-warn/5 px-4 py-3 text-sm">
         <span className="font-bold text-warn">
-          🧭 Shadow Mode — המנוע ממליץ ומתעד, לא פותח עסקאות
+          Shadow Mode — המנוע ממליץ ומתעד, לא פותח עסקאות
         </span>
         <span className="text-text2">
           {" "}
@@ -96,8 +98,8 @@ export default function EnginePage() {
           <Kpi
             label="משטר תנודתיות"
             value={
-              <span className={DECISION.regime.tone}>
-                {DECISION.regime.dot} {DECISION.regime.label}
+              <span className={`inline-flex items-center gap-1.5 ${DECISION.regime.tone}`}>
+                <Dot /> {DECISION.regime.label}
               </span>
             }
           />
@@ -129,13 +131,13 @@ export default function EnginePage() {
                     >
                       <td className="py-2.5 tabular-nums text-text3">{r.rank}</td>
                       <td className={`py-2.5 ${top ? "text-accent" : "text-text1"}`}>{r.name}</td>
-                      <td className="py-2.5 tabular-nums">{pct0(r.condWr)}</td>
-                      <td className="py-2.5 tabular-nums text-text2">{pct0(r.globalWr)}</td>
+                      <td className="py-2.5 tabular-nums">{pctFrac(r.condWr, 0)}</td>
+                      <td className="py-2.5 tabular-nums text-text2">{pctFrac(r.globalWr, 0)}</td>
                       <td
                         className={`py-2.5 tabular-nums ${delta >= 0 ? "text-pos" : "text-neg"}`}
                         dir="ltr"
                       >
-                        {signed(delta)}
+                        {signedPctFrac(delta, 1)}
                       </td>
                       <td className="py-2.5 tabular-nums text-text2">{r.intensity.toFixed(2)}</td>
                     </tr>
@@ -146,7 +148,7 @@ export default function EnginePage() {
           </div>
         </Panel>
 
-        <AccordionItem header={<span className="font-semibold">📝 נימוקי הדירוג</span>}>
+        <AccordionItem header={<span className="font-semibold">נימוקי הדירוג</span>}>
           <div className="space-y-2 text-sm">
             {RANKING.map((r) => (
               <div key={r.rank}>
@@ -161,7 +163,7 @@ export default function EnginePage() {
       </div>
 
       {/* Part B — explanation */}
-      <AccordionItem header={<span className="font-semibold">ℹ️ מה כל מדד אומר (שקיפות)</span>}>
+      <AccordionItem header={<span className="font-semibold">מה כל מדד אומר (שקיפות)</span>}>
         <ul className="space-y-2.5 text-sm text-text2">
           <li>
             <b className="text-text1">Win Rate (מותנה / גלובלי):</b> באיזו תדירות
@@ -179,7 +181,7 @@ export default function EnginePage() {
           </li>
           <li>
             <b className="text-text1">משטר תנודתיות:</b> התנודתיות האחרונה מול הממוצע
-            ההיסטורי — 🟢 רגוע / 🔵 רגיל / 🔴 תנודתי.
+            ההיסטורי — רגוע / רגיל / תנודתי.
           </li>
           <li>
             <b className="text-text1">Shadow Mode:</b> בשלב זה המנוע ממליץ ומתעד בלבד —
@@ -190,7 +192,9 @@ export default function EnginePage() {
 
       {/* Part C — history */}
       <div className="space-y-3">
-        <h2 className="text-lg font-bold tracking-tight">🗂️ היסטוריית ההחלטות</h2>
+        <h2 className="flex items-center gap-2 text-lg font-bold tracking-tight">
+          <Calendar className="text-text2" /> היסטוריית ההחלטות
+        </h2>
         <Panel>
           <div className="overflow-x-auto">
             <table className="w-full text-right text-sm">
@@ -213,8 +217,10 @@ export default function EnginePage() {
                     <td className="py-2 tabular-nums text-text3" dir="ltr">{d.at}</td>
                     <td className="py-2 tabular-nums text-text2">{d.expiry}</td>
                     <td className="py-2 text-text2">{d.type}</td>
-                    <td className="py-2 text-text2">
-                      {REGIME[d.regime].dot} {REGIME[d.regime].label}
+                    <td className="py-2">
+                      <span className={`inline-flex items-center gap-1.5 ${REGIME[d.regime].tone}`}>
+                        <Dot /> {REGIME[d.regime].label}
+                      </span>
                     </td>
                     <td className="py-2 text-text1">{d.top}</td>
                     <td className="py-2 tabular-nums text-text2">{d.nSim}</td>
@@ -232,9 +238,9 @@ export default function EnginePage() {
         </Panel>
       </div>
 
-      <p className="pt-1 text-xs text-text3">
-        ⚠️ כלי מחקר בלבד — לא ייעוץ השקעות. Shadow mode: המנוע מציג ומתעד, לא מבצע.
-      </p>
+      <Disclaimer>
+        כלי מחקר בלבד — לא ייעוץ השקעות. Shadow mode: המנוע מציג ומתעד, לא מבצע.
+      </Disclaimer>
     </div>
   );
 }

@@ -1,6 +1,8 @@
 import Link from "next/link";
 import { Kpi } from "@/components/ui/Kpi";
 import { Panel } from "@/components/ui/Panel";
+import { Disclaimer } from "@/components/ui/Disclaimer";
+import { card } from "@/lib/ui";
 import { BarChart, Trending, Target, Calendar, Wallet, Cpu, Refresh } from "@/components/icons";
 
 const NAV = [
@@ -55,7 +57,7 @@ export default function Home() {
             <Link
               key={href}
               href={href}
-              className="group rounded-2xl border border-border bg-surface/70 p-5 backdrop-blur transition hover:border-accent/40 hover:bg-surface2/40"
+              className={`${card} group p-5 transition hover:border-accent/40 hover:bg-surface2/40`}
             >
               <span className="mb-3 grid h-10 w-10 place-items-center rounded-xl bg-surface2 text-accent">
                 <Icon className="text-xl" />
@@ -79,9 +81,7 @@ export default function Home() {
         </ul>
       </Panel>
 
-      <p className="pt-1 text-xs text-text3">
-        ⚠️ כלי מחקר בלבד — אינו מהווה המלצת מסחר. אין אחריות לדיוק הנתונים.
-      </p>
+      <Disclaimer>כלי מחקר בלבד — אינו מהווה המלצת מסחר. אין אחריות לדיוק הנתונים.</Disclaimer>
     </div>
   );
 }

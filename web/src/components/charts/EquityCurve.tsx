@@ -1,3 +1,6 @@
+import { ils } from "@/lib/format";
+import { SvgChart } from "@/components/charts/SvgChart";
+
 export function EquityCurve({
   points,
   initial,
@@ -19,11 +22,10 @@ export function EquityCurve({
   const linePts = points.map((p, i) => `${sx(i).toFixed(1)},${sy(p.value).toFixed(1)}`).join(" ");
   const areaPts = `${pad.l},${pad.t + ih} ${linePts} ${pad.l + iw},${pad.t + ih}`;
   const yTicks = [yMin, (yMin + yMax) / 2, yMax];
-  const money = (v: number) => `₪${Math.round(v).toLocaleString("en-US")}`;
+  const money = (v: number) => ils(v);
   const xEvery = Math.ceil(points.length / 6);
   return (
-    <div dir="ltr" className="w-full overflow-x-auto">
-      <svg viewBox={`0 0 ${W} ${H}`} className="w-full min-w-[640px]" role="img">
+    <SvgChart w={W} h={H} label="עקומת שווי התיק לאורך זמן">
         {yTicks.map((t) => (
           <g key={t}>
             <line x1={pad.l} y1={sy(t)} x2={W - pad.r} y2={sy(t)} stroke="var(--color-grid)" />
@@ -45,7 +47,6 @@ export function EquityCurve({
             <text key={i} x={sx(i)} y={H - pad.b + 16} textAnchor="middle" fontSize="9" fill="var(--color-text3)">{p.label}</text>
           ) : null
         )}
-      </svg>
-    </div>
+    </SvgChart>
   );
 }
