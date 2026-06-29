@@ -16,6 +16,7 @@ if str(_SRC) not in sys.path:
 
 from context_analyzer import build_expiry_decision, get_recent_move
 from data_loader import get_engine, load_from_db
+from decision_recorder import record_decisions_for_upcoming
 from paper_db import get_decision_logs, has_paper_db
 from strategies import STRATEGIES
 from styles import inject_global_css
@@ -224,7 +225,63 @@ def _render_explanation() -> None:
 
 
 # ════════════════════════════════════════════════════════════════════════
-#  חלק ג — היסטוריית ההחלטות (decision_log)
+#  חלק ג — תיעוד החלטות (כתיבה ל-decision_log)
+# ════════════════════════════════════════════════════════════════════════
+
+_RECORD_STATUS_HE = {
+    "recorded":       "🟢 נרשם",
+    "skipped_exists": "🟡 כבר תועד היום",
+    "error":          "🔴 שגיאה",
+}
+
+
+def _show_record_results(results: list[dict]) -> None:
+    """מציג טבלת תוצאות של תיעוד אחרון (נרשם/דולג/שגיאה לכל פקיעה)."""
+    if not results:
+        st.warning("לא נמצאו פקיעות קרובות בשרשרת לתיעוד.")
+        return
+    n_rec  = sum(1 for r in results if r["status"] == "recorded")
+    n_skip = sum(1 for r in results if r["status"] == "skipped_exists")
+    n_err  = sum(1 for r in results if r["status"] == "error")
+
+    if n_rec == 0 and n_err == 0 and n_skip > 0:
+        st.info("✅ כל הפקיעות הקרובות כבר תועדו היום.")
+
+    rows = [{
+        "פקיעה":           r["expiry_date"],
+        "סוג":             r["expiry_type"] or "—",
+        "אסטרטגיה מובילה": _strategy_name(r["top_strategy_id"]),
+        "משטר":            r["regime"] or "—",
+        "סטטוס":           _RECORD_STATUS_HE.get(r["status"], r["status"]),
+    } for r in results]
+    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+    st.caption(f"נרשמו {n_rec} · דולגו {n_skip} · שגיאות {n_err}.")
+
+
+def _render_recorder() -> None:
+    st.markdown("## 📝 תיעוד החלטות")
+    st.caption(
+        "מריץ את מנוע ההחלטה על כל הפקיעות הקרובות ושומר ל-decision_log "
+        "(append-only). מתעד פעם אחת ביום לכל פקיעה — לחיצה חוזרת לא תיצור כפילות."
+    )
+    if st.button("📝 תעד החלטות לפקיעות הקרובות", type="primary", key="record_decisions"):
+        with st.spinner("מריץ את המנוע ומתעד..."):
+            try:
+                results = record_decisions_for_upcoming(engine=_engine(), trigger="manual")
+            except Exception:  # noqa: BLE001
+                st.error("❌ שגיאה בתיעוד ההחלטות — בדוק חיבור DB ונתוני פקיעות.")
+                return
+        st.session_state["record_results"] = results
+        _logs.clear()          # נכתבו רשומות — לרענן את תצוגת ההיסטוריה
+        st.rerun()
+
+    results = st.session_state.get("record_results")
+    if results is not None:
+        _show_record_results(results)
+
+
+# ════════════════════════════════════════════════════════════════════════
+#  חלק ד — היסטוריית ההחלטות (decision_log)
 # ════════════════════════════════════════════════════════════════════════
 
 def _render_history() -> None:
@@ -270,6 +327,8 @@ if not has_paper_db():
 
 _render_current_decision()
 _render_explanation()
+st.divider()
+_render_recorder()
 st.divider()
 _render_history()
 

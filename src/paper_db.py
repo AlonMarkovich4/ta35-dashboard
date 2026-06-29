@@ -18,6 +18,7 @@ paper_db.py — שכבת DB לתיקי Paper Trading.
   close_trade(trade_id, close_index, pnl, pnl_pct, exit_commission, engine) → bool
   insert_decision_log(decision, trigger, engine_version, engine)        → int | None
   get_decision_logs(limit, engine)                                      → list[dict]
+  decision_logged_today(expiry_date, engine_version, engine)            → bool
 """
 from __future__ import annotations
 
@@ -571,3 +572,45 @@ def get_decision_logs(limit: int = 50, engine=None) -> list[dict]:
         return [dict(r._mapping) for r in rows]
     except Exception:
         return []
+
+
+def decision_logged_today(
+    expiry_date,
+    engine_version: str = "layer1-v1",
+    engine=None,
+) -> bool:
+    """מחזיר True אם כבר קיימת רשומת decision_log לפקיעה הזו מאותה גרסה *היום*.
+
+    משמש למניעת כפילויות בתיעוד (לחיצה חוזרת/הרצה חוזרת באותו יום לא תיצור
+    רשומה כפולה). "היום" נקבע לפי שעון השרת (decided_at::date = CURRENT_DATE) —
+    אותו עיקרון של מקור-זמן אחיד כמו ב-insert_decision_log.
+
+    expiry_date ב-decision_log הוא DATE; ערך נכנס עשוי להיות Timestamp/datetime —
+    ממירים ל-date לפני ההשוואה. בכישלון DB מחזיר False (best-effort: לא חוסם
+    תיעוד עתידי בגלל תקלה רגעית) ומתעד warning.
+    """
+    eng = _make_engine(engine)
+    if eng is None:
+        return False
+    exp = expiry_date
+    if exp is not None and hasattr(exp, "date") and callable(exp.date):
+        exp = exp.date()
+    try:
+        with eng.connect() as conn:
+            found = conn.execute(
+                text("""
+                    SELECT 1 FROM decision_log
+                     WHERE expiry_date = :expiry_date
+                       AND engine_version = :engine_version
+                       AND decided_at::date = CURRENT_DATE
+                     LIMIT 1
+                """),
+                {"expiry_date": exp, "engine_version": engine_version},
+            ).first()
+        return found is not None
+    except Exception as exc:
+        logger.warning(
+            "decision_logged_today נכשל (expiry_date=%s): %s",
+            expiry_date, exc, exc_info=True,
+        )
+        return False
