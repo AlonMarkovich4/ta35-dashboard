@@ -1,0 +1,36 @@
+name: auto-record-decisions
+
+# תיעוד אוטומטי של החלטות המנוע ל-decision_log (shadow mode).
+# מריץ scripts/auto_record_decisions.py פעם ביום מסחר. idempotent: מניעת כפילויות
+# דרך decision_logged_today מבטיחה שכל פקיעה נרשמת פעם אחת ביום, גם בהרצות חוזרות.
+
+on:
+  schedule:
+    # פעם ביום, ראשון–חמישי (ימי מסחר בישראל; cron DOW: 0=ראשון ... 4=חמישי).
+    # GitHub cron הוא UTC וללא DST. ישראל היא UTC+2 (חורף) / UTC+3 (קיץ):
+    #   07:00 UTC  =  09:00 בחורף  /  10:00 בקיץ
+    # כך ההרצה תמיד נופלת בחלון ~09:00–12:00 שעון ישראל, בבוקר לפני שהפקיעות
+    # היומיות פוקעות. (אם בעתיד נרצה רק יום שני — נשנה ל-'0 7 * * 1'.)
+    - cron: '0 7 * * 0-4'
+  workflow_dispatch: {}   # מאפשר גם הרצה ידנית מטאב Actions
+
+jobs:
+  record-decisions:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Record engine decisions
+        env:
+          # אותו secret שכבר מוגדר ל-auto_close — אין צורך להגדיר מחדש.
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python scripts/auto_record_decisions.py
