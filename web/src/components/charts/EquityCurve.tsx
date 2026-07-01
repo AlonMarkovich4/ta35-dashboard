@@ -14,7 +14,9 @@ export function EquityCurve({
   const lo = Math.min(...vals, initial), hi = Math.max(...vals, initial);
   const gap = (hi - lo) * 0.12 || 1;
   const yMin = lo - gap, yMax = hi + gap;
-  const sx = (i: number) => pad.l + (i / (points.length - 1)) * iw;
+  // Center a lone point; guards against 0/0 when points.length === 1.
+  const sx = (i: number) =>
+    points.length <= 1 ? pad.l + iw / 2 : pad.l + (i / (points.length - 1)) * iw;
   const sy = (v: number) => pad.t + ih - ((v - yMin) / (yMax - yMin)) * ih;
   const final = vals[vals.length - 1];
   const up = final >= initial;
