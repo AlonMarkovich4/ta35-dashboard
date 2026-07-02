@@ -4,23 +4,17 @@ databases:
     user: ta35
 
 services:
-  # ── דשבורד Streamlit ──────────────────────────────────────────────
+  # ── דשבורד Next.js ────────────────────────────────────────────────
   - type: web
     name: ta35-dashboard
-    runtime: python
-    buildCommand: pip install -r requirements.txt
-    startCommand: >-
-      streamlit run app.py
-      --server.port $PORT
-      --server.address 0.0.0.0
-      --server.headless true
-      --server.enableWebsocketCompression false
-      --server.enableCORS false
+    runtime: node
+    buildCommand: cd web && npm ci && npm run build
+    startCommand: cd web && npm start
     envVars:
       - key: DATABASE_URL
-        fromDatabase:
-          name: ta35-db
-          property: connectionString
+        sync: false
+      - key: NODE_VERSION
+        value: "20"
 
   # ── Webhook receiver (Telegram → DB) ─────────────────────────────
   - type: web

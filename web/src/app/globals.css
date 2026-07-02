@@ -1,0 +1,84 @@
+@import "tailwindcss";
+
+@theme {
+  --color-bg:        #070b14;
+  --color-surface:   #0e1525;
+  --color-surface2:  #141d31;
+  --color-border:    rgba(255, 255, 255, 0.07);
+  --color-border2:   rgba(255, 255, 255, 0.12);
+
+  --color-text1:     #e6eaf2;
+  --color-text2:     #9aa6bd;
+  --color-text3:     #5d6a82;
+
+  --color-accent:    #22d3ee;
+  --color-accent2:   #38bdf8;
+  --color-pos:       #34d399;
+  --color-neg:       #f87171;
+  --color-warn:      #fbbf24;
+  --color-purple:    #a78bfa;
+
+  --color-grid:        rgba(255, 255, 255, 0.06);
+  --color-grid-strong: rgba(255, 255, 255, 0.22);
+
+  --radius-card: 16px;
+
+  --font-sans: var(--font-heebo), ui-sans-serif, system-ui, sans-serif;
+}
+
+html.light {
+  --color-bg:        #f1f4f9;
+  --color-surface:   #ffffff;
+  --color-surface2:  #eaeef5;
+  --color-border:    rgba(15, 23, 42, 0.10);
+  --color-border2:   rgba(15, 23, 42, 0.16);
+  --color-text1:     #0f172a;
+  --color-text2:     #475569;
+  --color-text3:     #7c8aa0;
+  --color-accent:    #0891b2;
+  --color-accent2:   #0284c7;
+  --color-pos:       #059669;
+  --color-neg:       #dc2626;
+  --color-warn:      #b45309;
+  --color-purple:    #7c3aed;
+  --color-grid:        rgba(15, 23, 42, 0.08);
+  --color-grid-strong: rgba(15, 23, 42, 0.20);
+  color-scheme: light;
+}
+
+html, body { height: 100%; }
+
+body {
+  background: var(--color-bg);
+  color: var(--color-text1);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* Brand glow — שתי הילות רדיאליות מאחורי כל האפליקציה (ציאן מימין-למעלה, תכלת משמאל-למטה) */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(900px 600px at 85% -5%,
+      color-mix(in srgb, var(--color-accent) 12%, transparent), transparent 60%),
+    radial-gradient(800px 600px at 0% 105%,
+      color-mix(in srgb, var(--color-accent2) 10%, transparent), transparent 60%);
+}
+
+/* Scrollbar מעוצב */
+* { scrollbar-width: thin; scrollbar-color: rgba(255,255,255,.12) transparent; }
+*::-webkit-scrollbar { width: 8px; height: 8px; }
+*::-webkit-scrollbar-thumb { background: rgba(255,255,255,.12); border-radius: 9999px; }
+*::-webkit-scrollbar-track { background: transparent; }
+html.light * { scrollbar-color: rgba(15,23,42,.18) transparent; }
+html.light *::-webkit-scrollbar-thumb { background: rgba(15,23,42,.18); }
+
+/* Ticker keyframe (לסרגל נע — בשימוש בשלבים הבאים) */
+@keyframes ticker { from { transform: translateX(0); } to { transform: translateX(-50%); } }
+.animate-ticker { animation: ticker 38s linear infinite; }
+.animate-ticker:hover { animation-play-state: paused; }
