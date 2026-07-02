@@ -615,3 +615,104 @@ export async function getDecisionLogs(limit = 50): Promise<DecisionLogRow[]> {
     });
   }, []);
 }
+
+// ─── historical analysis ────────────────────────────────────────────
+
+export type YearTypeAgg = {
+  year: number;
+  type: string;            // ערך expiry_type כפי שבמסד
+  count: number;
+  ups: number;             // move_pct > 0
+  downs: number;           // move_pct < 0
+  sumMove: number;         // Σ move_pct
+  sumAbs: number;          // Σ abs_move_pct
+  maxMove: number;         // MAX move_pct
+  minMove: number;         // MIN move_pct
+  maxAbs: number;
+};
+
+export type HistBin = { type: string; center: number; n: number };
+
+export type HistoricalData = {
+  aggs: YearTypeAgg[];
+  bins: HistBin[];         // רוחב בין 0.5%, center = אמצע הבין
+  medians: { type: string; medianAbs: number }[]; // חציון מוחלט לכל סוג
+  medianAllAbs: number;    // חציון מוחלט כולל
+};
+
+export async function getHistorical(): Promise<HistoricalData> {
+  return safe(async () => {
+    const aggs = await sql<any[]>`
+      SELECT
+        EXTRACT(YEAR FROM expiry_date::date)::int AS year,
+        expiry_type                                AS type,
+        COUNT(*)::int                              AS count,
+        COUNT(*) FILTER (WHERE move_pct > 0)::int  AS ups,
+        COUNT(*) FILTER (WHERE move_pct < 0)::int  AS downs,
+        COALESCE(SUM(move_pct), 0)                 AS sum_move,
+        COALESCE(SUM(abs_move_pct), 0)             AS sum_abs,
+        COALESCE(MAX(move_pct), 0)                 AS max_move,
+        COALESCE(MIN(move_pct), 0)                 AS min_move,
+        COALESCE(MAX(abs_move_pct), 0)             AS max_abs
+      FROM expiry_history
+      WHERE move_pct IS NOT NULL
+      GROUP BY 1, 2
+      ORDER BY 1, 2
+    `;
+    const bins = await sql<any[]>`
+      SELECT
+        expiry_type                     AS type,
+        (FLOOR(move_pct / 0.5) * 0.5 + 0.25) AS center,
+        COUNT(*)::int                   AS n
+      FROM expiry_history
+      WHERE move_pct IS NOT NULL
+      GROUP BY 1, 2
+      ORDER BY 2
+    `;
+    // חציונים מסוננים על move_pct IS NOT NULL (כמו df["move_pct"].notna() ב-Streamlit)
+    // כדי להתיישר עם aggs/bins ולא לגרור סוגים (למשל 'unknown') ללא move_pct.
+    const medians = await sql<any[]>`
+      SELECT expiry_type AS type,
+             PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY abs_move_pct) AS median_abs
+      FROM expiry_history
+      WHERE move_pct IS NOT NULL
+      GROUP BY 1
+    `;
+    const [mAll] = await sql<any[]>`
+      SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY abs_move_pct) AS m
+      FROM expiry_history WHERE move_pct IS NOT NULL
+    `;
+    return {
+      aggs: aggs.map((a) => ({
+        year: Number(a.year), type: String(a.type ?? ""),
+        count: Number(a.count), ups: Number(a.ups), downs: Number(a.downs),
+        sumMove: Number(a.sum_move), sumAbs: Number(a.sum_abs),
+        maxMove: Number(a.max_move), minMove: Number(a.min_move), maxAbs: Number(a.max_abs),
+      })),
+      bins: bins.map((b) => ({ type: String(b.type ?? ""), center: Number(b.center), n: Number(b.n) })),
+      medians: medians.map((m) => ({ type: String(m.type ?? ""), medianAbs: Number(m.median_abs) })),
+      medianAllAbs: Number(mAll?.m ?? 0),
+    };
+  }, { aggs: [], bins: [], medians: [], medianAllAbs: 0 });
+}
+
+// ─── strategies (moves for client-side backtest) ────────────────────
+
+export type MoveRow = { move: number; type: string; year: number };
+
+export async function getMoves(): Promise<MoveRow[]> {
+  return safe(async () => {
+    const rows = await sql<{ move_pct: number; expiry_type: string | null; year: number }[]>`
+      SELECT move_pct, expiry_type,
+             EXTRACT(YEAR FROM expiry_date::date)::int AS year
+      FROM expiry_history
+      WHERE move_pct IS NOT NULL
+      ORDER BY expiry_date::date
+    `;
+    return rows.map((r) => ({
+      move: Number(r.move_pct),
+      type: String(r.expiry_type ?? ""),
+      year: Number(r.year),
+    }));
+  }, []);
+}
