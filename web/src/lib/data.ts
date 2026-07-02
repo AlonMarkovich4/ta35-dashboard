@@ -716,3 +716,176 @@ export async function getMoves(): Promise<MoveRow[]> {
     }));
   }, []);
 }
+
+// ─── option chain (upcoming expiry) ─────────────────────────────────
+
+const MULTIPLIER = 50; // ₪ לנקודה
+const MIN_STRIKE = 100.0;
+const MAX_PRICE_PTS = 500.0;
+const ATM_RANGE_PCT = 0.2; // ±20% מ-ATM
+const MIN_CHAIN_ROWS = 3;
+
+const numOf = (v: unknown): number => {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : 0;
+};
+
+// "dd/mm/yyyy HH:MM" בשעון ישראל
+const fmtDateTimeShort = (d: string | Date) => {
+  const dt = typeof d === "string" ? new Date(d) : d;
+  const date = dt.toLocaleDateString("en-GB", {
+    timeZone: "Asia/Jerusalem",
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+  });
+  const time = dt.toLocaleTimeString("en-GB", {
+    timeZone: "Asia/Jerusalem",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+  return `${date} ${time}`;
+};
+
+export type ChainRow = {
+  strike: number;
+  callPts: number; putPts: number;       // נקודות (₪/50)
+  callNis: number; putNis: number;       // ₪
+  callDelta: number; putDelta: number;   // דצימלי
+  callOi: number; putOi: number;
+  callVol: number; putVol: number;
+};
+
+export type OptionChain = {
+  expiry: string;        // dd/mm/yyyy
+  expiryIso: string;     // yyyy-mm-dd
+  expiryType: string;    // "שבועי" | "חודשי"
+  asOf: string;          // dd/mm/yyyy HH:MM (Asia/Jerusalem)
+  atmStrike: number | null;
+  indexEstimate: number | null;
+  atmCallPts: number | null;
+  atmPutPts: number | null;
+  rows: ChainRow[];
+  availableExpiries: string[]; // ISO, בסדר הרלוונטיות
+};
+
+export async function getOptionChain(expiryIso?: string): Promise<OptionChain | null> {
+  return safe(async () => {
+    // פקיעות זמינות (>= היום), ממוינות לפי קרבה
+    const exps = await sql<{ iso: string; latest: Date }[]>`
+      SELECT expiry_date::date::text AS iso, MAX(fetched_at) AS latest
+      FROM tase_putcall
+      WHERE expiry_date::date >= CURRENT_DATE
+      GROUP BY 1
+      ORDER BY iso
+    `;
+    if (!exps.length) return null;
+    const availableExpiries = exps.map((e) => e.iso);
+    const targetIso =
+      expiryIso && availableExpiries.includes(expiryIso) ? expiryIso : availableExpiries[0];
+    const targetMeta = exps.find((e) => e.iso === targetIso)!;
+
+    // שורות הפקיעה — מ-snapshot האחרון בלבד.
+    // ה-MAX מחושב בתוך SQL (לא מעבירים Date חזרה — timestamptz הוא מיקרו-שנייה
+    // ו-JS Date הוא מילי-שנייה, כך שהשוואת שוויון הייתה מפספסת את כל השורות).
+    const raw = await sql<Record<string, unknown>[]>`
+      SELECT * FROM tase_putcall
+      WHERE expiry_date::date = ${targetIso}::date
+        AND fetched_at = (
+          SELECT MAX(fetched_at) FROM tase_putcall
+          WHERE expiry_date::date = ${targetIso}::date
+        )
+      ORDER BY expirationprice_call
+    `;
+    if (!raw.length) return null;
+
+    // מיפוי כל שורות ה-snapshot
+    const all: ChainRow[] = raw.map((r) => {
+      const callNis = numOf(r.lastrate_call);
+      const putNis = numOf(r.lastrate_put);
+      return {
+        strike: numOf(r.expirationprice_call),
+        callPts: callNis / MULTIPLIER,
+        putPts: putNis / MULTIPLIER,
+        callNis,
+        putNis,
+        callDelta: numOf(r.delta_call) / 100, // 0-100 → דצימלי
+        putDelta: numOf(r.delta_put) / 100,
+        callOi: numOf(r.openpositions_call),
+        putOi: numOf(r.openpositions_put),
+        callVol: numOf(r.overallturnoverunits_call),
+        putVol: numOf(r.overallturnoverunits_put),
+      };
+    });
+
+    // find_atm (1:1 מהמקור): put-call parity → fallback delta≈0.5 → fallback ממוצע סטרייקים.
+    // אין שימוש ב-underlingasset.
+    let atmStrike: number | null = null;
+    let indexEstimate: number | null = null;
+    const parity = all.filter((r) => r.callNis > 0 && r.putNis > 0);
+    if (parity.length) {
+      const a = parity.reduce((x, y) =>
+        Math.abs(y.callNis - y.putNis) < Math.abs(x.callNis - x.putNis) ? y : x,
+      );
+      atmStrike = a.strike;
+      indexEstimate = a.strike + (a.callNis - a.putNis) / MULTIPLIER;
+    } else if (all.length) {
+      const a = all.reduce((x, y) =>
+        Math.abs(y.callDelta - 0.5) < Math.abs(x.callDelta - 0.5) ? y : x,
+      );
+      // אם קיים דלתא שימושי — ATM לפי delta≈0.5; אחרת ממוצע סטרייקים (atmStrike=null)
+      if (all.some((r) => r.callDelta > 0)) {
+        atmStrike = a.strike;
+        indexEstimate = a.strike;
+      } else {
+        indexEstimate = all.reduce((s, r) => s + r.strike, 0) / all.length;
+      }
+    }
+
+    // סינון תצוגה סביב ה-ATM: סטרייק תקין, ±20%, והסרת מחירי-קצה
+    // (המקור: הסר שורה אם |call|/50 > 500 OR |put|/50 > 500)
+    const lo = indexEstimate != null ? indexEstimate * (1 - ATM_RANGE_PCT) : -Infinity;
+    const hi = indexEstimate != null ? indexEstimate * (1 + ATM_RANGE_PCT) : Infinity;
+    const rows = all.filter(
+      (r) =>
+        r.strike >= MIN_STRIKE &&
+        r.strike >= lo &&
+        r.strike <= hi &&
+        !(Math.abs(r.callPts) > MAX_PRICE_PTS || Math.abs(r.putPts) > MAX_PRICE_PTS),
+    );
+
+    if (rows.length < MIN_CHAIN_ROWS) return null;
+
+    // מחירי ATM מהסטרייק שנבחר
+    let atmCallPts: number | null = null;
+    let atmPutPts: number | null = null;
+    if (atmStrike != null) {
+      const atmRow = all.find((r) => r.strike === atmStrike);
+      atmCallPts = atmRow ? atmRow.callPts : null;
+      atmPutPts = atmRow ? atmRow.putPts : null;
+    }
+
+    // סוג הפקיעה מ-decision_log (W/M)
+    const [et] = await sql<{ expiry_type: string | null }[]>`
+      SELECT expiry_type FROM decision_log
+      WHERE expiry_date::date = ${targetIso}::date
+      ORDER BY decided_at DESC LIMIT 1
+    `;
+    const expiryType =
+      et?.expiry_type === "M" ? "חודשי" : et?.expiry_type === "W" ? "שבועי" : "";
+
+    return {
+      expiry: fmtDate(targetIso),
+      expiryIso: targetIso,
+      expiryType,
+      asOf: fmtDateTimeShort(targetMeta.latest),
+      atmStrike,
+      indexEstimate,
+      atmCallPts,
+      atmPutPts,
+      rows,
+      availableExpiries,
+    };
+  }, null);
+}
