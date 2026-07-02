@@ -1,5 +1,9 @@
 import "server-only";
 import { sql } from "@/lib/db";
+import { computeBalance, parseLegs, type TradeLite, type LegData } from "@/lib/paperMath";
+import { findAtm } from "@/lib/chainMath";
+
+export type { LegData };
 
 async function safe<T>(fn: () => Promise<T>, fallback: T): Promise<T> {
   try {
@@ -236,18 +240,6 @@ export async function getExtremes(threshold = 2.5): Promise<{ rows: ExtremeRow[]
 
 // ─── paper trading ──────────────────────────────────────────────────
 
-type TradeLite = {
-  portfolio_id: number;
-  strategy_name: string | null;
-  expiry_date: string | null;
-  status: string | null;
-  entry_cost: number | null;
-  entry_commission: number | null;
-  pnl: number | null;
-  pnl_pct: number | null;
-  closed_at: string | null;
-};
-
 export type PortfolioCardData = {
   id: number;
   name: string;
@@ -258,18 +250,6 @@ export type PortfolioCardData = {
   commission: number;
   strategies: string; // שמות אסטרטגיות ייחודיים מתוך העסקאות
 };
-
-function computeBalance(initial: number, trades: TradeLite[]): number {
-  let balance = initial;
-  for (const t of trades) {
-    if (t.status === "open") {
-      balance -= Number(t.entry_cost ?? 0) + Number(t.entry_commission ?? 0);
-    } else if (t.status === "closed") {
-      balance += Number(t.pnl ?? 0);
-    }
-  }
-  return Math.round(balance * 10000) / 10000;
-}
 
 export async function getPortfolios(): Promise<PortfolioCardData[]> {
   return safe(async () => {
@@ -417,7 +397,6 @@ export async function getTrackRecord(portfolioId?: number): Promise<TrackRowData
 
 // ─── תיק בודד ───────────────────────────────────────────────────────
 
-export type LegData = { action: string; type: string; strike: number; qty: number; pts: number; nis: number };
 export type TradeRowData = {
   strat: string; expiry: string; status: string;
   entry: number; comm: number; pnl: number | null; pnlPct: number | null;
@@ -449,24 +428,6 @@ export async function getPortfolioDetail(id: number): Promise<PortfolioDetail | 
 
     const names = [...new Set(rows.map((t) => t.strategy_name).filter(Boolean))] as string[];
     const closedPnls = rows.filter((t) => t.status === "closed" && t.pnl !== null);
-
-    const parseLegs = (raw: unknown): LegData[] => {
-      try {
-        const arr = typeof raw === "string" ? JSON.parse(raw) : raw;
-        if (!Array.isArray(arr)) return [];
-        return arr.map((l: Record<string, unknown>) => ({
-          // מיפוי מאומת מול legs_json אמיתי (price_nis, price_pts, action, type, strike, qty)
-          action: String(l.action ?? l.side ?? ""),
-          type: String(l.type ?? l.option_type ?? ""),
-          strike: Number(l.strike ?? 0),
-          qty: Number(l.qty ?? l.quantity ?? l.contracts ?? 1),
-          pts: Number(l.price_pts ?? l.pts ?? l.price ?? 0),
-          nis: Number(l.price_nis ?? l.price_ils ?? l.nis ?? 0),
-        }));
-      } catch {
-        return [];
-      }
-    };
 
     return {
       id: Number(p.id),
@@ -819,29 +780,8 @@ export async function getOptionChain(expiryIso?: string): Promise<OptionChain | 
       };
     });
 
-    // find_atm (1:1 מהמקור): put-call parity → fallback delta≈0.5 → fallback ממוצע סטרייקים.
-    // אין שימוש ב-underlingasset.
-    let atmStrike: number | null = null;
-    let indexEstimate: number | null = null;
-    const parity = all.filter((r) => r.callNis > 0 && r.putNis > 0);
-    if (parity.length) {
-      const a = parity.reduce((x, y) =>
-        Math.abs(y.callNis - y.putNis) < Math.abs(x.callNis - x.putNis) ? y : x,
-      );
-      atmStrike = a.strike;
-      indexEstimate = a.strike + (a.callNis - a.putNis) / MULTIPLIER;
-    } else if (all.length) {
-      const a = all.reduce((x, y) =>
-        Math.abs(y.callDelta - 0.5) < Math.abs(x.callDelta - 0.5) ? y : x,
-      );
-      // אם קיים דלתא שימושי — ATM לפי delta≈0.5; אחרת ממוצע סטרייקים (atmStrike=null)
-      if (all.some((r) => r.callDelta > 0)) {
-        atmStrike = a.strike;
-        indexEstimate = a.strike;
-      } else {
-        indexEstimate = all.reduce((s, r) => s + r.strike, 0) / all.length;
-      }
-    }
+    // find_atm: parity → fallback delta → fallback ממוצע (ראה chainMath.findAtm)
+    const { atmStrike, indexEstimate } = findAtm(all);
 
     // סינון תצוגה סביב ה-ATM: סטרייק תקין, ±20%, והסרת מחירי-קצה
     // (המקור: הסר שורה אם |call|/50 > 500 OR |put|/50 > 500)
