@@ -889,3 +889,49 @@ export async function getOptionChain(expiryIso?: string): Promise<OptionChain | 
     };
   }, null);
 }
+
+// ─── home status ────────────────────────────────────────────────────
+
+export type HomeStatus = {
+  expiryCount: number;        // expiry_history עם move_pct
+  lastExpiry: string | null;  // MAX(expiry_date) → fmtDate
+  chainLoaded: boolean;       // קיימת שרשרת ב-tase_putcall
+  chainAsOf: string | null;   // MAX(fetched_at) → fmtDateTime
+  eventCount: number;         // events
+  lastUpdate: string | null;  // pipeline_state: MAX(updated_at) — אין key ייעודי
+                              // כמו last_run; המפתחות מתוארכים (history_copied:DATE וכו')
+};
+
+export async function getHomeStatus(): Promise<HomeStatus> {
+  return safe(
+    async () => {
+      const [r] = await sql<
+        {
+          exp: number;
+          lastexp: Date | null;
+          chain: boolean;
+          chainasof: Date | null;
+          ev: number;
+          lastupdate: Date | null;
+        }[]
+      >`
+        SELECT
+          (SELECT COUNT(*) FROM expiry_history WHERE move_pct IS NOT NULL) AS exp,
+          (SELECT MAX(expiry_date::date) FROM expiry_history)              AS lastexp,
+          (SELECT EXISTS (SELECT 1 FROM tase_putcall))                     AS chain,
+          (SELECT MAX(fetched_at) FROM tase_putcall)                       AS chainasof,
+          (SELECT COUNT(*) FROM events)                                    AS ev,
+          (SELECT MAX(updated_at) FROM pipeline_state)                     AS lastupdate
+      `;
+      return {
+        expiryCount: Number(r.exp),
+        lastExpiry: r.lastexp ? fmtDate(r.lastexp) : null,
+        chainLoaded: Boolean(r.chain),
+        chainAsOf: r.chainasof ? fmtDateTime(r.chainasof) : null,
+        eventCount: Number(r.ev),
+        lastUpdate: r.lastupdate ? fmtDateTime(r.lastupdate) : null,
+      };
+    },
+    { expiryCount: 0, lastExpiry: null, chainLoaded: false, chainAsOf: null, eventCount: 0, lastUpdate: null },
+  );
+}
