@@ -17,6 +17,7 @@ if str(_SRC) not in sys.path:
 from context_analyzer import build_expiry_decision, get_recent_move
 from data_loader import get_engine, load_from_db
 from decision_recorder import record_decisions_for_upcoming
+from decision_validator import build_validation_rows, summarize_validation
 from paper_db import get_decision_logs, has_paper_db
 from strategies import STRATEGIES
 from styles import inject_global_css
@@ -112,6 +113,13 @@ def _logs(limit: int = 50) -> list[dict]:
     return get_decision_logs(limit=limit, engine=_engine())
 
 
+@st.cache_data(ttl=_CACHE_TTL, show_spinner=False)
+def _validation() -> dict:
+    """שורות הוולידציה (המנוע מול המציאות) + סיכום — קריאה בלבד מה-DB."""
+    rows = build_validation_rows(engine=_engine())
+    return {"rows": rows, "summary": summarize_validation(rows)}
+
+
 # ════════════════════════════════════════════════════════════════════════
 #  Helpers
 # ════════════════════════════════════════════════════════════════════════
@@ -122,6 +130,32 @@ def _pct(v) -> str:
 
 def _signed_pct(v) -> str:
     return f"{v * 100:+.1f}%" if isinstance(v, (int, float)) else "—"
+
+
+def _money(v) -> str:
+    """מעצב סכום P&L בשקלים עם סימן (₪ כתחילית, כמו דף התיקים); '—' אם אין ערך."""
+    if not isinstance(v, (int, float)):
+        return "—"
+    sign = "+" if v >= 0 else "-"
+    return f"{sign}₪{abs(v):,.0f}"
+
+
+def _pnl_color(v) -> str:
+    """צבע לפי סימן ה-P&L: ירוק חיובי, אדום שלילי, ניטרלי אחרת."""
+    if isinstance(v, (int, float)) and v > 0:
+        return _GREEN
+    if isinstance(v, (int, float)) and v < 0:
+        return _RED
+    return _AXIS
+
+
+def _colored_metric(label: str, value_str: str, color: str) -> str:
+    """HTML למדד ממורכז עם ערך צבוע (אותו סגנון כמו c2 בהחלטה הנוכחית)."""
+    return (
+        f"<div style='text-align:center'>"
+        f"<div style='color:{_AXIS};font-size:0.85rem'>{label}</div>"
+        f"<div style='font-size:1.4rem;font-weight:700;color:{color}'>{value_str}</div></div>"
+    )
 
 
 def _strategy_name(sid) -> str:
@@ -273,6 +307,7 @@ def _render_recorder() -> None:
                 return
         st.session_state["record_results"] = results
         _logs.clear()          # נכתבו רשומות — לרענן את תצוגת ההיסטוריה
+        _validation.clear()    # החלטה חדשה עשויה להפוך פקיעה לוולידבילית
         st.rerun()
 
     results = st.session_state.get("record_results")
@@ -281,7 +316,74 @@ def _render_recorder() -> None:
 
 
 # ════════════════════════════════════════════════════════════════════════
-#  חלק ד — היסטוריית ההחלטות (decision_log)
+#  חלק ד — ולידציה: המנוע מול המציאות (decision_log ⨝ paper_trades)
+# ════════════════════════════════════════════════════════════════════════
+
+def _render_validation() -> None:
+    st.markdown("## 🎯 ולידציה — המנוע מול המציאות")
+    st.caption(
+        "לכל פקיעה שגם תועדה ב-decision_log וגם נסגרה עם P&L אמיתי — משווים את "
+        "המלצת המנוע מול האסטרטגיה שבאמת הרוויחה הכי הרבה. כל 6 האסטרטגיות נפתחות "
+        "לכל פקיעה, אז ידוע בדיוק היכן ההמלצה עמדה ביחס לאופטימום."
+    )
+    try:
+        bundle = _validation()
+    except Exception:  # noqa: BLE001
+        st.warning("⚠️ שגיאה בטעינת נתוני הוולידציה.")
+        return
+
+    rows, summary = bundle["rows"], bundle["summary"]
+    if not rows:
+        st.info("הוולידציה תתמלא ככל שפקיעות מתועדות ייסגרו.")
+        return
+
+    # ── שורת מדדים ─────────────────────────────────────────────────
+    rec, best, avg = summary["recommended_pnl"], summary["best_pnl"], summary["avg_pnl"]
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("פקיעות שנוולדו", summary["n_validated"])
+    c2.metric("Hit Rate", _pct(summary["hit_rate"]),
+              help="אחוז הפעמים שההמלצה הייתה גם הטובה ביותר בפועל")
+    c3.markdown(_colored_metric("תיק לפי המנוע", _money(rec), _pnl_color(rec)),
+                unsafe_allow_html=True)
+    c4.markdown(_colored_metric("התיק המושלם", _money(best), _pnl_color(best)),
+                unsafe_allow_html=True)
+    c5.markdown(_colored_metric("בחירה אקראית", _money(avg), _pnl_color(avg)),
+                unsafe_allow_html=True)
+
+    if rec > avg:
+        st.success(
+            f"✅ תיק המנוע ({_money(rec)}) מכה את בחירה אקראית ({_money(avg)}) "
+            f"בפער {_money(rec - avg)} — המנוע מוסיף ערך גם כשאינו פוגע בול. "
+            f"התקרה (התיק המושלם): {_money(best)}."
+        )
+    else:
+        st.info(
+            f"תיק המנוע: {_money(rec)} · בחירה אקראית: {_money(avg)} · "
+            f"התיק המושלם: {_money(best)}."
+        )
+
+    # ── טבלת פירוט ────────────────────────────────────────────────
+    tbl = []
+    for r in rows:
+        tbl.append({
+            "פקיעה":          str(r["expiry_date"]),
+            "ההמלצה":         r["top_strategy_name"],
+            "P&L המלצה":      _money(r["recommended_pnl"]),
+            "הטובה בפועל":    r["best_strategy_name"],
+            "P&L הטובה":      _money(r["best_pnl"]),
+            "פער (regret)":   _money(r["regret"]) if r["regret"] is not None else "—",
+            "פגיעה":          "✓" if r["hit"] else "✗",
+            "משטר":           r["regime"] or "—",
+        })
+    st.dataframe(pd.DataFrame(tbl), hide_index=True, use_container_width=True)
+    st.caption(
+        f"מוצגות {len(rows)} פקיעות שנוולדו · total_regret: {_money(summary['total_regret'])} "
+        "(סך מה ש\"עלו\" ההחלטות שלא פגעו בול)."
+    )
+
+
+# ════════════════════════════════════════════════════════════════════════
+#  חלק ה — היסטוריית ההחלטות (decision_log)
 # ════════════════════════════════════════════════════════════════════════
 
 def _render_history() -> None:
@@ -329,6 +431,8 @@ _render_current_decision()
 _render_explanation()
 st.divider()
 _render_recorder()
+st.divider()
+_render_validation()
 st.divider()
 _render_history()
 
