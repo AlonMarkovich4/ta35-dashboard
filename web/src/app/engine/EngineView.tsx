@@ -7,7 +7,8 @@ import { Disclaimer } from "@/components/ui/Disclaimer";
 import { Empty } from "@/components/ui/Empty";
 import { Cpu, Calendar, Dot } from "@/components/icons";
 import { pctFrac, signedPctFrac } from "@/lib/format";
-import type { CurrentDecision, DecisionLogRow } from "@/lib/data";
+import { ValidationSection } from "./ValidationSection";
+import type { CurrentDecision, DecisionLogRow, ValidationData } from "@/lib/data";
 
 // משטר תנודתיות גולמי → תווית + צבע; כל ערך אחר → "לא ידוע".
 const REGIME_MAP: Record<string, { label: string; tone: string }> = {
@@ -20,9 +21,11 @@ const regimeInfo = (r: string) => REGIME_MAP[r] ?? { label: "לא ידוע", ton
 export function EngineView({
   decision,
   logs,
+  validation,
 }: {
   decision: CurrentDecision | null;
   logs: DecisionLogRow[];
+  validation: ValidationData;
 }) {
   return (
     <div className="space-y-6">
@@ -157,6 +160,9 @@ export function EngineView({
           התיעוד רץ אוטומטית (scheduled). הפעלה ידנית תתחבר ל-backend בהמשך.
         </p>
       </Panel>
+
+      {/* Validation — engine vs reality ("המנוע מול המציאות") */}
+      <ValidationSection validation={validation} />
 
       {/* Part B — explanation */}
       <AccordionItem header={<span className="font-semibold">מה כל מדד אומר (שקיפות)</span>}>
