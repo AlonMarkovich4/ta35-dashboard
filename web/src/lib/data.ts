@@ -2,6 +2,13 @@ import "server-only";
 import { sql } from "@/lib/db";
 import { computeBalance, parseLegs, type TradeLite, type LegData } from "@/lib/paperMath";
 import { findAtm } from "@/lib/chainMath";
+import {
+  buildValidationRows,
+  summarizeValidation,
+  type LatestDecision,
+  type ClosedPnl,
+  type ValidationSummary,
+} from "@/lib/validationMath";
 
 export type { LegData };
 
@@ -575,6 +582,99 @@ export async function getDecisionLogs(limit = 50): Promise<DecisionLogRow[]> {
       };
     });
   }, []);
+}
+
+// ─── validation: engine vs reality ("המנוע מול המציאות") ─────────────
+// שכבת ולידציה קריאה-בלבד: מחברת החלטות מנוע (decision_log) לרווח האמיתי
+// (paper_trades). הלוגיקה הטהורה חיה ב-lib/validationMath.ts (unit-tested מול
+// tests/test_decision_validator.py); כאן רק שתי שאילתות ה-SELECT + מיפוי לתצוגה.
+export type { ValidationSummary };
+
+export type ValidationDisplayRow = {
+  expiry: string; // dd/mm/yyyy
+  topStrategyId: number | null;
+  topStrategy: string;
+  recommendedPnl: number | null;
+  bestStrategy: string;
+  bestPnl: number;
+  worstPnl: number;
+  avgPnl: number;
+  hit: boolean;
+  regret: number | null;
+  regime: string; // raw: calm/normal/volatile/unknown
+  nDecisions: number;
+};
+
+export type ValidationData = { rows: ValidationDisplayRow[]; summary: ValidationSummary };
+
+const EMPTY_VALIDATION: ValidationData = {
+  rows: [],
+  summary: { nValidated: 0, hitRate: 0, recommendedPnl: 0, bestPnl: 0, avgPnl: 0, totalRegret: 0 },
+};
+
+export async function getValidation(): Promise<ValidationData> {
+  return safe(async () => {
+    // ההחלטה האחרונה (MAX decided_at) לכל (expiry_date, engine_version), עם ספירת
+    // כלל ההחלטות בקבוצה — DISTINCT ON בורר את השורה, COUNT(*) OVER סופר את כולן.
+    const decisions = await sql<LatestDecision[]>`
+      SELECT DISTINCT ON (expiry_date, engine_version)
+             expiry_date,
+             engine_version,
+             decided_at,
+             top_strategy_id,
+             regime,
+             COUNT(*) OVER (PARTITION BY expiry_date, engine_version) AS n_decisions
+      FROM decision_log
+      ORDER BY expiry_date, engine_version, decided_at DESC
+    `;
+    // P&L מצטבר של עסקאות סגורות לכל (expiry_date, strategy_id).
+    const trades = await sql<ClosedPnl[]>`
+      SELECT expiry_date,
+             strategy_id,
+             MAX(strategy_name) AS strategy_name,
+             SUM(pnl)           AS pnl,
+             COUNT(*)           AS n_trades
+      FROM paper_trades
+      WHERE status = 'closed' AND pnl IS NOT NULL
+      GROUP BY expiry_date, strategy_id
+    `;
+
+    // numeric/bigint חוזרים כמחרוזת מ-postgres.js — נרמול ל-number לפני החישוב.
+    const rows = buildValidationRows(
+      decisions.map((d) => ({
+        expiry_date: d.expiry_date,
+        engine_version: d.engine_version,
+        decided_at: d.decided_at,
+        top_strategy_id: d.top_strategy_id == null ? null : Number(d.top_strategy_id),
+        regime: d.regime,
+        n_decisions: Number(d.n_decisions ?? 0),
+      })),
+      trades.map((t) => ({
+        expiry_date: t.expiry_date,
+        strategy_id: t.strategy_id == null ? null : Number(t.strategy_id),
+        strategy_name: t.strategy_name,
+        pnl: t.pnl == null ? null : Number(t.pnl),
+        n_trades: Number(t.n_trades ?? 0),
+      })),
+    );
+
+    const summary = summarizeValidation(rows);
+    const display: ValidationDisplayRow[] = rows.map((r) => ({
+      expiry: fmtDate(r.expiryKey),
+      topStrategyId: r.topStrategyId,
+      topStrategy: r.topStrategyName,
+      recommendedPnl: r.recommendedPnl,
+      bestStrategy: r.bestStrategyName,
+      bestPnl: r.bestPnl,
+      worstPnl: r.worstPnl,
+      avgPnl: r.avgPnl,
+      hit: r.hit,
+      regret: r.regret,
+      regime: r.regime ?? "unknown",
+      nDecisions: r.nDecisions,
+    }));
+    return { rows: display, summary };
+  }, EMPTY_VALIDATION);
 }
 
 // ─── historical analysis ────────────────────────────────────────────
