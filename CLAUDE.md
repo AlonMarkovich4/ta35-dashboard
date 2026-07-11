@@ -28,8 +28,17 @@
 - שגיאות שנבלעות מסוכנות — תמיד logging לפני return None/except.
 - העדף מצב נגזר (compute) על מצב מאוחסן (store) — מקור אמת אחד.
 
+## מנגנון המרווח האופטימלי (בבנייה — שלב 3 הבא)
+מנוע לבחירת רוחב ה-Short Iron Condor האופטימלי לפקיעה קרובה. מודולים טהורים (אפס UI/DB):
+- `src/margin_calculator.py` — עקומת המרווח: לכל מרווח בגריד (1.0–3.0%) בוחר strikes אמיתיים
+  מהשרשרת ומחשב פרמיה, max_loss, breakevens ו-P&L (`margin_pnl`). עוטף את `payoff.py`.
+- `src/move_distribution.py` — התפלגות התנועות ההיסטורית + `hold_probability` (P להחזקה בטווח),
+  `expected_value_curve` (EV עם avg_loss אמיתי דרך `margin_pnl`, לא max_loss), ו-conditioning
+  שעוטף את `find_similar_expiries` (סוג+חודש+תנועה קודמת).
+- הבא (שלב 3): לוגיקת בחירת המרווח מתוך העקומה, ואז שכבת ולידציה.
+
 ## סביבה
-- repo: ta35-dashboard. נתיב מקומי: ~/Desktop/ta35-dashboard/ta35-dashboard/
+- repo: ta35-dashboard. נתיב מקומי: ~/Projects/ta35-dashboard/ta35-dashboard/ (הועבר מ-~/Desktop בגלל חסימות TCC של macOS)
 - DB דרך pooler: aws-1-ap-southeast-2.pooler.supabase.com:5432
 - DATABASE_URL לא מוגדר מקומית כברירת מחדל — הזרק inline להרצת סקריפטים.
 - Render deploy מ-main (~3 דק').

@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 from payoff import (
     MULTIPLIER,
     build_payoff_fig,
+    condor_legs_from_chain,
     find_breakevens,
     format_legs,
     payoff_bull_call_spread,
@@ -355,6 +356,83 @@ class TestStrategyPayoffParams:
         # should not raise
         p = strategy_payoff_params(1, self._atm, empty)
         assert isinstance(p, dict)
+
+
+# ─── TestCondorLegsFromChain — ה-builder הפרמטרי החדש ─────────────────────
+
+class TestCondorLegsFromChain:
+    _chain = _make_chain(2000.0)
+
+    def test_returns_four_legs_and_credit(self):
+        c = condor_legs_from_chain(self._chain, 2000.0, short_pct=2.0, wing_pct=1.0)
+        for k in ("short_put", "short_call", "long_put", "long_call", "credit_pts"):
+            assert k in c
+
+    def test_short_at_requested_pct(self):
+        """short strikes ב-±2% מהעוגן (2000 → 1960 / 2040)."""
+        c = condor_legs_from_chain(self._chain, 2000.0, short_pct=2.0, wing_pct=1.0)
+        assert c["short_put"]["strike"] == 1960.0
+        assert c["short_call"]["strike"] == 2040.0
+
+    def test_wing_is_beyond_short_not_from_anchor(self):
+        """wing_pct נמדד *מעבר ל-short*: short=2%, wing=1% → כנפיים ב-±3% (1940/2060)."""
+        c = condor_legs_from_chain(self._chain, 2000.0, short_pct=2.0, wing_pct=1.0)
+        assert c["long_put"]["strike"] == 1940.0    # -3%
+        assert c["long_call"]["strike"] == 2060.0   # +3%
+        # הכנפיים רחוקות מהעוגן יותר מה-short
+        assert c["long_put"]["strike"] < c["short_put"]["strike"]
+        assert c["long_call"]["strike"] > c["short_call"]["strike"]
+
+    def test_changing_wing_pct_moves_only_wings(self):
+        """שינוי wing_pct מזיז רק את הכנפיים; ה-short נשאר במקומו."""
+        c1 = condor_legs_from_chain(self._chain, 2000.0, short_pct=2.0, wing_pct=1.0)
+        c2 = condor_legs_from_chain(self._chain, 2000.0, short_pct=2.0, wing_pct=0.5)
+        # short זהה
+        assert c1["short_put"]["strike"] == c2["short_put"]["strike"] == 1960.0
+        assert c1["short_call"]["strike"] == c2["short_call"]["strike"] == 2040.0
+        # כנפיים: wing_pct=0.5 → ±2.5% (1950/2050), קרובות יותר מ-±3.0%
+        assert c2["long_put"]["strike"] == 1950.0
+        assert c2["long_call"]["strike"] == 2050.0
+
+    def test_credit_matches_manual_sum(self):
+        """credit_pts = (short_put + short_call) − (long_put + long_call)."""
+        c = condor_legs_from_chain(self._chain, 2000.0, short_pct=2.0, wing_pct=1.0)
+        expected = (
+            c["short_put"]["price_pts"] + c["short_call"]["price_pts"]
+            - c["long_put"]["price_pts"] - c["long_call"]["price_pts"]
+        )
+        assert c["credit_pts"] == pytest.approx(expected)
+
+
+# ─── TestCondorRefactorRegression — אפס שינוי התנהגותי בנתיב הקיים ─────────
+#
+# ליטרלים נלכדו מהקוד *לפני* הפרמטור (git 9e7c4db) על אותו _make_chain(2000).
+# מוכיח ש-strategy_payoff_params(2,…)/strategy_legs_detail(2,…) מחזירים בדיוק
+# אותן תוצאות אחרי המעבר ל-condor_legs_from_chain(short=2.0, wing=1.0).
+
+class TestCondorRefactorRegression:
+    _atm   = _atm(2000.0, call_pts=20.0, put_pts=18.0)
+    _chain = _make_chain(2000.0)
+
+    # ground truth שנלכד מהקוד הישן:
+    _EXPECTED_PARAMS = {
+        "K_lp": 1940.0, "K_sp": 1960.0, "K_sc": 2040.0, "K_lc": 2060.0,
+        "credit_pts": 5.0,
+    }
+    _EXPECTED_LEGS = [
+        {"action": "קנה",  "type": "Put",  "qty": 1, "strike": 1940.0, "price_pts": 0.5, "price_nis": 25.0},
+        {"action": "מכור", "type": "Put",  "qty": 1, "strike": 1960.0, "price_pts": 2.0, "price_nis": 100.0},
+        {"action": "מכור", "type": "Call", "qty": 1, "strike": 2040.0, "price_pts": 4.0, "price_nis": 200.0},
+        {"action": "קנה",  "type": "Call", "qty": 1, "strike": 2060.0, "price_pts": 0.5, "price_nis": 25.0},
+    ]
+
+    def test_strategy_payoff_params_unchanged(self):
+        p = strategy_payoff_params(2, self._atm, self._chain)
+        assert p == self._EXPECTED_PARAMS
+
+    def test_strategy_legs_detail_unchanged(self):
+        legs = strategy_legs_detail(2, self._atm, self._chain)
+        assert legs == self._EXPECTED_LEGS
 
 
 # ─── TestBuildPayoffFig ───────────────────────────────────────────────────

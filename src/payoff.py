@@ -184,6 +184,70 @@ def find_breakevens(S: np.ndarray, y: np.ndarray) -> list[float]:
 
 # ─── חילוץ פרמטרים מה-chain ──────────────────────────────────────────────
 
+def condor_legs_from_chain(
+    chain: "pd.DataFrame",
+    anchor: float,
+    short_pct: float,
+    wing_pct: float,
+    multiplier: int = MULTIPLIER,
+) -> dict:
+    """
+    בונה את ארבע רגלי ה-Short Iron Condor מתוך שרשרת אופציות — מקור-אמת יחיד.
+
+    זהו ה-builder הפרמטרי שכל בוני-ה-condor נשענים עליו (strategy_payoff_params,
+    strategy_legs_detail, וכן margin_calculator). מחליף לוגיקה שהייתה מקובעת ל-2%/3%.
+
+    Parameters
+    ----------
+    chain     : DataFrame עם עמודות strike, call_price, put_price (מחיר ב-₪).
+    anchor    : רמת העוגן שממנה נמדדים אחוזי המרחק (מדד / ATM strike).
+    short_pct : מרחק ה-short strikes מה-anchor, באחוזים. למשל 2.0 → short ב-±2%.
+    wing_pct  : מרחק הכנפיים (long) **מעבר ל-short** — לא מה-anchor! — באחוזים.
+                כלומר long נמצא ב-±(short_pct + wing_pct). למשל short_pct=2.0 עם
+                wing_pct=1.0 → short ב-±2.0% וכנפיים ב-±3.0%. זו בדיוק הסמנטיקה
+                של הקוד ההיסטורי (short ±2%, wing ±3%, כלומר רוחב אנכי של 1%).
+    multiplier: ₪ לנקודה (ברירת מחדל MULTIPLIER=50).
+
+    מחזיר dict:
+      short_put / short_call / long_put / long_call —
+          כל אחד {"strike": float, "price_pts": float} (מחיר בנקודות = ₪ ÷ multiplier).
+      credit_pts — פרמיה נטו שהתקבלה (נקודות): (P_short_put + P_short_call)
+                   − (P_long_put + P_long_call). שלילי אפשרי אם הנתונים לא סחירים.
+      anchor, short_pct, wing_pct — הקלט, לשקיפות.
+
+    בחירת strike (זהה ללוגיקה שהוחלפה): לכל רגל נבחר ה-strike הקרוב ביותר לטווח
+    היעד שיש לו מחיר > 0; אם אין בכלל שורות סחירות בצד — מוחזר היעד עצמו במחיר 0.0.
+    """
+    def nearest(target: float, side: str) -> tuple[float, float]:
+        col = f"{side}_price"
+        sub = chain[chain[col] > 0]
+        if sub.empty:
+            return target, 0.0
+        idx = (sub["strike"] - target).abs().idxmin()
+        row = sub.loc[idx]
+        return float(row["strike"]), float(row[col]) / multiplier
+
+    def pct_k(pct: float) -> float:
+        return round(anchor * (1 + pct / 100) / 10) * 10
+
+    long_pct = short_pct + wing_pct
+    K_sp, P_sp = nearest(pct_k(-short_pct), "put")
+    K_sc, P_sc = nearest(pct_k(+short_pct), "call")
+    K_lp, P_lp = nearest(pct_k(-long_pct), "put")
+    K_lc, P_lc = nearest(pct_k(+long_pct), "call")
+
+    return {
+        "anchor":     float(anchor),
+        "short_pct":  float(short_pct),
+        "wing_pct":   float(wing_pct),
+        "short_put":  {"strike": K_sp, "price_pts": P_sp},
+        "short_call": {"strike": K_sc, "price_pts": P_sc},
+        "long_put":   {"strike": K_lp, "price_pts": P_lp},
+        "long_call":  {"strike": K_lc, "price_pts": P_lc},
+        "credit_pts": (P_sp + P_sc) - (P_lp + P_lc),
+    }
+
+
 def strategy_payoff_params(
     strategy_id: int,
     atm: dict,
@@ -217,12 +281,11 @@ def strategy_payoff_params(
                 "cost_pts": max(P_atm_c - P_short, 0.01)}
 
     if strategy_id == 2:
-        K_sc, P_sc = nearest(pct_k(+2.0), "call")
-        K_sp, P_sp = nearest(pct_k(-2.0), "put")
-        K_wc, P_wc = nearest(pct_k(+3.0), "call")
-        K_wp, P_wp = nearest(pct_k(-3.0), "put")
-        return {"K_lp": K_wp, "K_sp": K_sp, "K_sc": K_sc, "K_lc": K_wc,
-                "credit_pts": (P_sp + P_sc) - (P_wp + P_wc)}
+        # short ±2.0%, כנפיים 1.0% מעבר (±3.0%) — הערכים ההיסטוריים, כעת דרך המקור-אמת.
+        c = condor_legs_from_chain(chain, atm_s, short_pct=2.0, wing_pct=1.0)
+        return {"K_lp": c["long_put"]["strike"],  "K_sp": c["short_put"]["strike"],
+                "K_sc": c["short_call"]["strike"], "K_lc": c["long_call"]["strike"],
+                "credit_pts": c["credit_pts"]}
 
     if strategy_id == 3:
         K_lo, P_lo = nearest(pct_k(-1.0), "call")
@@ -294,14 +357,12 @@ def strategy_legs_detail(
                 _leg("מכור", "call", K_sh,    P_sh)]
 
     if strategy_id == 2:
-        K_sc, P_sc = nearest(pct_k(+2.0), "call")
-        K_sp, P_sp = nearest(pct_k(-2.0), "put")
-        K_wc, P_wc = nearest(pct_k(+3.0), "call")
-        K_wp, P_wp = nearest(pct_k(-3.0), "put")
-        return [_leg("קנה",  "put",  K_wp, P_wp),
-                _leg("מכור", "put",  K_sp, P_sp),
-                _leg("מכור", "call", K_sc, P_sc),
-                _leg("קנה",  "call", K_wc, P_wc)]
+        # short ±2.0%, כנפיים 1.0% מעבר (±3.0%) — הערכים ההיסטוריים, כעת דרך המקור-אמת.
+        c = condor_legs_from_chain(chain, atm_s, short_pct=2.0, wing_pct=1.0, multiplier=multiplier)
+        return [_leg("קנה",  "put",  c["long_put"]["strike"],   c["long_put"]["price_pts"]),
+                _leg("מכור", "put",  c["short_put"]["strike"],  c["short_put"]["price_pts"]),
+                _leg("מכור", "call", c["short_call"]["strike"], c["short_call"]["price_pts"]),
+                _leg("קנה",  "call", c["long_call"]["strike"],  c["long_call"]["price_pts"])]
 
     if strategy_id == 3:
         K_lo, P_lo = nearest(pct_k(-1.0), "call")
