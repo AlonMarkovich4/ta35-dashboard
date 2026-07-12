@@ -19,6 +19,8 @@ paper_db.py — שכבת DB לתיקי Paper Trading.
   insert_decision_log(decision, trigger, engine_version, engine)        → int | None
   get_decision_logs(limit, engine)                                      → list[dict]
   decision_logged_today(expiry_date, engine_version, engine)            → bool
+  insert_margin_recommendation(rec, engine_version, engine)             → int | None
+  margin_recommendation_logged_today(expiry_date, engine_version, engine) → bool
 """
 from __future__ import annotations
 
@@ -611,6 +613,115 @@ def decision_logged_today(
     except Exception as exc:
         logger.warning(
             "decision_logged_today נכשל (expiry_date=%s): %s",
+            expiry_date, exc, exc_info=True,
+        )
+        return False
+
+
+# ─── Margin recommendations (append-only) ───────────────────────────────
+
+def insert_margin_recommendation(
+    rec: dict,
+    engine_version: str = "margin-v1",
+    engine=None,
+) -> Optional[int]:
+    """מכניס רשומת margin_recommendations אחת (append-only); מחזיר id חדש או None בכישלון.
+
+    rec — פלט מנגנון המרווח (margin_recorder._recommendation_for_expiry): select_margin
+    (שלב 3) מועשר בפרטי הפקיעה + שורת העקומה הנבחרת. השדות השטוחים נשלפים לעמודות,
+    וה-rec כולו נשמר ב-recommendation_json (JSONB, כולל grid + selected_curve_row מלאים
+    לשקיפות ולשחזור P&L בולידציה) דרך _dumps_decision (ensure_ascii=False + Timestamp/numpy).
+
+    recommended_at אינו נשלח — DEFAULT now() בטבלה קובע חותמת זמן בצד ה-DB: מקור-זמן אחיד
+    לכל ההרצות, זהה בדיוק ל-decision_log.
+    """
+    eng = _make_engine(engine)
+    if eng is None:
+        return None
+    try:
+        # expiry_date עשוי להגיע כ-pd.Timestamp/datetime → ל-date לעמודת DATE.
+        exp = rec.get("expiry_date")
+        if exp is not None and hasattr(exp, "date") and callable(exp.date):
+            exp = exp.date()
+
+        params = {
+            "expiry_date":         exp,
+            "margin_pct":          rec.get("selected_margin"),
+            "hold_blended":        rec.get("hold_blended"),
+            "hold_conditional":    rec.get("hold_conditional"),
+            "hold_global":         rec.get("hold_global"),
+            "n_conditional":       rec.get("n_conditional"),
+            "premium_ils":         rec.get("net_premium"),
+            "short_put_strike":    rec.get("short_put_strike"),
+            "short_call_strike":   rec.get("short_call_strike"),
+            "below_floor":         rec.get("below_floor"),
+            "floor_used":          rec.get("hold_floor"),
+            "engine_version":      engine_version,
+            "reason":              rec.get("reason"),
+            "recommendation_json": _dumps_decision(rec),
+        }
+        with eng.connect() as conn:
+            new_id = conn.execute(
+                text("""
+                    INSERT INTO margin_recommendations (
+                        expiry_date, margin_pct, hold_blended, hold_conditional,
+                        hold_global, n_conditional, premium_ils,
+                        short_put_strike, short_call_strike, below_floor,
+                        floor_used, engine_version, reason, recommendation_json
+                    ) VALUES (
+                        :expiry_date, :margin_pct, :hold_blended, :hold_conditional,
+                        :hold_global, :n_conditional, :premium_ils,
+                        :short_put_strike, :short_call_strike, :below_floor,
+                        :floor_used, :engine_version, :reason,
+                        CAST(:recommendation_json AS JSONB)
+                    )
+                    RETURNING id
+                """),
+                params,
+            ).scalar()
+            conn.commit()
+        return int(new_id) if new_id is not None else None
+    except Exception as exc:
+        logger.warning(
+            "insert_margin_recommendation נכשל (expiry_date=%s): %s",
+            rec.get("expiry_date"), exc, exc_info=True,
+        )
+        return None
+
+
+def margin_recommendation_logged_today(
+    expiry_date,
+    engine_version: str = "margin-v1",
+    engine=None,
+) -> bool:
+    """מחזיר True אם כבר קיימת המלצת מרווח לפקיעה הזו מאותה גרסה *היום* (שעון השרת).
+
+    זהה בדיוק ל-decision_logged_today: מונע כפילות כשמריצים את הרשם פעמיים באותו יום.
+    "היום" = recommended_at::date = CURRENT_DATE (מקור-זמן אחיד עם insert). בכישלון DB
+    מחזיר False (best-effort — לא חוסם תיעוד עתידי בגלל תקלה רגעית) ומתעד warning.
+    """
+    eng = _make_engine(engine)
+    if eng is None:
+        return False
+    exp = expiry_date
+    if exp is not None and hasattr(exp, "date") and callable(exp.date):
+        exp = exp.date()
+    try:
+        with eng.connect() as conn:
+            found = conn.execute(
+                text("""
+                    SELECT 1 FROM margin_recommendations
+                     WHERE expiry_date = :expiry_date
+                       AND engine_version = :engine_version
+                       AND recommended_at::date = CURRENT_DATE
+                     LIMIT 1
+                """),
+                {"expiry_date": exp, "engine_version": engine_version},
+            ).first()
+        return found is not None
+    except Exception as exc:
+        logger.warning(
+            "margin_recommendation_logged_today נכשל (expiry_date=%s): %s",
             expiry_date, exc, exc_info=True,
         )
         return False
