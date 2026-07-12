@@ -9,6 +9,13 @@ import {
   type ClosedPnl,
   type ValidationSummary,
 } from "@/lib/validationMath";
+import {
+  buildMarginValidationRows,
+  pickLatestRecommendations,
+  summarizeMarginValidation,
+  asDateKey,
+  type MarginValidationSummary,
+} from "@/lib/marginMath";
 
 export type { LegData };
 
@@ -675,6 +682,165 @@ export async function getValidation(): Promise<ValidationData> {
     }));
     return { rows: display, summary };
   }, EMPTY_VALIDATION);
+}
+
+// ─── margin mechanism: recommendations + validation ("מרווח אופטימלי") ──
+// מנגנון המרווח האופטימלי (Short Iron Condor). קריאה-בלבד. הלוגיקה הטהורה חיה ב-
+// lib/marginMath.ts (unit-tested מול tests/test_margin_validator.py); כאן השאילתות
+// (מסונן ל-engine_version='margin-v1.1' — v1 שגוי) + חילוץ recommendation_json + מיפוי.
+export type { MarginValidationSummary };
+
+export type MarginLiveRow = {
+  expiry: string;        // dd/mm/yyyy
+  expiryIso: string;     // yyyy-mm-dd
+  recommendedAt: string; // yyyy-mm-dd HH:MM:SS (Asia/Jerusalem)
+  marginPct: number | null;
+  holdBlended: number | null;
+  holdConditional: number | null;
+  holdGlobal: number | null;
+  nConditional: number | null;
+  premiumIls: number | null;
+  shortPutStrike: number | null;
+  shortCallStrike: number | null;
+  belowFloor: boolean;
+  floorUsed: number | null;
+  reason: string;
+};
+
+export type MarginValidationDisplayRow = {
+  expiry: string; // dd/mm/yyyy
+  recommendedMargin: number;
+  actualAbsMovePct: number;
+  actualMovePct: number;
+  moveSource: "expiry_history" | "settlement";
+  held: boolean;
+  optimalHindsight: number | null;
+  gap: number | null;
+};
+
+export type MarginData = {
+  live: MarginLiveRow[];
+  validation: { rows: MarginValidationDisplayRow[]; summary: MarginValidationSummary };
+};
+
+const MARGIN_VERSION = "margin-v1.1"; // v1 שגוי — מציגים אך ורק את הגרסה הרשמית.
+const EMPTY_MARGIN: MarginData = {
+  live: [],
+  validation: { rows: [], summary: { nValidated: 0, holdRate: 0, nHeld: 0, avgMarginGap: 0 } },
+};
+
+export async function getMarginData(): Promise<MarginData> {
+  return safe(async () => {
+    // כל ההמלצות של הגרסה הרשמית בלבד (v1.1); ה-JS בורר את האחרונה לכל פקיעה.
+    const raw = await sql<Record<string, unknown>[]>`
+      SELECT expiry_date, recommended_at, margin_pct, hold_blended, hold_conditional,
+             hold_global, n_conditional, premium_ils, short_put_strike, short_call_strike,
+             below_floor, floor_used, reason, recommendation_json
+      FROM margin_recommendations
+      WHERE engine_version = ${MARGIN_VERSION}
+      ORDER BY expiry_date, recommended_at DESC
+    `;
+    const num = (v: unknown): number | null => (v == null ? null : Number(v));
+    const recs = raw.map((r) => {
+      const rj =
+        (typeof r.recommendation_json === "string"
+          ? JSON.parse(r.recommendation_json)
+          : r.recommendation_json) ?? {};
+      const gridMargins: number[] = Array.isArray(rj.grid)
+        ? rj.grid
+            .map((g: { margin_pct?: unknown }) => Number(g.margin_pct))
+            .filter((x: number) => Number.isFinite(x))
+        : [];
+      return {
+        expiryDate: r.expiry_date,
+        recommendedAt: r.recommended_at,
+        marginPct: num(r.margin_pct),
+        holdBlended: num(r.hold_blended),
+        holdConditional: num(r.hold_conditional),
+        holdGlobal: num(r.hold_global),
+        nConditional: num(r.n_conditional),
+        premiumIls: num(r.premium_ils),
+        shortPutStrike: num(r.short_put_strike),
+        shortCallStrike: num(r.short_call_strike),
+        belowFloor: Boolean(r.below_floor),
+        floorUsed: num(r.floor_used),
+        reason: (r.reason as string) ?? "",
+        baseIndex: rj.base_index == null ? null : Number(rj.base_index),
+        gridMargins,
+      };
+    });
+    const latest = pickLatestRecommendations(recs);
+
+    // settlement — condor_settled_detail.expiry_date הוא TEXT → CAST ::date (הבאג המוכר).
+    const settleRows = await sql<{ iso: string; close: string | number | null }[]>`
+      SELECT expiry_date::date::text AS iso, MAX(actual_index_close) AS close
+      FROM condor_settled_detail
+      WHERE actual_index_close IS NOT NULL
+      GROUP BY expiry_date::date
+    `;
+    const settlements = new Map<string, number>();
+    for (const s of settleRows) if (s.iso && s.close != null) settlements.set(s.iso, Number(s.close));
+
+    // move_pct הקנוני מ-expiry_history.
+    const histRows = await sql<{ iso: string; move_pct: string | number }[]>`
+      SELECT expiry_date::date::text AS iso, move_pct
+      FROM expiry_history
+      WHERE move_pct IS NOT NULL
+    `;
+    const historyMoves = new Map<string, number>();
+    for (const h of histRows) if (h.iso) historyMoves.set(h.iso, Number(h.move_pct));
+
+    // ── ולידציה (המקור-אמת: marginMath.buildMarginValidationRows) ──
+    const valRows = buildMarginValidationRows(
+      latest.map((r) => ({
+        expiryDate: r.expiryDate,
+        recommendedAt: r.recommendedAt,
+        marginPct: r.marginPct,
+        baseIndex: r.baseIndex,
+        gridMargins: r.gridMargins,
+      })),
+      settlements,
+      historyMoves,
+    );
+    const summary = summarizeMarginValidation(valRows);
+    const validationRows: MarginValidationDisplayRow[] = valRows.map((r) => ({
+      expiry: fmtDate(r.expiryKey),
+      recommendedMargin: r.recommendedMargin,
+      actualAbsMovePct: r.actualAbsMovePct,
+      actualMovePct: r.actualMovePct,
+      moveSource: r.moveSource,
+      held: r.held,
+      optimalHindsight: r.marginOptimalHindsight,
+      gap: r.marginGap,
+    }));
+
+    // ── המלצות חיות: האחרונה לכל פקיעה קרובה (>= היום, שעון ישראל), הקרובה קודם ──
+    const todayKey = new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Jerusalem" });
+    const live: MarginLiveRow[] = [];
+    for (const r of latest) {
+      const key = asDateKey(r.expiryDate);
+      if (key == null || key < todayKey) continue;
+      live.push({
+        expiry: fmtDate(key),
+        expiryIso: key,
+        recommendedAt: fmtDateTime(r.recommendedAt as string | Date),
+        marginPct: r.marginPct,
+        holdBlended: r.holdBlended,
+        holdConditional: r.holdConditional,
+        holdGlobal: r.holdGlobal,
+        nConditional: r.nConditional,
+        premiumIls: r.premiumIls,
+        shortPutStrike: r.shortPutStrike,
+        shortCallStrike: r.shortCallStrike,
+        belowFloor: r.belowFloor,
+        floorUsed: r.floorUsed,
+        reason: r.reason,
+      });
+    }
+    live.sort((a, b) => (a.expiryIso < b.expiryIso ? -1 : a.expiryIso > b.expiryIso ? 1 : 0));
+
+    return { live, validation: { rows: validationRows, summary } };
+  }, EMPTY_MARGIN);
 }
 
 // ─── historical analysis ────────────────────────────────────────────

@@ -11,6 +11,7 @@ import {
   Calendar,
   Wallet,
   Cpu,
+  Spark,
   Sun,
   Moon,
   Logout,
@@ -24,6 +25,7 @@ const NAV = [
   { href: "/events", label: "אירועים והקשר", Icon: Calendar },
   { href: "/paper", label: "מסחר נייר", Icon: Wallet },
   { href: "/engine", label: "מנוע החלטה", Icon: Cpu },
+  { href: "/margin", label: "מרווח אופטימלי", Icon: Spark },
 ];
 
 // קוראים את ה-theme ישירות מ-class של <html> (מקור אמת יחיד) במקום state כפול
