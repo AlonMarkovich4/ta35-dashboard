@@ -1,0 +1,37 @@
+name: auto-record-margins
+
+# תיעוד אוטומטי של המלצות המרווח ל-margin_recommendations (מנגנון המרווח, שלב 5א).
+# מריץ scripts/auto_record_margins.py פעם ביום מסחר. idempotent: מניעת כפילויות דרך
+# margin_recommendation_logged_today מבטיחה שכל פקיעה נרשמת פעם אחת ביום, גם בהרצות חוזרות.
+
+on:
+  schedule:
+    # פעם ביום, ראשון–חמישי (ימי מסחר בישראל; cron DOW: 0=ראשון ... 4=חמישי).
+    # GitHub cron הוא UTC וללא DST. ישראל היא UTC+2 (חורף) / UTC+3 (קיץ):
+    #   09:00 UTC  =  11:00 בחורף  /  12:00 בקיץ
+    # כך ההרצה נופלת סביב 12:00 שעון ישראל — מאוחר מ-auto_record_decisions (07:00 UTC),
+    # כדי לתפוס גם פקיעות שנכנסות ל-chain מאוחר יותר ביום. יום שני (DOW=1) כלול, ולכן
+    # מכוסה גם "יום שני בצהריים" שביקשנו — לצד תיעוד יומי מלא (הדדופ מונע כפילויות).
+    - cron: '0 9 * * 0-4'
+  workflow_dispatch: {}   # מאפשר גם הרצה ידנית מטאב Actions
+
+jobs:
+  record-margins:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Record margin recommendations
+        env:
+          # אותו secret שכבר מוגדר ל-Actions הקודמים — אין צורך להגדיר מחדש.
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python scripts/auto_record_margins.py

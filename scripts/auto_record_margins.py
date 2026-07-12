@@ -1,0 +1,123 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+auto_record_margins.py — תיעוד אוטומטי של המלצות המרווח (מנגנון המרווח, שלב 5א).
+
+מיועד להרצה מתוזמנת (GitHub Action / cron). התאום של auto_record_decisions.py, למנגנון
+המרווח: קורא ל-record_margin_recommendations_for_upcoming שמריץ את המנוע (שלב 1–3,
+floor=0.97) על כל פקיעה קרובה (>= היום) עם שרשרת, ושומר ב-margin_recommendations
+(append-only).
+
+idempotent: record_margin_recommendations_for_upcoming מדלג על פקיעה שכבר תועדה היום
+לאותה גרסה (margin_recommendation_logged_today) — ריצה חוזרת באותו יום לא תיצור כפילות.
+לכן בטוח להריץ יומית גם כשפקיעות נכנסות ל-chain בהדרגה, ולכן ה-Action תופס גם פקיעות
+שנכנסות מאוחר.
+
+exit codes (כמו auto_record_decisions.py):
+  0  הצלחה — כולל "אין מה לתעד", "הכל כבר תועד היום", ו"אין שרשרת מלאה" (מצבים רגילים).
+  1  שגיאה אמיתית — חיבור DB נכשל, או תיעוד של פקיעה כלשהי נכשל (status='error').
+  2  קונפיגורציה חסרה — DATABASE_URL לא מוגדר בסביבה.
+
+הטריגר הוא הזמן (cron); מניעת הכפילויות היא מה שהופך את ההרצה היומית לבטוחה.
+"""
+from __future__ import annotations
+
+import os
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+# הוספת src ל-path (כמו auto_record_decisions.py)
+_SRC = Path(__file__).resolve().parent.parent / "src"
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
+
+EXIT_OK, EXIT_ERROR, EXIT_CONFIG = 0, 1, 2
+
+
+def log(msg: str, level: str = "INFO") -> None:
+    """מדפיס שורת לוג עם חותמת זמן UTC ורמה — קריא ב-CI."""
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{ts}] [{level}] {msg}", flush=True)
+
+
+def _fmt_margin(v) -> str:
+    return "—" if v is None else f"{v:.2f}%"
+
+
+def _fmt_hold(v) -> str:
+    return "—" if v is None else f"{v * 100:.1f}%"
+
+
+def main() -> int:
+    db_url = os.environ.get("DATABASE_URL", "").strip()
+    if not db_url:
+        log("DATABASE_URL לא מוגדר בסביבה — לא ניתן לרוץ. יציאה.", level="ERROR")
+        return EXIT_CONFIG
+
+    # ייבוא אחרי בדיקת ה-env, כדי שכשל env ייתן הודעה ברורה לפני כל טעינה כבדה.
+    try:
+        from sqlalchemy import text
+        from paper_db import _make_engine
+        from margin_recorder import record_margin_recommendations_for_upcoming
+    except Exception as exc:  # noqa: BLE001
+        log(f"ייבוא מודולים נכשל: {exc}", level="ERROR")
+        return EXIT_ERROR
+
+    engine = _make_engine(None)
+    if engine is None:
+        log("לא ניתן לבנות engine מ-DATABASE_URL.", level="ERROR")
+        return EXIT_ERROR
+
+    # אימות חיבור: SELECT 1 — כך ששגיאת DB תיתן exit 1 ולא תיראה כמו "אין מה לתעד".
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+    except Exception as exc:  # noqa: BLE001
+        log(f"בדיקת חיבור DB (SELECT 1) נכשלה: {exc}", level="ERROR")
+        return EXIT_ERROR
+
+    log("מריץ record_margin_recommendations_for_upcoming "
+        "(trigger=scheduled, engine_version=margin-v1.1)...")
+    try:
+        results = record_margin_recommendations_for_upcoming(
+            engine=engine, trigger="scheduled", engine_version="margin-v1.1",
+        )
+    except Exception as exc:  # noqa: BLE001
+        log(f"תיעוד המלצות המרווח נכשל: {exc}", level="ERROR")
+        return EXIT_ERROR
+
+    if not results:
+        log("אין פקיעות קרובות לתיעוד — אין מה לעשות (מצב רגיל).")
+        return EXIT_OK
+
+    recorded = skipped = no_rec = errored = 0
+    for r in results:
+        status = r.get("status")
+        if status == "recorded":
+            recorded += 1
+        elif status == "skipped_exists":
+            skipped += 1
+        elif status == "no_recommendation":
+            no_rec += 1
+        else:  # "error"
+            errored += 1
+        log(
+            f"פקיעה {r.get('expiry_date')} (סוג {r.get('expiry_type')}): "
+            f"מרווח={_fmt_margin(r.get('selected_margin'))} "
+            f"hold={_fmt_hold(r.get('hold_blended'))} → {status}"
+        )
+
+    log(f"סיכום: נרשמו {recorded} · דולגו {skipped} · "
+        f"ללא-המלצה {no_rec} · שגיאות {errored}.")
+
+    if errored:
+        log("היו שגיאות תיעוד — יציאה עם קוד שגיאה.", level="ERROR")
+        return EXIT_ERROR
+    if recorded == 0 and (skipped or no_rec):
+        log("לא נרשמו המלצות חדשות (הכל כבר תועד היום / אין שרשרת מלאה) — מצב רגיל.")
+    return EXIT_OK
+
+
+if __name__ == "__main__":
+    sys.exit(main())
