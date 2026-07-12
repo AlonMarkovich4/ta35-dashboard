@@ -137,6 +137,25 @@ def hold_probability(dist: dict, curve_row: dict) -> Optional[float]:
     return round(held / m.size, 4)
 
 
+def hold_probability_at_margin(dist: dict, margin_pct: float) -> Optional[float]:
+    """
+    ההסתברות האמפירית שהמדד יישאר בתוך טווח ±margin_pct **נומינלי** — שיעור התנועות
+    במדגם עם |move_pct| ≤ margin_pct.
+
+    בניגוד ל-hold_probability (שנשען על ה-strikes שנבחרו בפועל מהשרשרת), פונקציה זו
+    נשענת על ה-margin_pct הנומינלי בלבד. לכן היא הבסיס לשלב 3 (בחירת מרווח + סימולציה
+    היסטורית walk-forward), שבו אין שרשרת אופציות לפקיעות עבר — רק התנועות עצמן.
+
+    מחזיר None אם המדגם ריק (n=0).
+    """
+    moves = dist.get("moves")
+    if moves is None or len(moves) == 0:
+        return None
+    m = np.asarray(moves, dtype=float)
+    held = int(np.count_nonzero(np.abs(m) <= float(margin_pct)))
+    return round(held / m.size, 4)
+
+
 def hold_probability_curve(dist: dict, curve: list[dict]) -> list[dict]:
     """
     מצרף hold_prob לכל שורה בעקומת המרווח (None לשורות שדולגו / מדגם ריק).

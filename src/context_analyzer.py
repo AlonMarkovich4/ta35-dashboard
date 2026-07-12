@@ -125,7 +125,7 @@ def recent_volatility(
 def find_similar_expiries(
     df: pd.DataFrame,
     expiry_type: str,
-    target_month: int,
+    target_month: Optional[int],
     recent_move_pct: Optional[float] = None,
     move_tolerance: float = 0.5,
 ) -> pd.DataFrame:
@@ -134,7 +134,8 @@ def find_similar_expiries(
 
     קריטריונים מצטברים:
       1. expiry_type — "W"/"M". ערך אחר = ללא סינון סוג.
-      2. target_month — אותו חודש (1–12) לעונתיות.
+      2. target_month — אותו חודש (1–12) לעונתיות. None = ללא סינון חודש (למשל התניית
+                        משטר-תנודתיות בשלב 3, שבה רלוונטית התנועה הקודמת ולא העונה).
       3. recent_move_pct — |preceding_move − recent_move_pct| ≤ move_tolerance.
                           הפקיעה ה"קודמת" נמדדת על כלל הפקיעות הממוינות לפי תאריך,
                           ללא תלות בסוג. None = ללא סינון תנועה קודמת.
@@ -149,7 +150,8 @@ def find_similar_expiries(
     mask = pd.Series(True, index=df_valid.index)
     if expiry_type in ("W", "M"):
         mask &= df_valid["expiry_type"] == expiry_type
-    mask &= df_valid["expiry_date"].dt.month == target_month
+    if target_month is not None:
+        mask &= df_valid["expiry_date"].dt.month == target_month
 
     filtered = df_valid[mask].copy()
 

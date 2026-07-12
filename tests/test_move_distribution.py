@@ -18,6 +18,7 @@ from move_distribution import (
     conditioned_move_distribution,
     expected_value_curve,
     hold_probability,
+    hold_probability_at_margin,
     hold_probability_curve,
 )
 
@@ -148,6 +149,30 @@ class TestHoldProbability:
 
     def test_empty_distribution_returns_none(self):
         assert hold_probability({"moves": np.array([])}, _ROW) is None
+
+
+# ─── TestHoldProbabilityAtMargin ──────────────────────────────────────────
+
+class TestHoldProbabilityAtMargin:
+    def test_symmetric_nominal_band(self):
+        # |move| ≤ 2.0 → 3 מתוך 5 (−1, 0, 1.5); −2.5 ו-3.0 בחוץ.
+        dist = {"moves": np.array([-2.5, -1.0, 0.0, 1.5, 3.0])}
+        assert hold_probability_at_margin(dist, 2.0) == pytest.approx(3 / 5)
+
+    def test_boundary_inclusive(self):
+        dist = {"moves": np.array([-2.0, 2.0, 2.5])}
+        assert hold_probability_at_margin(dist, 2.0) == pytest.approx(2 / 3, abs=1e-4)
+
+    def test_monotonic_nondecreasing_in_margin(self):
+        dist = build_move_distribution(_history([
+            ("2020-01-15", "W", 0.4), ("2020-02-15", "W", -1.2),
+            ("2020-03-15", "W", 2.3), ("2020-04-15", "W", -3.1),
+        ]))
+        vals = [hold_probability_at_margin(dist, m) for m in (1.0, 1.5, 2.0, 2.5, 3.0)]
+        assert vals == sorted(vals)
+
+    def test_empty_returns_none(self):
+        assert hold_probability_at_margin({"moves": np.array([])}, 2.0) is None
 
 
 # ─── TestHoldProbabilityCurve ─────────────────────────────────────────────
