@@ -281,7 +281,9 @@ def strategy_payoff_params(
                 "cost_pts": max(P_atm_c - P_short, 0.01)}
 
     if strategy_id == 2:
-        # short ±2.0%, כנפיים 1.0% מעבר (±3.0%) — הערכים ההיסטוריים, כעת דרך המקור-אמת.
+        # short ±2.0%, כנפיים 1.0% מעבר (±3.0%) — פרמטרים קבועים ישנים. **בכוונה לא משתנה:**
+        # תיקי הדמו הם ה-benchmark ולכן נפתחים בפרמטרים הקבועים. מנגנון ההמלצות עבר לכנף
+        # הרשמית DEFAULT_WING_PCT=0.75% (margin_calculator) — הפרדה מכוונת בין benchmark להמלצה.
         c = condor_legs_from_chain(chain, atm_s, short_pct=2.0, wing_pct=1.0)
         return {"K_lp": c["long_put"]["strike"],  "K_sp": c["short_put"]["strike"],
                 "K_sc": c["short_call"]["strike"], "K_lc": c["long_call"]["strike"],

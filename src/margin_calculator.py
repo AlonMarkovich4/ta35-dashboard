@@ -33,10 +33,14 @@ from payoff import (
 
 logger = logging.getLogger(__name__)
 
-# מרחק הכנפיים (long) מעבר ל-short strikes, באחוזים — ברירת המחדל ההיסטורית של
-# המערכת (payoff.py: short ±2%, wing ±3%, כלומר רוחב אנכי 1.0%). ראה תיעוד
-# condor_legs_from_chain: wing_pct נמדד *מעבר ל-short*, לא מה-anchor.
-DEFAULT_WING_PCT = 1.0
+# מרחק הכנפיים (long) מעבר ל-short strikes, באחוזים. 0.75% = הכנף הרשמית של מנגנון
+# ההמלצות — נקודת-האיזון מסריקת כנפיים על 768 פקיעות שבועיות (walk-forward): ~82% מ-P&L
+# השיא (של כנף 1.5%) תוך חיתוך ה-max drawdown לכמעט חצי; עדיפה על 0.5% השמרנית ב-~15₪/שבוע
+# במחיר drawdown סביר, ועל 1.5% בחיתוך הסיכון. שחזור: margin_backtest / dry_run_wing_sweep.
+# **הפרדה מכוונת:** זו ברירת המחדל של ה*המלצות* (build_margin_curve → recorder). נתיב תיקי-
+# הדמו (payoff.strategy_payoff_params) נשאר בכוונה על (short 2.0%, wing 1.0%) כ-benchmark.
+# wing_pct נמדד *מעבר ל-short* (long ב-±(short+wing)), לא מה-anchor (ראה condor_legs_from_chain).
+DEFAULT_WING_PCT = 0.75
 
 # רזולוציית גריד ה-P&L לחישוב max_loss ו-breakevens (טווח ±15% מכסה בבטחה
 # כנפיים עד ~4% ומגיע לרמת ההפסד השטוחה שמעבר להן).
@@ -159,7 +163,8 @@ def build_margin_curve(
     chain_df   : שרשרת אופציות עם עמודות strike, call_price, put_price (מחיר ב-₪).
     base_index : רמת המדד הנוכחית — העוגן שממנו נמדדים אחוזי המרחק.
     margins    : רשימת מרחקי short באחוזים; None → גריד ברירת המחדל (1.0..3.0 ב-0.25).
-    wing_pct   : מרחק הכנפיים מעבר ל-short, באחוזים (ברירת מחדל DEFAULT_WING_PCT=1.0).
+    wing_pct   : מרחק הכנפיים מעבר ל-short, באחוזים (ברירת מחדל DEFAULT_WING_PCT=0.75 —
+                 הכנף הרשמית של ההמלצות; ראה ההערה ליד הקבוע).
 
     Returns
     -------

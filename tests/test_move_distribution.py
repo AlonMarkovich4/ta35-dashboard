@@ -371,10 +371,10 @@ class TestExpectedValueWingParametric:
         # ה-EV שונה בין הכנפיים → avg_loss פרמטרי בכנף, לא מקובע ל-1.0
         assert narrow["ev"] != wide["ev"]
 
-    def test_default_wing_ev_unchanged(self):
-        # רגרסיה: ברירת המחדל (ללא wing_pct) == wing_pct=1.0 מפורש — בדיוק.
+    def test_default_wing_ev_matches_official_075(self):
+        # ברירת המחדל (ללא wing_pct) == wing_pct=0.75 מפורש — נועל את הכנף הרשמית ב-EV.
         default_curve = build_margin_curve(self._chain, 2000.0, margins=[2.0])
-        explicit_curve = build_margin_curve(self._chain, 2000.0, margins=[2.0], wing_pct=1.0)
+        explicit_curve = build_margin_curve(self._chain, 2000.0, margins=[2.0], wing_pct=0.75)
         d = expected_value_curve(self._dist, default_curve)[0]
         e = expected_value_curve(self._dist, explicit_curve)[0]
         assert d["avg_loss"] == e["avg_loss"]

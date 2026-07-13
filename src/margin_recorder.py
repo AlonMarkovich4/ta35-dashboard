@@ -75,8 +75,8 @@ def _recommendation_for_expiry(
       1. שרשרת הפקיעה (get_latest_option_chain) → chain_df + ATM (find_atm) → base_index.
       2. סוג הפקיעה מנורמל ל-'W'/'M' (_norm_expiry_type).
       3. עקומת המרווח (build_margin_curve, שלב 1) על ה-strikes האמיתיים, ברוחב כנף wing_pct
-         (ברירת מחדל 1.0% — משמרת התנהגות; פרמטרי לקראת אופטימיזציית הכנף בשלב 6). כל השדות
-         הנגזרים (max_loss, breakevens, פרמיה) מחושבים מהכנף שהועברה, וה-wing_pct נשמר ב-rec.
+         (ברירת מחדל DEFAULT_WING_PCT=0.75% — הכנף הרשמית מסריקת הכנפיים). כל השדות הנגזרים
+         (max_loss, breakevens, פרמיה) מחושבים מהכנף שהועברה, וה-wing_pct נשמר ב-rec.
       4. select_margin (שלב 3, hold_floor הנעול) עם before_date=None (פקיעה חיה).
       5. הרכבת ה-rec: שדות הבחירה + hold מותנה/גלובלי/n מהשורה הנבחרת ב-grid, ו-strikes
          מהשורה המתאימה בעקומה. grid + selected_curve_row המלאים נשמרים לשקיפות ולשחזור
@@ -161,8 +161,8 @@ def record_margin_recommendations_for_upcoming(
       {expiry_date, expiry_type, selected_margin, hold_blended, status, rec_id}
       status ∈ {"recorded", "skipped_exists", "no_recommendation", "error"}.
 
-    wing_pct — רוחב הכנף (ברירת מחדל DEFAULT_WING_PCT=1.0%) שמועבר ל-build_margin_curve
-    ונשמר ב-recommendation_json. פרמטרי לקראת אופטימיזציית הכנף; ברירת המחדל משמרת התנהגות.
+    wing_pct — רוחב הכנף (ברירת מחדל DEFAULT_WING_PCT=0.75% — הכנף הרשמית מסריקת הכנפיים)
+    שמועבר ל-build_margin_curve ונשמר ב-recommendation_json. אפשר לעקוף לניתוח/אופטימיזציה.
 
     שימוש חוזר: UI/סקריפט קורא עם trigger="manual"; Action עתידי עם trigger="scheduled".
     """

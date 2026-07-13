@@ -267,7 +267,7 @@ def test_no_valid_margin_returns_none(monkeypatch):
 # ─── שלב 6: פרמטור הכנף — עובר ל-build_margin_curve ונשמר ב-rec ───────────
 
 def test_wing_pct_threaded_and_recorded(monkeypatch):
-    """wing_pct עובר ל-build_margin_curve ונשמר ב-rec; ברירת המחדל 1.0%."""
+    """wing_pct עובר ל-build_margin_curve ונשמר ב-rec; ברירת המחדל 0.75% (הכנף הרשמית)."""
     sel = {
         "selected_margin": 2.0, "hold_blended": 0.98, "net_premium": 480.0,
         "max_loss": -1520.0, "ev": 5.0, "below_floor": False, "hold_floor": 0.97,
@@ -283,10 +283,10 @@ def test_wing_pct_threaded_and_recorded(monkeypatch):
     assert rec["wing_pct"] == 0.5
     assert mr.build_margin_curve.call_args.kwargs.get("wing_pct") == 0.5
 
-    # ברירת מחדל: wing_pct=1.0 (משמרת התנהגות).
+    # ברירת מחדל: wing_pct=0.75 (הכנף הרשמית — נועל את ברירת המחדל של הרשם).
     rec_default = mr._recommendation_for_expiry(df, pd.Timestamp("2099-03-19"), object())
-    assert rec_default["wing_pct"] == 1.0
-    assert mr.build_margin_curve.call_args.kwargs.get("wing_pct") == 1.0
+    assert rec_default["wing_pct"] == 0.75
+    assert mr.build_margin_curve.call_args.kwargs.get("wing_pct") == 0.75
 
 
 def test_record_threads_wing_to_recommendation(monkeypatch):

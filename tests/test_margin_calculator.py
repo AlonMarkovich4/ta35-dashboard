@@ -99,11 +99,12 @@ class TestPremiumMonotonicity:
         assert first["net_premium"] > last["net_premium"]
 
     def test_premium_trends_down_overall(self):
-        """המגמה יורדת (חצי-צר משלם יותר מחצי-רחב). לא מונוטוני-לחלוטין בכוונה:
-        גריד strikes בדיד + כנף קבועה יכולים ליצור התנגשויות ולכן wiggle מקומי
-        בין צעדי 0.25% — תופעת שוק אמיתית, לא באג. לכן בודקים מגמה, לא כל צעד."""
+        """המגמה יורדת (חצי-צר משלם יותר מחצי-רחב) — תכונה חסרת-תלות-בכנף. נבדק ב-wing_pct=1.0
+        מפורש: השרשרת הסינתטית על גריד 10-נק' בבסיס 2000, והכנף הרשמית 0.75% = 15 נק' שם
+        (לא כפולה של 10) → aliasing שמעוות את הסכום — ארטיפקט פיקסצ'ר, לא רגרסיה (בבסיס אמיתי
+        ~4050 הכנף 0.75%≈30 נק' מיושרת, והפרמיות חלקות). כנף 1.0%=20 נק' מיושרת לגריד."""
         chain = _realistic_chain()
-        curve = build_margin_curve(chain, 2000.0)
+        curve = build_margin_curve(chain, 2000.0, wing_pct=1.0)
         prems = [r["net_premium"] for r in curve if not r["skipped"]]
         mid = len(prems) // 2
         assert sum(prems[:mid]) > sum(prems[mid:])
@@ -272,9 +273,13 @@ class TestSummarizeCurve:
         assert all("hold_prob" not in r for r in summary["curve"])
 
 
-def test_default_wing_pct_is_one():
-    """ברירת המחדל של הכנפיים = 1.0% מעבר ל-short (הסמנטיקה ההיסטורית)."""
-    assert DEFAULT_WING_PCT == 1.0
+def test_default_wing_pct_is_official_075():
+    """נועל את הכנף הרשמית = 0.75% (נקודת-האיזון מסריקת הכנפיים) — הקבוע *והשפעתו* על
+    עקומה שנבנית ללא wing מפורש (הנתיב שההמלצות ו-select_margin מקבלים)."""
+    assert DEFAULT_WING_PCT == 0.75
+    # עקומה ללא wing מפורש → כנף 0.75 (מה שהרשם/select_margin עובדים עליו).
+    row = build_margin_curve(_realistic_chain(2000.0), 2000.0, margins=[2.0])[0]
+    assert row["wing_pct"] == 0.75
 
 
 # ─── שלב 6: פרמטור הכנף — כיוון כלכלי + רגרסיית ברירת מחדל ────────────────
@@ -299,8 +304,8 @@ class TestWingParametric:
         assert (self._row(0.5)["premium_to_max_loss_ratio"]
                 > self._row(1.5)["premium_to_max_loss_ratio"])
 
-    def test_default_wing_equals_explicit_one(self):
-        # רגרסיה: ברירת המחדל (ללא wing_pct) == wing_pct=1.0 מפורש — בדיוק.
+    def test_default_wing_equals_official_075(self):
+        # ברירת המחדל (ללא wing_pct) == wing_pct=0.75 מפורש — נועל את הכנף הרשמית בעקומה.
         default_row = build_margin_curve(self._chain, 2000.0, margins=[2.0])[0]
-        explicit_row = build_margin_curve(self._chain, 2000.0, margins=[2.0], wing_pct=1.0)[0]
+        explicit_row = build_margin_curve(self._chain, 2000.0, margins=[2.0], wing_pct=0.75)[0]
         assert default_row == explicit_row
