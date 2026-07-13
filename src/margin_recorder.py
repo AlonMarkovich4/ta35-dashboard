@@ -25,7 +25,7 @@ import pandas as pd
 
 from context_analyzer import get_recent_move
 from data_loader import load_from_db
-from margin_calculator import build_margin_curve
+from margin_calculator import DEFAULT_WING_PCT, build_margin_curve
 from margin_selector import DEFAULT_HOLD_FLOOR, select_margin
 from options_parser import find_atm
 from paper_db import (
@@ -65,6 +65,7 @@ def _recommendation_for_expiry(
     exp_ts: pd.Timestamp,
     engine,
     hold_floor: float = DEFAULT_HOLD_FLOOR,
+    wing_pct: float = DEFAULT_WING_PCT,
     engine_version: str = "margin-v1",
     trigger: str = "manual",
 ) -> dict | None:
@@ -73,7 +74,9 @@ def _recommendation_for_expiry(
     שלבים:
       1. שרשרת הפקיעה (get_latest_option_chain) → chain_df + ATM (find_atm) → base_index.
       2. סוג הפקיעה מנורמל ל-'W'/'M' (_norm_expiry_type).
-      3. עקומת המרווח (build_margin_curve, שלב 1) על ה-strikes האמיתיים.
+      3. עקומת המרווח (build_margin_curve, שלב 1) על ה-strikes האמיתיים, ברוחב כנף wing_pct
+         (ברירת מחדל 1.0% — משמרת התנהגות; פרמטרי לקראת אופטימיזציית הכנף בשלב 6). כל השדות
+         הנגזרים (max_loss, breakevens, פרמיה) מחושבים מהכנף שהועברה, וה-wing_pct נשמר ב-rec.
       4. select_margin (שלב 3, hold_floor הנעול) עם before_date=None (פקיעה חיה).
       5. הרכבת ה-rec: שדות הבחירה + hold מותנה/גלובלי/n מהשורה הנבחרת ב-grid, ו-strikes
          מהשורה המתאימה בעקומה. grid + selected_curve_row המלאים נשמרים לשקיפות ולשחזור
@@ -96,7 +99,7 @@ def _recommendation_for_expiry(
     base_index = float(atm.get("index_estimate", atm.get("strike")))
     etype = _norm_expiry_type(entry.get("expiry_type"))
 
-    curve = build_margin_curve(chain_df, base_index)
+    curve = build_margin_curve(chain_df, base_index, wing_pct=wing_pct)
     recent = get_recent_move(df_hist, exp_ts)
     sel = select_margin(curve, df_hist, etype, recent, hold_floor=hold_floor)
 
@@ -132,6 +135,7 @@ def _recommendation_for_expiry(
         "credit_pts":         crow.get("credit_pts"),
         "below_floor":        sel.get("below_floor"),
         "hold_floor":         sel.get("hold_floor"),
+        "wing_pct":           wing_pct,          # הכנף שהונחה (שקיפות — נשמר ב-recommendation_json)
         "reason":             sel.get("reason"),
         "grid":               sel.get("grid"),
         "selected_curve_row": crow,       # לשחזור margin_pnl בולידציה (שלב 4, חלק ג)
@@ -144,6 +148,7 @@ def record_margin_recommendations_for_upcoming(
     engine=None,
     trigger: str = "manual",
     engine_version: str = "margin-v1",
+    wing_pct: float = DEFAULT_WING_PCT,
 ) -> list[dict]:
     """מריץ את מנגנון המרווח על כל פקיעה קרובה ומתעד ל-margin_recommendations (append-only).
 
@@ -155,6 +160,9 @@ def record_margin_recommendations_for_upcoming(
     מחזיר סיכום לכל פקיעה קרובה:
       {expiry_date, expiry_type, selected_margin, hold_blended, status, rec_id}
       status ∈ {"recorded", "skipped_exists", "no_recommendation", "error"}.
+
+    wing_pct — רוחב הכנף (ברירת מחדל DEFAULT_WING_PCT=1.0%) שמועבר ל-build_margin_curve
+    ונשמר ב-recommendation_json. פרמטרי לקראת אופטימיזציית הכנף; ברירת המחדל משמרת התנהגות.
 
     שימוש חוזר: UI/סקריפט קורא עם trigger="manual"; Action עתידי עם trigger="scheduled".
     """
@@ -197,7 +205,8 @@ def record_margin_recommendations_for_upcoming(
                 continue
 
             rec = _recommendation_for_expiry(
-                df, nxt, eng, engine_version=engine_version, trigger=trigger,
+                df, nxt, eng, wing_pct=wing_pct,
+                engine_version=engine_version, trigger=trigger,
             )
             if rec is None:
                 rec_summary["status"] = "no_recommendation"  # אין שרשרת/מרווח תקין

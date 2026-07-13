@@ -347,3 +347,35 @@ class TestIntegrationRealisticChain:
             assert r["ev"] == pytest.approx(recon, abs=0.1)
             if r["avg_loss"] is not None:
                 assert r["avg_loss"] >= r["max_loss"] - 1e-6
+
+
+# ─── שלב 6: פרמטור הכנף ב-EV (avg_loss נכון לכל כנף, לא מקובע ל-1.0) ───────
+
+class TestExpectedValueWingParametric:
+    _chain = _realistic_chain(2000.0)
+    _dist = build_move_distribution(_history([
+        ("2020-01-15", "M",  0.5), ("2020-02-15", "M", -0.3), ("2020-03-15", "M",  2.5),
+        ("2020-04-15", "M", -2.8), ("2020-05-15", "M",  1.0), ("2020-06-15", "M", -4.0),
+        ("2020-07-15", "M",  0.2), ("2020-08-15", "M",  3.5),
+    ]))
+
+    def _evrow(self, wing):
+        curve = build_margin_curve(self._chain, 2000.0, margins=[2.0], wing_pct=wing)
+        return expected_value_curve(self._dist, curve)[0]
+
+    def test_avg_loss_deepens_with_wider_wing(self):
+        narrow, wide = self._evrow(0.5), self._evrow(1.5)
+        assert narrow["avg_loss"] is not None and wide["avg_loss"] is not None
+        # כנף צרה → הפסד-מקס קטן → avg_loss רדוד יותר (בערך מוחלט)
+        assert abs(narrow["avg_loss"]) < abs(wide["avg_loss"])
+        # ה-EV שונה בין הכנפיים → avg_loss פרמטרי בכנף, לא מקובע ל-1.0
+        assert narrow["ev"] != wide["ev"]
+
+    def test_default_wing_ev_unchanged(self):
+        # רגרסיה: ברירת המחדל (ללא wing_pct) == wing_pct=1.0 מפורש — בדיוק.
+        default_curve = build_margin_curve(self._chain, 2000.0, margins=[2.0])
+        explicit_curve = build_margin_curve(self._chain, 2000.0, margins=[2.0], wing_pct=1.0)
+        d = expected_value_curve(self._dist, default_curve)[0]
+        e = expected_value_curve(self._dist, explicit_curve)[0]
+        assert d["avg_loss"] == e["avg_loss"]
+        assert d["ev"] == e["ev"]

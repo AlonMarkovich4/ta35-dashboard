@@ -275,3 +275,32 @@ class TestSummarizeCurve:
 def test_default_wing_pct_is_one():
     """ברירת המחדל של הכנפיים = 1.0% מעבר ל-short (הסמנטיקה ההיסטורית)."""
     assert DEFAULT_WING_PCT == 1.0
+
+
+# ─── שלב 6: פרמטור הכנף — כיוון כלכלי + רגרסיית ברירת מחדל ────────────────
+
+class TestWingParametric:
+    _chain = _realistic_chain(2000.0)
+
+    def _row(self, wing):
+        return build_margin_curve(self._chain, 2000.0, margins=[2.0], wing_pct=wing)[0]
+
+    def test_wider_wing_raises_premium_and_max_loss(self):
+        narrow, wide = self._row(0.5), self._row(1.5)
+        assert not narrow["skipped"] and not wide["skipped"]
+        # כנף רחבה → long רחוק וזול יותר → פרמיה נטו גבוהה יותר
+        assert wide["net_premium"] > narrow["net_premium"]
+        # כנף רחבה → רוחב אנכי גדול → הפסד-מקס עמוק יותר (בערך מוחלט)
+        assert abs(wide["max_loss"]) > abs(narrow["max_loss"])
+        assert wide["wing_width"] > narrow["wing_width"]
+
+    def test_narrow_wing_has_better_risk_ratio(self):
+        # יחס פרמיה/הפסד טוב יותר לכנף צרה (יעילות סיכון)
+        assert (self._row(0.5)["premium_to_max_loss_ratio"]
+                > self._row(1.5)["premium_to_max_loss_ratio"])
+
+    def test_default_wing_equals_explicit_one(self):
+        # רגרסיה: ברירת המחדל (ללא wing_pct) == wing_pct=1.0 מפורש — בדיוק.
+        default_row = build_margin_curve(self._chain, 2000.0, margins=[2.0])[0]
+        explicit_row = build_margin_curve(self._chain, 2000.0, margins=[2.0], wing_pct=1.0)[0]
+        assert default_row == explicit_row

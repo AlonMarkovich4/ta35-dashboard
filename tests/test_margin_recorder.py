@@ -51,7 +51,7 @@ def _setup(monkeypatch, *, expiries, logged=None, insert_fail=False, rec_none=Fa
                         lambda eng: pd.DataFrame({"move_pct": [0.5, -0.3, None]}))
     monkeypatch.setattr(mr, "get_available_expiries", lambda engine=None: list(expiries))
 
-    def _recmock(df, nxt, engine, hold_floor=0.97,
+    def _recmock(df, nxt, engine, hold_floor=0.97, wing_pct=1.0,
                  engine_version="margin-v1", trigger="manual"):
         return None if rec_none else _rec(nxt.date(), margin=1.5)
     rec_mock = MagicMock(side_effect=_recmock)
@@ -201,7 +201,8 @@ def _assembly_setup(monkeypatch, *, etype_text, sel):
          "short_call_strike": 2040.0, "long_put_strike": 1920.0,
          "long_call_strike": 2080.0, "credit_pts": 2.5, "base_index": 2000.0},
     ]
-    monkeypatch.setattr(mr, "build_margin_curve", lambda chain_df, base: curve)
+    # MagicMock (לא lambda) כדי לקבל wing_pct kwarg ולאפשר בדיקת מה שהועבר.
+    monkeypatch.setattr(mr, "build_margin_curve", MagicMock(return_value=curve))
     monkeypatch.setattr(mr, "get_recent_move", lambda df, nxt: 0.3)
     select_mock = MagicMock(return_value=sel)
     monkeypatch.setattr(mr, "select_margin", select_mock)
@@ -261,3 +262,36 @@ def test_no_valid_margin_returns_none(monkeypatch):
     rec = mr._recommendation_for_expiry(
         pd.DataFrame({"move_pct": [0.3]}), pd.Timestamp("2099-04-09"), object())
     assert rec is None
+
+
+# ─── שלב 6: פרמטור הכנף — עובר ל-build_margin_curve ונשמר ב-rec ───────────
+
+def test_wing_pct_threaded_and_recorded(monkeypatch):
+    """wing_pct עובר ל-build_margin_curve ונשמר ב-rec; ברירת המחדל 1.0%."""
+    sel = {
+        "selected_margin": 2.0, "hold_blended": 0.98, "net_premium": 480.0,
+        "max_loss": -1520.0, "ev": 5.0, "below_floor": False, "hold_floor": 0.97,
+        "reason": "נבחר 2.00%",
+        "grid": [{"margin_pct": 2.0, "hold_blended": 0.98, "hold_conditional": 0.95,
+                  "hold_global": 0.99, "n_conditional": 10, "w_effective": 0.3}],
+    }
+    _assembly_setup(monkeypatch, etype_text="שבועי", sel=sel)
+    df = pd.DataFrame({"move_pct": [0.3]})
+
+    # מפורש: wing_pct=0.5 → עובר ל-build_margin_curve ונשמר ב-rec.
+    rec = mr._recommendation_for_expiry(df, pd.Timestamp("2099-03-19"), object(), wing_pct=0.5)
+    assert rec["wing_pct"] == 0.5
+    assert mr.build_margin_curve.call_args.kwargs.get("wing_pct") == 0.5
+
+    # ברירת מחדל: wing_pct=1.0 (משמרת התנהגות).
+    rec_default = mr._recommendation_for_expiry(df, pd.Timestamp("2099-03-19"), object())
+    assert rec_default["wing_pct"] == 1.0
+    assert mr.build_margin_curve.call_args.kwargs.get("wing_pct") == 1.0
+
+
+def test_record_threads_wing_to_recommendation(monkeypatch):
+    """record_...(wing_pct=...) מעביר את הכנף ל-_recommendation_for_expiry."""
+    m = _setup(monkeypatch, expiries=["2099-02-19"])
+    mr.record_margin_recommendations_for_upcoming(engine="ENG", wing_pct=0.5)
+    _, rec_kw = m["rec"].call_args
+    assert rec_kw["wing_pct"] == 0.5
