@@ -5,7 +5,7 @@ import { AccordionItem } from "@/components/ui/Accordion";
 import { Empty } from "@/components/ui/Empty";
 import { Disclaimer } from "@/components/ui/Disclaimer";
 import { Spark, Target } from "@/components/icons";
-import { pct, pctFrac, ils, en } from "@/lib/format";
+import { pct, pctFrac, ils, en, money } from "@/lib/format";
 import type { MarginData } from "@/lib/data";
 
 // מרווח באחוזים (1.75 → "1.75%"); פער חתום (+1.00% / -1.00%); מקור התנועה בעברית.
@@ -38,7 +38,8 @@ export function MarginView({ data }: { data: MarginData }) {
             <Target className="text-accent" /> ההמלצות החיות
           </h2>
           <p className="mt-0.5 text-xs text-text3">
-            ההמלצה האחרונה לכל פקיעה קרובה (גרסה margin-v1.1).
+            ההמלצה האחרונה לכל פקיעה קרובה (גרסה margin-v1.1). כל שורה = טרפז מלא של 4 רגליים:
+            מכירת 2 רגליים (short) וקניית 2 הגנות (long) במרחק הכנף מעבר לרגל המכורה — הכנף הרשמית 0.75%.
           </p>
         </div>
 
@@ -56,7 +57,10 @@ export function MarginView({ data }: { data: MarginData }) {
                     <th className="pb-2 font-medium">hold מותנה</th>
                     <th className="pb-2 font-medium">hold גלובלי</th>
                     <th className="pb-2 font-medium">פרמיה צפויה</th>
-                    <th className="pb-2 font-medium">Short strikes</th>
+                    <th className="pb-2 font-medium">מכור (short)</th>
+                    <th className="pb-2 font-medium">קנה (long)</th>
+                    <th className="pb-2 font-medium">כנף</th>
+                    <th className="pb-2 font-medium">הפסד-מקס</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -86,10 +90,24 @@ export function MarginView({ data }: { data: MarginData }) {
                         <td className="py-2.5 tabular-nums text-text2" dir="ltr">
                           {en(r.shortPutStrike)}P / {en(r.shortCallStrike)}C
                         </td>
+                        <td className="py-2.5 tabular-nums text-text2" dir="ltr">
+                          {r.legsSource === "none" ? (
+                            "—"
+                          ) : (
+                            <>
+                              {en(r.longPutStrike)}P / {en(r.longCallStrike)}C
+                              {r.legsSource === "computed" && (
+                                <span className="text-[10px] text-text3"> (מחושב)</span>
+                              )}
+                            </>
+                          )}
+                        </td>
+                        <td className="py-2.5 tabular-nums text-text2">{pct(r.wingPct, 2)}</td>
+                        <td className="py-2.5 tabular-nums text-neg" dir="ltr">{money(r.maxLoss)}</td>
                       </tr>
                       {r.reason && (
                         <tr>
-                          <td colSpan={7} className="pb-3 pt-0 text-xs text-text3">
+                          <td colSpan={10} className="pb-3 pt-0 text-xs text-text3">
                             ➜ {r.reason}
                           </td>
                         </tr>
