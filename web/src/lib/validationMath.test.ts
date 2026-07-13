@@ -166,6 +166,34 @@ describe("buildValidationRows — join + best/hit/regret", () => {
   it("empty inputs → no rows", () => {
     expect(buildValidationRows([], [])).toEqual([]);
   });
+
+  // ── גארד: תיק ההמלצות (strategy_id=102) לא מזהם את ה-benchmark ──
+  it("reco-portfolio trades (102) are excluded from best/hit/regret", () => {
+    const exp = "2026-06-17";
+    // תיק ההמלצות עשה P&L ענק — אסור שיזהם. best נשאר 5 (400), avg על 3 בלבד.
+    const r = buildValidationRows(
+      [decision(exp, 2)],
+      [
+        trade(exp, 1, 100), trade(exp, 2, 250), trade(exp, 5, 400),
+        trade(exp, 102, 99999, "Short Iron Condor (המלצת מרווח)"),
+      ],
+    )[0];
+    expect(r.bestStrategyId).toBe(5);
+    expect(r.bestPnl).toBe(400);
+    expect(r.recommendedPnl).toBe(250);
+    expect(r.avgPnl).toBe((100 + 250 + 400) / 3); // 102 לא נכנס לממוצע
+    expect(r.regret).toBe(150);
+    expect(r.hit).toBe(false);
+  });
+
+  it("an expiry with ONLY reco (102) trades is not validatable", () => {
+    const exp = "2026-06-17";
+    const rows = buildValidationRows(
+      [decision(exp, 2)],
+      [trade(exp, 102, 5000, "Short Iron Condor (המלצת מרווח)")],
+    );
+    expect(rows).toEqual([]); // אין עסקאות benchmark סגורות → לא ולידבילית
+  });
 });
 
 describe("asDateKey", () => {

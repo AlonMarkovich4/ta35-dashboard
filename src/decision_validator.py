@@ -30,7 +30,7 @@ import pandas as pd
 from sqlalchemy import text
 
 from paper_db import _make_engine
-from strategies import STRATEGIES
+from strategies import BENCHMARK_STRATEGY_IDS, STRATEGIES
 
 logger = logging.getLogger(__name__)
 
@@ -142,8 +142,10 @@ def _fetch_closed_pnl(eng) -> list[dict]:
                            COUNT(*)           AS n_trades
                     FROM paper_trades
                     WHERE status = 'closed' AND pnl IS NOT NULL
+                      AND strategy_id = ANY(:benchmark_ids)   -- benchmark בלבד (מחריג תיק ההמלצות, 102)
                     GROUP BY expiry_date, strategy_id
                 """),
+                {"benchmark_ids": sorted(BENCHMARK_STRATEGY_IDS)},
             ).fetchall()
         out: list[dict] = []
         for r in rows:
@@ -201,6 +203,8 @@ def build_validation_rows(engine=None) -> list[dict]:
         sid = t["strategy_id"]
         if exp is None or sid is None or t["pnl"] is None:
             continue
+        if sid not in BENCHMARK_STRATEGY_IDS:
+            continue   # תיק ההמלצות (strategy_id=102) לא נספר ל-best/hit/regret של ה-benchmark
         by_expiry.setdefault(exp, {})[sid] = {"pnl": t["pnl"], "name": t["strategy_name"]}
 
     rows: list[dict] = []

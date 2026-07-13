@@ -13,9 +13,13 @@ idempotent: record_margin_recommendations_for_upcoming מדלג על פקיעה 
 לכן בטוח להריץ יומית גם כשפקיעות נכנסות ל-chain בהדרגה, ולכן ה-Action תופס גם פקיעות
 שנכנסות מאוחר.
 
+גשר 3 (אופציונלי, מאחורי kill-switch): אחרי הרישום, אם RECO_TRADING_ENABLED=='true', פותח
+עסקת Iron Condor דמו בתיק ההמלצות לכל פקיעה שיש לה המלצה היום (_open_reco_trades →
+recommendation_trader.open_recommended_condor, עם דדופ). **ברירת מחדל כבוי** — אפס פתיחה.
+
 exit codes (כמו auto_record_decisions.py):
   0  הצלחה — כולל "אין מה לתעד", "הכל כבר תועד היום", ו"אין שרשרת מלאה" (מצבים רגילים).
-  1  שגיאה אמיתית — חיבור DB נכשל, או תיעוד של פקיעה כלשהי נכשל (status='error').
+  1  שגיאה אמיתית — חיבור DB נכשל, תיעוד נכשל (status='error'), או שגיאת פתיחת עסקה.
   2  קונפיגורציה חסרה — DATABASE_URL לא מוגדר בסביבה.
 
 הטריגר הוא הזמן (cron); מניעת הכפילויות היא מה שהופך את ההרצה היומית לבטוחה.
@@ -47,6 +51,53 @@ def _fmt_margin(v) -> str:
 
 def _fmt_hold(v) -> str:
     return "—" if v is None else f"{v * 100:.1f}%"
+
+
+def _open_reco_trades(engine, results) -> int:
+    """גשר 3: אם ה-kill-switch דלוק (RECO_TRADING_ENABLED=true), פותח עסקת Iron Condor בתיק
+    ההמלצות לכל פקיעה שנרשמה/קיימת היום ואין לה עסקה. מחזיר מספר שגיאות פתיחה (משפיע על קוד
+    היציאה). כשהמתג כבוי — אפס כתיבה, אפס פתיחה. הפתיחה עצמה דרך open_recommended_condor
+    (דדופ + kill-switch פנימיים)."""
+    try:
+        from recommendation_trader import (
+            RECO_PORTFOLIO_NAME,
+            get_reco_portfolio_id,
+            open_recommended_condor,
+            reco_trading_enabled,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log(f"ייבוא recommendation_trader נכשל: {exc}", level="ERROR")
+        return 1
+
+    if not reco_trading_enabled():
+        log("מסחר-לפי-המלצות כבוי (RECO_TRADING_ENABLED != true) — לא נפתחו עסקאות (מצב רגיל).")
+        return 0
+
+    pid = get_reco_portfolio_id(engine)
+    if pid is None:
+        log(f"⚠️ תיק ההמלצות '{RECO_PORTFOLIO_NAME}' לא נמצא — צור אותו לפני הדלקת המתג. דילוג.",
+            level="ERROR")
+        return 1
+
+    log(f"⚠️ מסחר-לפי-המלצות דלוק — פותח עסקאות בתיק {pid} ('{RECO_PORTFOLIO_NAME}')...")
+    # פקיעות עם המלצה היום: recorded (חדשה) או skipped_exists (כבר קיימת) — לשתיהן יש המלצה.
+    expiries = [r.get("expiry_date") for r in results
+                if r.get("status") in ("recorded", "skipped_exists")]
+    counts: dict = {}
+    errs = 0
+    for exp in expiries:
+        res = open_recommended_condor(exp, engine=engine, portfolio_id=pid)
+        st = res.get("status")
+        counts[st] = counts.get(st, 0) + 1
+        if st in ("error", "db_error"):
+            errs += 1
+        detail = (f"trade_id={res.get('trade_id')}" if st == "opened"
+                  else res.get("reason", ""))
+        log(f"  פקיעה {exp}: {st} — {detail}")
+
+    log(f"סיכום מסחר: {counts.get('opened', 0)} נפתחו · {counts.get('duplicate', 0)} כפולות · "
+        f"{counts.get('skipped', 0)} דולגו · {errs} שגיאות.")
+    return errs
 
 
 def main() -> int:
@@ -111,8 +162,11 @@ def main() -> int:
     log(f"סיכום: נרשמו {recorded} · דולגו {skipped} · "
         f"ללא-המלצה {no_rec} · שגיאות {errored}.")
 
-    if errored:
-        log("היו שגיאות תיעוד — יציאה עם קוד שגיאה.", level="ERROR")
+    # ── גשר 3: פתיחת עסקאות לפי המלצה (רק אם ה-kill-switch דלוק; אחרת אפס כתיבה) ──
+    trade_errors = _open_reco_trades(engine, results)
+
+    if errored or trade_errors:
+        log("היו שגיאות (תיעוד/מסחר) — יציאה עם קוד שגיאה.", level="ERROR")
         return EXIT_ERROR
     if recorded == 0 and (skipped or no_rec):
         log("לא נרשמו המלצות חדשות (הכל כבר תועד היום / אין שרשרת מלאה) — מצב רגיל.")

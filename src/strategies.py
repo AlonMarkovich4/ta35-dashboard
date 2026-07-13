@@ -265,6 +265,11 @@ STRATEGIES: dict[int, Strategy] = {
 
 STRATEGY_BY_NAME: dict[str, Strategy] = {s.name: s for s in STRATEGIES.values()}
 
+# ה-benchmark הקבוע: 6 האסטרטגיות המקוריות בלבד (מזהי 1–6). מקור-אמת יחיד לסינון —
+# עסקאות תיק ההמלצות (recommendation_trader, strategy_id=102) אינן חלק מה-benchmark ולכן
+# מוחרגות מ-decision_validator (best/hit/regret) ומהביצועים המצטברים חוצי-התיקים.
+BENCHMARK_STRATEGY_IDS: frozenset[int] = frozenset(STRATEGIES)
+
 
 # ────────────────────────────────────────────────────────────────────
 #  Parameter grid

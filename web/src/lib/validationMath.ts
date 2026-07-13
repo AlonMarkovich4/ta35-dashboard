@@ -10,6 +10,10 @@ import { STRATEGIES } from "@/lib/strategies";
 // מיפוי {strategy_id → שם} מה-registry, ל-fallback כשאין שם שנשמר בעסקה.
 const STRAT_BY_ID = new Map<number, string>(STRATEGIES.map((s) => [s.id, s.name]));
 
+// ה-benchmark: 6 האסטרטגיות המקוריות בלבד. עסקאות תיק ההמלצות (strategy_id=102) מוחרגות
+// מ-best/hit/regret — מקביל ל-BENCHMARK_STRATEGY_IDS בצד Python.
+const BENCHMARK_IDS = new Set<number>(STRATEGIES.map((s) => s.id));
+
 // ─── טיפוסי קלט (צורת השורות שהדרייבר מחזיר משתי השאילתות) ────────────────
 
 export type LatestDecision = {
@@ -100,6 +104,7 @@ export function buildValidationRows(
     const exp = asDateKey(t.expiry_date);
     const sid = t.strategy_id;
     if (exp == null || sid == null || t.pnl == null) continue;
+    if (!BENCHMARK_IDS.has(sid)) continue; // תיק ההמלצות (102) לא נספר ל-best/hit/regret
     if (!byExpiry.has(exp)) byExpiry.set(exp, new Map());
     byExpiry.get(exp)!.set(sid, { pnl: t.pnl, name: t.strategy_name });
   }

@@ -35,7 +35,7 @@ from paper_trading import (
     summarize_closed_pnl,
     trade_expiries,
 )
-from strategies import STRATEGIES
+from strategies import BENCHMARK_STRATEGY_IDS, STRATEGIES
 from supabase_loader import get_available_expiries, get_latest_option_chain
 from styles import inject_global_css
 
@@ -873,8 +873,15 @@ def _render_manual_actions(portfolios: list[dict]) -> None:
 # ════════════════════════════════════════════════════════════════════════
 
 def _render_global_performance(portfolios: list[dict], all_trades: list[dict]) -> None:
-    """ביצועים מצטברים חוצי-תיקים: סך P&L נטו בולט, Win Rate, עקומת שווי, ופילוח."""
+    """ביצועים מצטברים חוצי-תיקים — ה-benchmark בלבד (6 האסטרטגיות המקוריות): סך P&L נטו,
+    Win Rate, עקומת שווי, ופילוח. תיק ההמלצות (strategy_id=102) מוחרג כדי לא לזהם את ה-benchmark
+    — ביצועיו מוצגים בכרטיס/עמוד התיק שלו בנפרד."""
     st.markdown("### 💰 ביצועים מצטברים — כל התיקים")
+
+    # מחריגים את תיק ההמלצות (102): עסקאותיו וההון ההתחלתי שלו לא נספרים במצטבר ה-benchmark.
+    all_trades = [t for t in all_trades if t.get("strategy_id") in BENCHMARK_STRATEGY_IDS]
+    portfolios = [p for p in portfolios
+                  if not (set(p.get("strategy_ids") or []) - BENCHMARK_STRATEGY_IDS)]
 
     summary = summarize_closed_pnl(all_trades)
     n       = summary["closed_count"]

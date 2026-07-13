@@ -172,6 +172,41 @@ def test_recommended_strategy_missing_pnl(monkeypatch):
     assert r["best_strategy_id"] == 5
 
 
+# ─── גארד: תיק ההמלצות (102) לא מזהם את ה-benchmark ──────────────────────
+
+def test_reco_trades_excluded_from_benchmark(monkeypatch):
+    """עסקאות תיק ההמלצות (strategy_id=102) לא נספרות ל-best/hit/regret של ה-benchmark.
+
+    גם עם P&L ענק — 102 מחוץ ל-6 האסטרטגיות המקוריות (BENCHMARK_STRATEGY_IDS)
+    ולכן מוחרג מהחיבור. ה-best נשאר 5 (400), וה-avg על 3 האסטרטגיות בלבד.
+    """
+    exp = date(2026, 6, 17)
+    decisions = [_decision(exp, top_id=2)]
+    trades = [
+        _trade(exp, 1, 100.0), _trade(exp, 2, 250.0), _trade(exp, 5, 400.0),
+        _trade(exp, 102, 99999.0, name="Short Iron Condor (המלצת מרווח)"),
+    ]
+    _patch(monkeypatch, decisions, trades)
+
+    r = dv.build_validation_rows(engine="ENG")[0]
+    assert r["best_strategy_id"] == 5
+    assert r["best_pnl"] == 400.0
+    assert r["recommended_pnl"] == 250.0
+    assert r["avg_pnl"] == (100 + 250 + 400) / 3       # 102 לא נכנס לממוצע
+    assert r["regret"] == 400.0 - 250.0
+    assert r["hit"] is False
+
+
+def test_expiry_with_only_reco_trades_not_validatable(monkeypatch):
+    """פקיעה שכל עסקאותיה הסגורות הן תיק ההמלצות (102) — אינה ולידבילית (אין benchmark)."""
+    exp = date(2026, 6, 17)
+    decisions = [_decision(exp, top_id=2)]
+    trades = [_trade(exp, 102, 5000.0, name="Short Iron Condor (המלצת מרווח)")]
+    _patch(monkeypatch, decisions, trades)
+
+    assert dv.build_validation_rows(engine="ENG") == []
+
+
 # ─── מיון + ריבוי פקיעות ────────────────────────────────────────────────
 
 def test_rows_sorted_desc_by_expiry(monkeypatch):

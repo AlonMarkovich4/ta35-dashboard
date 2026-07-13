@@ -34,4 +34,7 @@ jobs:
         env:
           # אותו secret שכבר מוגדר ל-Actions הקודמים — אין צורך להגדיר מחדש.
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          # גשר 3 — kill-switch למסחר-לפי-המלצות (פתיחת עסקאות דמו אוטומטית).
+          # "true" — הודלק ידנית אחרי אימות הפתיחה. דמו בלבד; דדופ + שער מרחק-לפקיעה (≥1 יום) מגנים.
+          RECO_TRADING_ENABLED: "true"
         run: python scripts/auto_record_margins.py

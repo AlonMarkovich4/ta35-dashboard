@@ -312,6 +312,7 @@ export async function getClosedSummary(portfolioId?: number): Promise<ClosedSumm
       : await sql<{ pnl: number }[]>`
           SELECT pnl FROM paper_trades
           WHERE status = 'closed' AND pnl IS NOT NULL
+            AND strategy_id BETWEEN 1 AND 6
             AND portfolio_id IN (
               SELECT id FROM paper_portfolios WHERE is_active IS DISTINCT FROM false
             )`;
@@ -339,7 +340,10 @@ export async function getEquityCurve(portfolioId?: number): Promise<{ points: Eq
       ? await sql<{ initial_balance: number }[]>`
           SELECT initial_balance FROM paper_portfolios WHERE id = ${portfolioId}`
       : await sql<{ initial_balance: number }[]>`
-          SELECT initial_balance FROM paper_portfolios WHERE is_active IS DISTINCT FROM false`;
+          SELECT initial_balance FROM paper_portfolios p
+          WHERE is_active IS DISTINCT FROM false
+            AND EXISTS (SELECT 1 FROM paper_trades t
+                        WHERE t.portfolio_id = p.id AND t.strategy_id BETWEEN 1 AND 6)`;
     const initial = ports.reduce((s, p) => s + Number(p.initial_balance), 0);
 
     const rows = portfolioId
@@ -351,6 +355,7 @@ export async function getEquityCurve(portfolioId?: number): Promise<{ points: Eq
       : await sql<{ pnl: number; closed_at: string }[]>`
           SELECT pnl, closed_at FROM paper_trades
           WHERE status = 'closed' AND pnl IS NOT NULL AND closed_at IS NOT NULL
+            AND strategy_id BETWEEN 1 AND 6
             AND portfolio_id IN (
               SELECT id FROM paper_portfolios WHERE is_active IS DISTINCT FROM false
             )
@@ -378,6 +383,7 @@ export async function getTrackRecord(portfolioId?: number): Promise<TrackRowData
       : await sql<{ strategy_name: string | null; status: string; pnl: number | null }[]>`
           SELECT strategy_name, status, pnl FROM paper_trades
           WHERE status = 'closed'
+            AND strategy_id BETWEEN 1 AND 6
             AND portfolio_id IN (
               SELECT id FROM paper_portfolios WHERE is_active IS DISTINCT FROM false
             )`;
@@ -644,6 +650,7 @@ export async function getValidation(): Promise<ValidationData> {
              COUNT(*)           AS n_trades
       FROM paper_trades
       WHERE status = 'closed' AND pnl IS NOT NULL
+        AND strategy_id BETWEEN 1 AND 6
       GROUP BY expiry_date, strategy_id
     `;
 
