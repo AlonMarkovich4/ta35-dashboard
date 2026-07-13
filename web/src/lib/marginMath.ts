@@ -163,3 +163,51 @@ export function summarizeMarginValidation(rows: SummarizableMarginRow[]): Margin
     avgMarginGap: gaps.length ? round4(gaps.reduce((s, g) => s + g, 0) / gaps.length) : 0,
   };
 }
+
+// ─── רגלי ההגנה (long) — לתצוגת 4 הרגליים המלאות (שלב 6ג) ─────────────────
+
+export type WingLegs = {
+  longPutStrike: number | null;
+  longCallStrike: number | null;
+  maxLoss: number | null;
+  wingPct: number | null; // הכנף שהונחה; null = לא ידוע (המלצה ישנה מלפני שלב 6)
+  legsSource: "recorded" | "computed" | "none";
+};
+
+// חישוב long strikes מ-short ± מרחק-הכנף — fallback כשה-long strikes לא נשמרו ב-json.
+// מקביל לרעיון condor_legs_from_chain: ה-long במרחק wing% (מהמדד) *מעבר ל-short*, מעוגל
+// ל-10 הקרוב. קירוב (ה-strike האמיתי מהשרשרת עדיף) — לכן legsSource="computed" מסומן ב-UI.
+export function computeLongStrikes(
+  shortPut: number | null,
+  shortCall: number | null,
+  baseIndex: number | null,
+  wingPct: number | null,
+): { longPut: number; longCall: number } | null {
+  if (shortPut == null || shortCall == null || baseIndex == null || wingPct == null) return null;
+  const wingPts = baseIndex * (wingPct / 100);
+  const round10 = (x: number) => Math.round(x / 10) * 10;
+  return { longPut: round10(shortPut - wingPts), longCall: round10(shortCall + wingPts) };
+}
+
+// פותר את רגלי ההגנה לתצוגה: מעדיף long strikes שנרשמו ב-json (legsSource="recorded");
+// נופל לחישוב מ-short±wing ("computed"); אם אין wing כלל (המלצה ישנה) ולא נרשמו longs →
+// "none" (ה-UI יציג "—"). ה-wingPct נפתר במעלה הזרם (top-level ?? selected_curve_row).
+export function resolveWingLegs(input: {
+  shortPutStrike: number | null;
+  shortCallStrike: number | null;
+  baseIndex: number | null;
+  recordedLongPut: number | null;
+  recordedLongCall: number | null;
+  maxLoss: number | null;
+  wingPct: number | null;
+}): WingLegs {
+  const { shortPutStrike, shortCallStrike, baseIndex, recordedLongPut, recordedLongCall, maxLoss, wingPct } = input;
+  if (recordedLongPut != null && recordedLongCall != null) {
+    return { longPutStrike: recordedLongPut, longCallStrike: recordedLongCall, maxLoss, wingPct, legsSource: "recorded" };
+  }
+  const computed = computeLongStrikes(shortPutStrike, shortCallStrike, baseIndex, wingPct);
+  if (computed) {
+    return { longPutStrike: computed.longPut, longCallStrike: computed.longCall, maxLoss, wingPct, legsSource: "computed" };
+  }
+  return { longPutStrike: null, longCallStrike: null, maxLoss, wingPct, legsSource: "none" };
+}

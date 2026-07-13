@@ -12,6 +12,7 @@ import {
 import {
   buildMarginValidationRows,
   pickLatestRecommendations,
+  resolveWingLegs,
   summarizeMarginValidation,
   asDateKey,
   type MarginValidationSummary,
@@ -702,6 +703,11 @@ export type MarginLiveRow = {
   premiumIls: number | null;
   shortPutStrike: number | null;
   shortCallStrike: number | null;
+  longPutStrike: number | null;   // רגל ההגנה (קנויה) — נרשמת/מחושבת
+  longCallStrike: number | null;
+  maxLoss: number | null;         // ₪ (שלילי)
+  wingPct: number | null;         // רוחב הכנף שהונחה; null = לא ידוע (המלצה ישנה)
+  legsSource: "recorded" | "computed" | "none";
   belowFloor: boolean;
   floorUsed: number | null;
   reason: string;
@@ -741,11 +747,17 @@ export async function getMarginData(): Promise<MarginData> {
       ORDER BY expiry_date, recommended_at DESC
     `;
     const num = (v: unknown): number | null => (v == null ? null : Number(v));
+    // ערך מספרי מ-json עם גיבוי (top-level ?? selected_curve_row).
+    const jnum = (a: unknown, b: unknown): number | null => {
+      const v = a ?? b;
+      return v == null ? null : Number(v);
+    };
     const recs = raw.map((r) => {
       const rj =
         (typeof r.recommendation_json === "string"
           ? JSON.parse(r.recommendation_json)
           : r.recommendation_json) ?? {};
+      const scr = (rj.selected_curve_row ?? {}) as Record<string, unknown>;
       const gridMargins: number[] = Array.isArray(rj.grid)
         ? rj.grid
             .map((g: { margin_pct?: unknown }) => Number(g.margin_pct))
@@ -767,6 +779,12 @@ export async function getMarginData(): Promise<MarginData> {
         reason: (r.reason as string) ?? "",
         baseIndex: rj.base_index == null ? null : Number(rj.base_index),
         gridMargins,
+        // רגלי הגנה + כנף מה-json: long strikes/max_loss נשמרים (top-level, גיבוי selected_curve_row);
+        // wing_pct top-level (משלב 6a) — להמלצות ישנות נופל ל-selected_curve_row.wing_pct (=1.0).
+        recordedLongPut: jnum(rj.long_put_strike, scr.long_put_strike),
+        recordedLongCall: jnum(rj.long_call_strike, scr.long_call_strike),
+        recMaxLoss: jnum(rj.max_loss, scr.max_loss),
+        wingPct: jnum(rj.wing_pct, scr.wing_pct),
       };
     });
     const latest = pickLatestRecommendations(recs);
@@ -820,6 +838,16 @@ export async function getMarginData(): Promise<MarginData> {
     for (const r of latest) {
       const key = asDateKey(r.expiryDate);
       if (key == null || key < todayKey) continue;
+      // רגלי ההגנה: נרשמו ב-json (מועדף) → אחרת מחושבות מ-short±wing → אחרת "none".
+      const legs = resolveWingLegs({
+        shortPutStrike: r.shortPutStrike,
+        shortCallStrike: r.shortCallStrike,
+        baseIndex: r.baseIndex,
+        recordedLongPut: r.recordedLongPut,
+        recordedLongCall: r.recordedLongCall,
+        maxLoss: r.recMaxLoss,
+        wingPct: r.wingPct,
+      });
       live.push({
         expiry: fmtDate(key),
         expiryIso: key,
@@ -832,6 +860,11 @@ export async function getMarginData(): Promise<MarginData> {
         premiumIls: r.premiumIls,
         shortPutStrike: r.shortPutStrike,
         shortCallStrike: r.shortCallStrike,
+        longPutStrike: legs.longPutStrike,
+        longCallStrike: legs.longCallStrike,
+        maxLoss: legs.maxLoss,
+        wingPct: legs.wingPct,
+        legsSource: legs.legsSource,
         belowFloor: r.belowFloor,
         floorUsed: r.floorUsed,
         reason: r.reason,

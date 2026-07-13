@@ -2,8 +2,10 @@ import { describe, it, expect } from "vitest";
 import {
   asDateKey,
   buildMarginValidationRows,
+  computeLongStrikes,
   optimalHindsight,
   pickLatestRecommendations,
+  resolveWingLegs,
   summarizeMarginValidation,
   type MarginRecommendation,
 } from "@/lib/marginMath";
@@ -162,5 +164,69 @@ describe("summarizeMarginValidation", () => {
     ]);
     expect(s.holdRate).toBe(1);
     expect(s.avgMarginGap).toBe(2.0); // only the non-null value
+  });
+});
+
+describe("computeLongStrikes — long = short ± wing distance, rounded to 10", () => {
+  it("computes symmetric longs from short±(wing% of base)", () => {
+    // base 4050, wing 0.75% → 30.4 pts → long put 3980-30=3950, long call 4120+30=4150.
+    const r = computeLongStrikes(3980, 4120, 4050, 0.75);
+    expect(r).toEqual({ longPut: 3950, longCall: 4150 });
+  });
+
+  it("rounds to the nearest 10", () => {
+    // base 2000, wing 0.75% → 15 pts → 3980-15=3965→3960? round(396.5)*10. Math.round(396.5)=397→3970.
+    const r = computeLongStrikes(3980, 4120, 2000, 0.75);
+    expect(r).toEqual({ longPut: 3970, longCall: 4140 }); // 4120+15=4135→round=4140
+  });
+
+  it("returns null when any input is missing", () => {
+    expect(computeLongStrikes(null, 4120, 4050, 0.75)).toBeNull();
+    expect(computeLongStrikes(3980, 4120, 4050, null)).toBeNull(); // wing unknown (old rec)
+    expect(computeLongStrikes(3980, 4120, null, 0.75)).toBeNull();
+  });
+});
+
+describe("resolveWingLegs — recorded vs computed vs none", () => {
+  const short = { shortPutStrike: 3980, shortCallStrike: 4120, baseIndex: 4050 };
+
+  it("prefers recorded long strikes (legsSource=recorded)", () => {
+    const legs = resolveWingLegs({
+      ...short, recordedLongPut: 3905, recordedLongCall: 4195, maxLoss: -900, wingPct: 0.75,
+    });
+    expect(legs.legsSource).toBe("recorded");
+    expect(legs.longPutStrike).toBe(3905);
+    expect(legs.longCallStrike).toBe(4195);
+    expect(legs.maxLoss).toBe(-900);
+    expect(legs.wingPct).toBe(0.75);
+  });
+
+  it("falls back to computed when long strikes absent (legsSource=computed)", () => {
+    const legs = resolveWingLegs({
+      ...short, recordedLongPut: null, recordedLongCall: null, maxLoss: -900, wingPct: 0.75,
+    });
+    expect(legs.legsSource).toBe("computed");
+    expect(legs.longPutStrike).toBe(3950); // 3980 - 30
+    expect(legs.longCallStrike).toBe(4150); // 4120 + 30
+  });
+
+  it("old recommendation without wing and without recorded longs → none", () => {
+    const legs = resolveWingLegs({
+      ...short, recordedLongPut: null, recordedLongCall: null, maxLoss: null, wingPct: null,
+    });
+    expect(legs.legsSource).toBe("none");
+    expect(legs.longPutStrike).toBeNull();
+    expect(legs.wingPct).toBeNull();
+  });
+
+  it("old recommendation: wing recovered upstream (1.0) still resolves recorded legs", () => {
+    // המלצות ישנות: wing_pct top-level חסר אך selected_curve_row.wing_pct=1.0 (נפתר ב-data.ts),
+    // וה-long strikes נרשמו → legsSource=recorded, wingPct=1.0.
+    const legs = resolveWingLegs({
+      ...short, recordedLongPut: 3940, recordedLongCall: 4160, maxLoss: -1569, wingPct: 1.0,
+    });
+    expect(legs.legsSource).toBe("recorded");
+    expect(legs.wingPct).toBe(1.0);
+    expect(legs.longPutStrike).toBe(3940);
   });
 });
