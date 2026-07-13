@@ -28,14 +28,31 @@
 - שגיאות שנבלעות מסוכנות — תמיד logging לפני return None/except.
 - העדף מצב נגזר (compute) על מצב מאוחסן (store) — מקור אמת אחד.
 
-## מנגנון המרווח האופטימלי (בבנייה — שלב 3 הבא)
+## מנגנון המרווח האופטימלי — ✅ הושלם (שלבים 1–6)
 מנוע לבחירת רוחב ה-Short Iron Condor האופטימלי לפקיעה קרובה. מודולים טהורים (אפס UI/DB):
+- `src/payoff.py` — פרימיטיב ה-P&L של ה-condor (4 רגליים).
 - `src/margin_calculator.py` — עקומת המרווח: לכל מרווח בגריד (1.0–3.0%) בוחר strikes אמיתיים
-  מהשרשרת ומחשב פרמיה, max_loss, breakevens ו-P&L (`margin_pnl`). עוטף את `payoff.py`.
-- `src/move_distribution.py` — התפלגות התנועות ההיסטורית + `hold_probability` (P להחזקה בטווח),
-  `expected_value_curve` (EV עם avg_loss אמיתי דרך `margin_pnl`, לא max_loss), ו-conditioning
-  שעוטף את `find_similar_expiries` (סוג+חודש+תנועה קודמת).
-- הבא (שלב 3): לוגיקת בחירת המרווח מתוך העקומה, ואז שכבת ולידציה.
+  מהשרשרת ומחשב פרמיה, max_loss, breakevens ו-P&L (`margin_pnl`).
+- `src/move_distribution.py` — התפלגות התנועות ההיסטורית + `hold_probability`, `expected_value_curve`
+  (EV עם avg_loss אמיתי דרך `margin_pnl`, לא max_loss), ו-conditioning שעוטף את `find_similar_expiries`.
+- `src/margin_selector.py` — בחירת המרווח האופטימלי מתוך העקומה.
+- `src/margin_validator.py` + `src/margin_backtest.py` — שכבת ולידציה + backtest היסטורי של המנגנון.
+- `src/margin_recorder.py` — רישום ההמלצות ל-`margin_recommendations` (Action יומי, idempotent).
+
+## שכבת "המנוע מול המציאות" (גשרים 1–2) — ✅ הושלם
+- `src/decision_recorder.py` (גשר 1) — רושם החלטות מנוע ל-`decision_log`.
+- `src/decision_validator.py` (גשר 2) — hit-rate / regret מול ה-P&L האמיתי. **guard:** מצרף רק את
+  6 האסטרטגיות המקוריות (`BENCHMARK_STRATEGY_IDS`, strategy_id 1–6) — תיק ההמלצות (102) מוחרג
+  מ-best/hit/regret, בצד Python וגם ב-TS (`web/src/lib/validationMath.ts` + השאילתות ב-`data.ts`).
+
+## גשר 3 — מסחר-לפי-המלצות (דמו) — ✅ הושלם וחי ב-main
+- `src/recommendation_trader.py` — `open_recommended_condor` פותח Short Iron Condor דמו בתיק
+  ההמלצות לפי ההמלצה האחרונה. הגנות: **kill-switch** (`RECO_TRADING_ENABLED`, דלוק), **דדופ**
+  (עסקה אחת לפקיעה בתיק), **שער מרחק-לפקיעה** (`min_days_to_expiry=1` — מדלג על פקיעת אותו-יום;
+  מחר עדיין נפתח), ו-strategy_id ייעודי **102** (מבודד מ-decision_validator).
+- **תיק ההמלצות:** id=8, "המלצות המערכת — Iron Condor" (הון 100k, עמלה 2.5). אל תיגע ב-6 התיקים
+  הקיימים (ids 2–7) — benchmark קבוע.
+- מחובר ל-Action היומי `auto_record_margins` (`scripts/auto_record_margins.py::_open_reco_trades`).
 
 ## סביבה
 - repo: ta35-dashboard. נתיב מקומי: ~/Projects/ta35-dashboard/ta35-dashboard/ (הועבר מ-~/Desktop בגלל חסימות TCC של macOS)

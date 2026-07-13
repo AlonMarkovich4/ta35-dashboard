@@ -204,6 +204,7 @@ ta35-dashboard/
 | תאריך | מה עשינו | הבא |
 |-------|----------|-----|
 | 18/05/2026 | הגדרת מטרות, ניתוח קבצים, גיבוש ארכיטקטורה, כתיבת תוכנית עבודה | Milestone 1.1 — הקמת סביבה |
+| 14/07/2026 | מנגנון המרווח הושלם (שלבים 1–6) + גשר 3 (מסחר-לפי-המלצות דמו) חי ב-main; guard על שכבת הוולידציה; שדרוג גרסאות Actions (checkout@v5 / setup-python@v6) | ניטור ההמלצות והעסקאות; המשך פרודקשן |
 
 ---
 
@@ -226,3 +227,33 @@ ta35-dashboard/
 | `derivativesall.csv` | שרשרת אופציות מלאה | `data/current/` |
 | `putvscall.csv` | Call vs Put לפי סטרייק | `data/current/` |
 | `PROJECT_WORKPLAN.md` | הקובץ הזה | שורש הפרויקט |
+
+---
+
+## 10. מנגנון המרווח האופטימלי + מסחר-לפי-המלצות — ✅ הושלם (14/07/2026)
+
+מעבר ל-6 האסטרטגיות ההיסטוריות, נבנה מנוע לבחירת רוחב ה-Short Iron Condor האופטימלי לפקיעה
+קרובה, לצד שכבת "המנוע מול המציאות" ומסחר-דמו אוטומטי מבוקר.
+
+### מנגנון המרווח (שלבים 1–6) — הושלם
+- `src/payoff.py` — פרימיטיב P&L ל-condor (4 רגליים).
+- `src/margin_calculator.py` — עקומת המרווח (גריד 1.0–3.0%): strikes אמיתיים, פרמיה, max_loss, P&L.
+- `src/move_distribution.py` — התפלגות תנועות היסטורית + hold_probability + EV curve + conditioning.
+- `src/margin_selector.py` — בחירת המרווח האופטימלי מהעקומה.
+- `src/margin_validator.py` + `src/margin_backtest.py` — ולידציה + backtest היסטורי.
+- `src/margin_recorder.py` — רישום יומי ל-`margin_recommendations` (Action, idempotent).
+
+### שכבת "המנוע מול המציאות" (גשרים 1–2) — הושלם
+- `decision_recorder.py` רושם החלטות מנוע; `decision_validator.py` מחשב hit-rate / regret מול ה-P&L האמיתי.
+- **guard:** רק 6 האסטרטגיות המקוריות (strategy_id 1–6) נספרות; תיק ההמלצות (102) מוחרג —
+  בצד Python וגם ב-Web (TS: `validationMath.ts` + השאילתות ב-`data.ts`).
+
+### גשר 3 — מסחר-לפי-המלצות (דמו) — הושלם וחי ב-main
+- `recommendation_trader.py` פותח Short Iron Condor דמו לפי ההמלצה האחרונה, מוגן ב: kill-switch
+  (`RECO_TRADING_ENABLED`, **דלוק**), דדופ (עסקה אחת לפקיעה), שער מרחק-לפקיעה
+  (`min_days_to_expiry=1` — מדלג על פקיעת אותו-יום; מחר עדיין נפתח), ו-strategy_id ייעודי 102.
+- **תיק ההמלצות:** id=8 ("המלצות המערכת — Iron Condor"). 6 התיקים הקיימים (2–7) נותרו benchmark קבוע.
+- מחובר ל-Action `auto_record_margins`. ריצה חיה אומתה: רישום→דדופ, ניסיון פתיחה→דילוג (כל הזכאיות כבר פתוחות).
+
+### בדיקות
+- **969** בדיקות pytest עוברות; **75** בדיקות vitest (Web) עוברות.
