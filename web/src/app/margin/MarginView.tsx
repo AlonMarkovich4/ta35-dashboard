@@ -1,14 +1,14 @@
-import { Fragment } from "react";
 import { Panel } from "@/components/ui/Panel";
 import { Kpi } from "@/components/ui/Kpi";
 import { AccordionItem } from "@/components/ui/Accordion";
 import { Empty } from "@/components/ui/Empty";
 import { Disclaimer } from "@/components/ui/Disclaimer";
 import { Spark, Target } from "@/components/icons";
-import { pct, pctFrac, ils, en, money } from "@/lib/format";
+import { pct, pctFrac } from "@/lib/format";
+import { LiveRecommendations } from "./LiveRecommendations";
 import type { MarginData } from "@/lib/data";
 
-// מרווח באחוזים (1.75 → "1.75%"); פער חתום (+1.00% / -1.00%); מקור התנועה בעברית.
+// פער חתום (+1.00% / -1.00%); מקור התנועה בעברית.
 const gapFmt = (v: number | null) => (v == null ? "—" : `${v > 0 ? "+" : ""}${v.toFixed(2)}%`);
 const MOVE_SOURCE: Record<string, string> = {
   expiry_history: "היסטוריה",
@@ -31,98 +31,8 @@ export function MarginView({ data }: { data: MarginData }) {
         שהביטחון המשוקלל שלו עומד בסף (floor 97%) — האיזון בין פרמיה לעקביות. כלי מחקר בלבד, לא ייעוץ.
       </div>
 
-      {/* ── חלק 1: ההמלצות החיות ── */}
-      <div className="space-y-4">
-        <div>
-          <h2 className="flex items-center gap-2 text-lg font-bold tracking-tight">
-            <Target className="text-accent" /> ההמלצות החיות
-          </h2>
-          <p className="mt-0.5 text-xs text-text3">
-            ההמלצה האחרונה לכל פקיעה קרובה (גרסה margin-v1.1). כל שורה = טרפז מלא של 4 רגליים:
-            מכירת 2 רגליים (short) וקניית 2 הגנות (long) במרחק הכנף מעבר לרגל המכורה — הכנף הרשמית 0.75%.
-          </p>
-        </div>
-
-        {live.length === 0 ? (
-          <Empty title="אין המלצות חיות" hint="ההמלצות מתועדות אוטומטית לפקיעות הקרובות." />
-        ) : (
-          <Panel>
-            <div className="overflow-x-auto">
-              <table className="w-full text-right text-sm">
-                <thead>
-                  <tr className="text-xs text-text3">
-                    <th className="pb-2 font-medium">פקיעה</th>
-                    <th className="pb-2 font-medium">מרווח מומלץ</th>
-                    <th className="pb-2 font-medium">hold משוקלל</th>
-                    <th className="pb-2 font-medium">hold מותנה</th>
-                    <th className="pb-2 font-medium">hold גלובלי</th>
-                    <th className="pb-2 font-medium">פרמיה צפויה</th>
-                    <th className="pb-2 font-medium">מכור (short)</th>
-                    <th className="pb-2 font-medium">קנה (long)</th>
-                    <th className="pb-2 font-medium">כנף</th>
-                    <th className="pb-2 font-medium">הפסד-מקס</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {live.map((r, i) => (
-                    <Fragment key={i}>
-                      <tr className="border-t border-border">
-                        <td className="py-2.5 tabular-nums text-text2" dir="ltr">{r.expiry}</td>
-                        <td className="py-2.5">
-                          <span className="text-base font-bold tabular-nums text-accent">
-                            {pct(r.marginPct, 2)}
-                          </span>
-                          {r.belowFloor && (
-                            <span className="mr-2 rounded-md bg-warn/15 px-1.5 py-0.5 text-[10px] font-semibold text-warn">
-                              מתחת לסף
-                            </span>
-                          )}
-                        </td>
-                        <td className="py-2.5 tabular-nums font-semibold text-text1">
-                          {pctFrac(r.holdBlended, 1)}
-                        </td>
-                        <td className="py-2.5 tabular-nums text-text2">
-                          {pctFrac(r.holdConditional, 1)}
-                          <span className="text-[11px] text-text3"> (n={r.nConditional ?? "—"})</span>
-                        </td>
-                        <td className="py-2.5 tabular-nums text-text2">{pctFrac(r.holdGlobal, 1)}</td>
-                        <td className="py-2.5 tabular-nums text-text1" dir="ltr">{ils(r.premiumIls)}</td>
-                        <td className="py-2.5 tabular-nums text-text2" dir="ltr">
-                          {en(r.shortPutStrike)}P / {en(r.shortCallStrike)}C
-                        </td>
-                        <td className="py-2.5 tabular-nums text-text2" dir="ltr">
-                          {r.legsSource === "none" ? (
-                            "—"
-                          ) : (
-                            <>
-                              {en(r.longPutStrike)}P / {en(r.longCallStrike)}C
-                              {r.legsSource === "computed" && (
-                                <span className="text-[10px] text-text3"> (מחושב)</span>
-                              )}
-                            </>
-                          )}
-                        </td>
-                        <td className="py-2.5 tabular-nums text-text2">{pct(r.wingPct, 2)}</td>
-                        <td className="py-2.5 tabular-nums text-neg" dir="ltr">{money(r.maxLoss)}</td>
-                      </tr>
-                      {r.reason && (
-                        <tr>
-                          <td colSpan={10} className="pb-3 pt-0 text-xs text-text3">
-                            ➜ {r.reason}
-                          </td>
-                        </tr>
-                      )}
-                    </Fragment>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-            <div className="mt-2 text-xs text-text3">
-              מוצגות {live.length} פקיעות קרובות · עודכן לאחרונה {live[0]?.recommendedAt}
-            </div>
-          </Panel>
-        )}
-      </div>
+      {/* ── חלק 1: ההמלצות החיות (טבלה נלחצת + גרף Payoff) ── */}
+      <LiveRecommendations live={live} />
 
       {/* ── חלק 2: ולידציית המרווח ── */}
       <div className="space-y-4">
@@ -222,6 +132,11 @@ export function MarginView({ data }: { data: MarginData }) {
             <b className="text-text1">hold (משוקלל / מותנה / גלובלי):</b> ההסתברות ההיסטורית
             שהתנועה תישאר בתוך המרווח. מותנה = פקיעות דומות (סוג + תנועה קודמת); גלובלי = כל
             ההיסטוריה מאותו סוג; משוקלל = השילוב (משקל המותנה קטן כשהמדגם קטן).
+          </li>
+          <li>
+            <b className="text-text1">4 הרגליים והכנף:</b> מכירת short put/call (הרגל המכורה) וקניית
+            long put/call כהגנה, במרחק הכנף (הרשמית 0.75%) מעבר ל-short. הגרף מציג את הטרפז: רווח
+            הפרמיה בין ה-shorts, ירידה ליניארית עד ה-longs, והפסד-מקס מעבר להם.
           </li>
           <li>
             <b className="text-text1">החזיק / נשבר:</b> |תנועה בפועל| ≤ המרווח המומלץ — אותה הגדרה

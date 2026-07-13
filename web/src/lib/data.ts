@@ -695,6 +695,7 @@ export type MarginLiveRow = {
   expiry: string;        // dd/mm/yyyy
   expiryIso: string;     // yyyy-mm-dd
   recommendedAt: string; // yyyy-mm-dd HH:MM:SS (Asia/Jerusalem)
+  baseIndex: number | null; // מדד הבסיס בזמן ההמלצה — לסמן ה"מדד הנוכחי" בגרף ה-payoff
   marginPct: number | null;
   holdBlended: number | null;
   holdConditional: number | null;
@@ -852,6 +853,7 @@ export async function getMarginData(): Promise<MarginData> {
         expiry: fmtDate(key),
         expiryIso: key,
         recommendedAt: fmtDateTime(r.recommendedAt as string | Date),
+        baseIndex: r.baseIndex,
         marginPct: r.marginPct,
         holdBlended: r.holdBlended,
         holdConditional: r.holdConditional,

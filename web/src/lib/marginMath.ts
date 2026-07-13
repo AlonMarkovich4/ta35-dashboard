@@ -211,3 +211,77 @@ export function resolveWingLegs(input: {
   }
   return { longPutStrike: null, longCallStrike: null, maxLoss, wingPct, legsSource: "none" };
 }
+
+// ─── גיאומטריית ה-Payoff (הטרפז) — לגרף הוויזואלי ────────────────────────
+
+export type PayoffPoint = { x: number; y: number }; // x = ערך המדד בפקיעה, y = ₪
+
+export type PayoffGeometry = {
+  line: PayoffPoint[]; // עקומת ה-payoff, 6 קודקודים (שטוח→עולה→שטוח→יורד→שטוח)
+  breakevenDown: number; // מדד שבו ה-P&L חוצה 0 בצד ה-put
+  breakevenUp: number; // ובצד ה-call
+  xMin: number; // טווח ציר X מומלץ (עם שוליים משני הצדדים)
+  xMax: number;
+  yMin: number; // = maxLoss (₪)
+  yMax: number; // = netPremium (₪)
+  strikes: { longPut: number; shortPut: number; shortCall: number; longCall: number };
+  netPremium: number;
+  maxLoss: number;
+};
+
+// בונה את קודקודי הטרפז מ-4 ה-strikes + premium + maxLoss, ומחשב breakevens.
+// payoff(S): maxLoss מתחת ל-long_put → עולה ליניארית ל-net_premium ב-short_put → שטוח
+// (premium) בין ה-shorts → יורד ל-maxLoss ב-long_call → maxLoss מעליו. מחזיר null אם חסרים
+// נתונים / סדר strikes לא תקין / פרמיה לא-חיובית — המלצה ישנה בלי legs → אין גרף.
+export function buildPayoffGeometry(input: {
+  longPutStrike: number | null;
+  shortPutStrike: number | null;
+  shortCallStrike: number | null;
+  longCallStrike: number | null;
+  netPremium: number | null;
+  maxLoss: number | null;
+}): PayoffGeometry | null {
+  const LP = input.longPutStrike;
+  const SP = input.shortPutStrike;
+  const SC = input.shortCallStrike;
+  const LC = input.longCallStrike;
+  const P = input.netPremium;
+  const ML = input.maxLoss;
+  if ([LP, SP, SC, LC, P, ML].some((v) => v == null || !Number.isFinite(v))) return null;
+  // אחרי הבדיקה כולם מספרים סופיים
+  if (!(LP! < SP! && SP! < SC! && SC! < LC!)) return null; // סדר strikes
+  if (!(P! > 0 && ML! < 0)) return null; // פרמיה חיובית, הפסד שלילי
+
+  const lp = LP!, sp = SP!, sc = SC!, lc = LC!, prem = P!, ml = ML!;
+  const spread = lc - lp;
+  const pad = spread * 0.18; // שוליים כדי שכל הטרפז + מעט מעבר לו ייראו
+  const xMin = lp - pad;
+  const xMax = lc + pad;
+
+  const line: PayoffPoint[] = [
+    { x: xMin, y: ml },
+    { x: lp, y: ml },
+    { x: sp, y: prem },
+    { x: sc, y: prem },
+    { x: lc, y: ml },
+    { x: xMax, y: ml },
+  ];
+
+  // breakevens = חיתוך הקו הליניארי עם y=0. denom = prem − ml = prem + |ml| > 0.
+  const denom = prem - ml;
+  const breakevenDown = lp + (-ml) * (sp - lp) / denom;
+  const breakevenUp = sc + prem * (lc - sc) / denom;
+
+  return {
+    line,
+    breakevenDown,
+    breakevenUp,
+    xMin,
+    xMax,
+    yMin: ml,
+    yMax: prem,
+    strikes: { longPut: lp, shortPut: sp, shortCall: sc, longCall: lc },
+    netPremium: prem,
+    maxLoss: ml,
+  };
+}

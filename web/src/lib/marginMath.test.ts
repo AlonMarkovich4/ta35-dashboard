@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   asDateKey,
   buildMarginValidationRows,
+  buildPayoffGeometry,
   computeLongStrikes,
   optimalHindsight,
   pickLatestRecommendations,
@@ -228,5 +229,48 @@ describe("resolveWingLegs — recorded vs computed vs none", () => {
     expect(legs.legsSource).toBe("recorded");
     expect(legs.wingPct).toBe(1.0);
     expect(legs.longPutStrike).toBe(3940);
+  });
+});
+
+describe("buildPayoffGeometry — trapezoid vertices + breakevens", () => {
+  // ערכי _exact_chain מהבדיקות של Python: long 1940/2060, short 1960/2040, prem 750, ml -250.
+  const legs = {
+    longPutStrike: 1940, shortPutStrike: 1960, shortCallStrike: 2040, longCallStrike: 2060,
+    netPremium: 750, maxLoss: -250,
+  };
+
+  it("builds the 6-vertex trapezoid with correct plateau + wings", () => {
+    const g = buildPayoffGeometry(legs)!;
+    expect(g).not.toBeNull();
+    expect(g.line).toHaveLength(6);
+    // הפלטו (premium) בין ה-shorts; המקסימום-הפסד ב-longs.
+    expect(g.line[1]).toEqual({ x: 1940, y: -250 });
+    expect(g.line[2]).toEqual({ x: 1960, y: 750 });
+    expect(g.line[3]).toEqual({ x: 2040, y: 750 });
+    expect(g.line[4]).toEqual({ x: 2060, y: -250 });
+    expect(g.yMin).toBe(-250);
+    expect(g.yMax).toBe(750);
+    // שוליים: 0.18 × (2060−1940)=21.6 מכל צד.
+    expect(g.xMin).toBeCloseTo(1918.4, 5);
+    expect(g.xMax).toBeCloseTo(2081.6, 5);
+  });
+
+  it("computes breakevens where the line crosses 0 (matches Python 1945 / 2055)", () => {
+    const g = buildPayoffGeometry(legs)!;
+    expect(g.breakevenDown).toBeCloseTo(1945, 6); // 1940 + 250·20/1000
+    expect(g.breakevenUp).toBeCloseTo(2055, 6);   // 2040 + 750·20/1000
+  });
+
+  it("returns null for an old recommendation without long strikes (no chart)", () => {
+    expect(buildPayoffGeometry({ ...legs, longPutStrike: null, longCallStrike: null })).toBeNull();
+  });
+
+  it("returns null on invalid strike ordering", () => {
+    expect(buildPayoffGeometry({ ...legs, shortPutStrike: 2050 })).toBeNull(); // sp > sc
+  });
+
+  it("returns null on non-positive premium or non-negative max loss", () => {
+    expect(buildPayoffGeometry({ ...legs, netPremium: 0 })).toBeNull();
+    expect(buildPayoffGeometry({ ...legs, maxLoss: 5 })).toBeNull();
   });
 });
