@@ -28,7 +28,8 @@ from paper_trading import (
     build_track_record,
     build_trade_payoff_curve,
     close_matured_expiry,
-    compute_balance,
+    compute_open_exposure,
+    compute_realized,
     group_trades_by_portfolio,
     nearest_expiry,
     open_trades_for_expiry,
@@ -164,7 +165,11 @@ def _render_summary_cards(
     current: float,
     commission: float,
 ) -> None:
-    """שורת כרטיסי סיכום (5 עמודות)."""
+    """שורת כרטיסי סיכום (6 עמודות).
+
+    current = שווי *ממומש* (compute_realized) — לכן pnl כאן הוא תשואה ממומשת.
+    החשיפה הפתוחה מוצגת ככרטיס נפרד ולא מתערבבת בתשואה.
+    """
     pnl      = current - initial
     pnl_pct  = (pnl / initial * 100) if initial > 0 else 0.0
     total_t  = len(trades)
@@ -174,21 +179,39 @@ def _render_summary_cards(
 
     sign = _sign(pnl)
 
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("שווי נוכחי", f"₪{current:,.0f}")
+    # החשיפה הפתוחה מוצגת בנפרד — הפרמיה שנגבתה עליה אינה רווח עד הסגירה.
+    exposure = compute_open_exposure(trades)
+
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
+    c1.metric("שווי ממומש", f"₪{current:,.0f}", help="הון התחלתי + P&L של עסקאות סגורות בלבד")
     c2.metric(
-        "תשואה כוללת",
+        "תשואה ממומשת",
         f"{sign}₪{abs(pnl):,.0f}",
         delta=f"{sign}{pnl_pct:.1f}%",
         delta_color="normal",
+        help=f"עסקאות סגורות בלבד ({len(closed)}). פוזיציות פתוחות אינן נספרות.",
     )
-    c3.metric("עסקאות סה״כ", total_t)
-    c4.metric(
+    if exposure["cash_flow"] >= 0:
+        exp_help = f"פרמיה שנגבתה וטרם מומשה: ₪{exposure['cash_flow']:,.0f}"
+    else:
+        exp_help = f"עלות ששולמה וטרם מומשה: ₪{abs(exposure['cash_flow']):,.0f}"
+    if exposure["at_risk"] > 0:
+        exp_help += f" · הפסד תיאורטי מרבי: ₪{exposure['at_risk']:,.0f}"
+    c3.metric("פוזיציות פתוחות", exposure["count"], help=exp_help)
+    c4.metric("עסקאות סה״כ", total_t)
+    c5.metric(
         "Win Rate בפועל",
         f"{win_rate:.0f}%" if win_rate is not None else "—",
         help=f"{wins} רווחיות מתוך {len(closed)} סגורות",
     )
-    c5.metric("עמלה לרגל", f"₪{commission:.1f}")
+    c6.metric("עמלה לרגל", f"₪{commission:.1f}")
+
+    if exposure["count"] > 0:
+        note = f"ℹ️ התשואה מציגה עסקאות סגורות בלבד. {exposure['count']} פוזיציות עדיין פתוחות"
+        if exposure["cash_flow"] > 0:
+            note += f", והפרמיה שנגבתה עליהן (₪{exposure['cash_flow']:,.0f}) אינה רווח — היא התחייבות פתוחה"
+        note += ". התוצאה שלהן תיכנס לתשואה רק בפקיעה."
+        st.caption(note)
 
 
 def _render_equity_curve(trades: list[dict], initial: float) -> None:
@@ -602,8 +625,9 @@ def _render_portfolio_detail(pid: int) -> None:
 
     name       = portfolio.get("name") or f"תיק #{pid}"
     initial    = float(portfolio.get("initial_balance") or 0)
-    # היתרה נגזרת מהעסקאות — מקור אמת אחד (לא נקראת מ-current_balance שב-DB).
-    current    = compute_balance(portfolio, trades)
+    # שווי ממומש בלבד — נגזר מהעסקאות הסגורות (לא נקרא מ-current_balance שב-DB).
+    # פוזיציה פתוחה (והפרמיה שנגבתה עליה) אינה נספרת כרווח עד הסגירה.
+    current    = compute_realized(portfolio, trades)
     _cpv       = portfolio.get("commission_per_leg")
     commission = float(_cpv if _cpv is not None else 2.5)
 
@@ -655,8 +679,8 @@ def _portfolio_card(p: dict, trades: list[dict]) -> None:
     open_count   = sum(1 for t in trades if t.get("status") == "open")
     closed_count = sum(1 for t in trades if t.get("status") == "closed")
 
-    # היתרה נגזרת מהעסקאות — מקור אמת אחד (לא נקראת מ-current_balance שב-DB).
-    current   = compute_balance(p, trades)
+    # שווי ממומש בלבד — נגזר מהעסקאות הסגורות (לא נקרא מ-current_balance שב-DB).
+    current   = compute_realized(p, trades)
     pnl       = current - initial
     pnl_pct   = (pnl / initial * 100) if initial > 0 else 0.0
     pnl_color = _pnl_color(pnl)
@@ -670,7 +694,7 @@ def _portfolio_card(p: dict, trades: list[dict]) -> None:
             {name}
           </div>
           <div style='display:flex;justify-content:space-between;margin-bottom:6px'>
-            <span style='color:#7a9ab8;font-size:0.85rem'>שווי נוכחי</span>
+            <span style='color:#7a9ab8;font-size:0.85rem'>שווי ממומש</span>
             <span style='color:#e0e6f0;font-weight:600'>₪{current:,.0f}</span>
           </div>
           <div style='display:flex;justify-content:space-between;margin-bottom:6px'>
@@ -678,7 +702,7 @@ def _portfolio_card(p: dict, trades: list[dict]) -> None:
             <span style='color:#c8d6e8'>₪{initial:,.0f}</span>
           </div>
           <div style='display:flex;justify-content:space-between;margin-bottom:6px'>
-            <span style='color:#7a9ab8;font-size:0.85rem'>תשואה</span>
+            <span style='color:#7a9ab8;font-size:0.85rem'>תשואה ממומשת</span>
             <span style='color:{pnl_color};font-weight:700'>
               {sign}₪{abs(pnl):,.0f}&nbsp;({sign}{pnl_pct:.1f}%)
             </span>

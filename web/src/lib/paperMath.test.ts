@@ -1,41 +1,78 @@
 import { describe, it, expect } from "vitest";
-import { computeBalance, parseLegs } from "@/lib/paperMath";
+import { computeRealized, computeOpenExposure, parseLegs } from "@/lib/paperMath";
 
-describe("computeBalance", () => {
-  it("subtracts entry cost + commission for open trades", () => {
-    expect(
-      computeBalance(100000, [{ status: "open", entry_cost: 2000, entry_commission: 10, pnl: null }]),
-    ).toBe(97990);
-  });
-
+describe("computeRealized", () => {
   it("adds pnl for closed trades (ignores their entry cost)", () => {
     expect(
-      computeBalance(100000, [{ status: "closed", entry_cost: 999, entry_commission: 999, pnl: 500 }]),
+      computeRealized(100000, [{ status: "closed", entry_cost: 999, entry_commission: 999, pnl: 500 }]),
     ).toBe(100500);
+  });
+
+  it("open trades contribute nothing — a paid debit is not a loss yet", () => {
+    expect(
+      computeRealized(100000, [{ status: "open", entry_cost: 2000, entry_commission: 10, pnl: null }]),
+    ).toBe(100000);
+  });
+
+  // רגרסיה: תיק ההמלצות (id=8) הציג +1,824₪ תשואה כשרק +40₪ מומשו — הפרמיה
+  // של 4 קונדורים פתוחים (entry_cost שלילי = זיכוי) נספרה כרווח לפני הסגירה.
+  it("does NOT book the premium of an open credit condor as profit", () => {
+    const recoPortfolio = [
+      { status: "closed", entry_cost: -60, entry_commission: 10, pnl: 40 },
+      { status: "open", entry_cost: -277, entry_commission: 10, pnl: null },
+      { status: "open", entry_cost: -387, entry_commission: 10, pnl: null },
+      { status: "open", entry_cost: -497, entry_commission: 10, pnl: null },
+      { status: "open", entry_cost: -663, entry_commission: 10, pnl: null },
+    ];
+    expect(computeRealized(100000, recoPortfolio)).toBe(100040); // ולא 101824
   });
 
   it("mixes open and closed trades", () => {
     expect(
-      computeBalance(100000, [
+      computeRealized(100000, [
         { status: "open", entry_cost: 1000, entry_commission: 5, pnl: null },
         { status: "closed", entry_cost: 0, entry_commission: 0, pnl: 300 },
       ]),
-    ).toBe(99295);
+    ).toBe(100300);
   });
 
-  it("ignores unknown statuses and treats null numbers as 0", () => {
+  it("ignores unknown statuses and treats null pnl as 0", () => {
     expect(
-      computeBalance(100000, [
+      computeRealized(100000, [
         { status: "skipped", entry_cost: 5000, entry_commission: 5000, pnl: 5000 },
-        { status: "open", entry_cost: null, entry_commission: null, pnl: null },
+        { status: "closed", entry_cost: null, entry_commission: null, pnl: null },
       ]),
     ).toBe(100000);
   });
 
   it("rounds to 4 decimals", () => {
     expect(
-      computeBalance(0, [{ status: "closed", entry_cost: null, entry_commission: null, pnl: 0.123456 }]),
+      computeRealized(0, [{ status: "closed", entry_cost: null, entry_commission: null, pnl: 0.123456 }]),
     ).toBe(0.1235);
+  });
+});
+
+describe("computeOpenExposure", () => {
+  it("reports a credit condor's collected premium as positive cash flow, net of commission", () => {
+    const e = computeOpenExposure([
+      { status: "open", entry_cost: -277, entry_commission: 10, pnl: null, max_loss: 1500 },
+      { status: "open", entry_cost: -387, entry_commission: 10, pnl: null, max_loss: 2000 },
+    ]);
+    expect(e).toEqual({ count: 2, cashFlow: 644, atRisk: 3500 }); // 277+387 − 20
+  });
+
+  it("reports a paid debit as negative cash flow", () => {
+    const e = computeOpenExposure([
+      { status: "open", entry_cost: 580, entry_commission: 10, pnl: null, max_loss: null },
+    ]);
+    expect(e).toEqual({ count: 1, cashFlow: -590, atRisk: 0 });
+  });
+
+  it("excludes closed trades entirely", () => {
+    const e = computeOpenExposure([
+      { status: "closed", entry_cost: -60, entry_commission: 10, pnl: 40, max_loss: 900 },
+    ]);
+    expect(e).toEqual({ count: 0, cashFlow: 0, atRisk: 0 });
   });
 });
 

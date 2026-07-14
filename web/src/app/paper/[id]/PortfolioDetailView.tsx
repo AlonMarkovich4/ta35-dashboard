@@ -69,9 +69,12 @@ export function PortfolioDetailView({
   const expiries = Array.from(new Set(detail.trades.map((t) => t.expiry)));
   const [expiry, setExpiry] = useState(expiries[expiries.length - 1] ?? "");
 
+  // תשואה = ממומשת בלבד (עסקאות סגורות). פוזיציה פתוחה — ובפרט הפרמיה שנגבתה
+  // עליה — אינה רווח עד שהעסקה נסגרת, ולכן מוצגת בכרטיס נפרד וללא צבע P&L.
   const pnl = detail.current - detail.initial;
   const pnlPct = detail.initial > 0 ? (pnl / detail.initial) * 100 : 0;
   const winRate = detail.closed > 0 ? Math.round((detail.wins / detail.closed) * 100) : 0;
+  const exp = detail.exposure;
 
   const filtered = statusF === "all" ? detail.trades : detail.trades.filter((t) => t.status === statusF);
   const dayTrades = detail.trades.filter((t) => t.expiry === expiry);
@@ -93,16 +96,43 @@ export function PortfolioDetailView({
       </div>
 
       {/* summary cards */}
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
-        <Kpi label="שווי נוכחי" value={`₪${en(detail.current)}`} />
-        <Kpi label="תשואה כוללת" value={money(pnl)} tone={pnlTone(pnl)} sub={`${pnl > 0 ? "+" : ""}${pnlPct.toFixed(1)}%`} subTone={pnlTone(pnl)} />
-        <Kpi label="עסקאות סה״כ" value={String(detail.total)} />
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+        <Kpi label="שווי ממומש" value={`₪${en(detail.current)}`} sub="הון התחלתי + עסקאות סגורות" />
+        <Kpi
+          label="תשואה ממומשת"
+          value={money(pnl)}
+          tone={pnlTone(pnl)}
+          sub={`${pnl > 0 ? "+" : ""}${pnlPct.toFixed(1)}% — ${detail.closed} עסקאות סגורות`}
+          subTone={pnlTone(pnl)}
+        />
+        <Kpi
+          label="פוזיציות פתוחות"
+          value={String(exp.count)}
+          sub={
+            exp.count === 0
+              ? "אין חשיפה פתוחה"
+              : exp.cashFlow >= 0
+                ? `פרמיה שנגבתה: ₪${en(exp.cashFlow)} — טרם מומשה`
+                : `עלות ששולמה: ₪${en(-exp.cashFlow)} — טרם מומשה`
+          }
+        />
+        <Kpi label="עסקאות סה״כ" value={String(detail.total)} sub={`${detail.closed} סגורות · ${exp.count} פתוחות`} />
         <Kpi label="Win Rate בפועל" value={`${winRate}%`} sub={`${detail.wins} מתוך ${detail.closed} סגורות`} />
         <Kpi label="עמלה לרגל" value={`₪${detail.commission.toFixed(1)}`} />
       </div>
 
+      {exp.count > 0 && (
+        <p className="rounded-xl border border-border bg-surface2/40 px-4 py-3 text-xs text-text2">
+          <span className="font-semibold text-text1">התשואה מציגה עסקאות סגורות בלבד.</span>{" "}
+          {exp.count} פוזיציות עדיין פתוחות
+          {exp.cashFlow > 0 && <> והפרמיה שנגבתה עליהן (₪{en(exp.cashFlow)}) אינה רווח — היא התחייבות פתוחה</>}
+          {exp.atRisk > 0 && <>, עם הפסד תיאורטי מרבי של ₪{en(exp.atRisk)}</>}
+          . התוצאה שלהן תיכנס לתשואה רק בפקיעה.
+        </p>
+      )}
+
       {/* equity */}
-      <Panel title={<span className="flex items-center gap-2"><Trending className="text-pos" /> עקומת שווי התיק</span>}>
+      <Panel title={<span className="flex items-center gap-2"><Trending className="text-pos" /> עקומת שווי התיק (ממומש)</span>}>
         {equity.points.length ? (
           <EquityCurve points={equity.points} initial={equity.initial} />
         ) : (

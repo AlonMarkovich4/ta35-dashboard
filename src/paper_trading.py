@@ -16,8 +16,14 @@ paper_trading.py — מנוע פתיחה וסגירה של עסקאות Paper Tr
   עסקה סגורה: ה-pnl כבר כולל את כל העלויות והעמלות → נספר רק ה-pnl (ללא כפילות).
   כך אי-אפשר שהיתרה תצא מסנכרון אם כתיבה כלשהי תיכשל.
 
+שווי ותשואה מוצגים *ממומש בלבד* (עסקאות סגורות). היתרה שמחזיר compute_balance()
+היא מזומן — היא כוללת את הפרמיה שנגבתה על פוזיציות פתוחות, ולכן אינה "שווי"
+ואינה "תשואה". ראה compute_realized() / compute_open_exposure().
+
 פונקציות ציבוריות:
-  compute_balance(portfolio, trades)                                   → float
+  compute_balance(portfolio, trades)                                   → float  (מזומן)
+  compute_realized(portfolio, trades)                                  → float  (שווי ממומש)
+  compute_open_exposure(trades)                                        → dict
   open_trades_for_expiry(expiry_date, chain, portfolios, engine=None)  → list[dict]
   close_trades_for_expiry(expiry_date, close_index, engine=None)       → list[dict]
   close_matured_expiry(expiry_date, engine=None)                       → dict
@@ -250,6 +256,12 @@ def compute_balance(portfolio: dict, trades: list[dict]) -> float:
     לכן עבורה נספר ה-pnl בלבד — לא מנכים שוב את עלות הכניסה (אין כפילות).
     עסקאות בסטטוס אחר (skipped/db_error/error) אינן משפיעות על היתרה.
     ערכי None מטופלים כ-0. מחזיר 0.0 אם portfolio ריק.
+
+    ⚠️ זהו מודל *מזומן* — לא שווי תיק ולא תשואה. אל תציג אותו כ"שווי נוכחי"
+    או כ"תשואה": עסקה פתוחה של Short Iron Condor נכנסת לכאן עם entry_cost
+    שלילי (זיכוי), ולכן הפרמיה שנגבתה מנפחת את היתרה לפני שהעסקה נסגרה —
+    כאילו כבר הרווחנו. לתצוגת שווי/תשואה השתמש ב-compute_realized(),
+    ולחשיפה הפתוחה ב-compute_open_exposure().
     """
     initial = float((portfolio or {}).get("initial_balance") or 0.0)
     balance = initial
@@ -262,6 +274,43 @@ def compute_balance(portfolio: dict, trades: list[dict]) -> float:
         elif status == "closed":
             balance += float(t.get("pnl") or 0.0)
     return round(balance, 4)
+
+
+def compute_realized(portfolio: dict, trades: list[dict]) -> float:
+    """שווי ממומש: initial_balance + Σ pnl של עסקאות סגורות בלבד.
+
+    זהו המספר שמוצג כ"שווי" ושממנו נגזרת התשואה. עסקה פתוחה אינה תורמת כלום:
+    הפרמיה שנגבתה עליה היא התחייבות פתוחה שעוד יכולה להתאדות (ואף להפוך להפסד
+    עד max_loss), ולכן אינה רווח עד הסגירה. ערכי None מטופלים כ-0.
+    """
+    initial = float((portfolio or {}).get("initial_balance") or 0.0)
+    equity = initial
+    for t in (trades or []):
+        if t.get("status") == "closed":
+            equity += float(t.get("pnl") or 0.0)
+    return round(equity, 4)
+
+
+def compute_open_exposure(trades: list[dict]) -> dict:
+    """חשיפה פתוחה — מוצגת בנפרד מה-P&L, לעולם לא מתווספת לתשואה.
+
+    מחזיר dict:
+      count     — כמה פוזיציות פתוחות
+      cash_flow — −Σ(entry_cost + entry_commission) של הפתוחות:
+                  חיובי = פרמיה שנגבתה, שלילי = עלות ששולמה. תזרים שכבר עבר
+                  בחשבון, אבל תוצאת העסקאות עדיין לא ידועה.
+      at_risk   — Σ|max_loss| של הפתוחות (0 כשלא ידוע) — ההפסד התיאורטי המרבי.
+    """
+    count = 0
+    cash_flow = 0.0
+    at_risk = 0.0
+    for t in (trades or []):
+        if t.get("status") != "open":
+            continue
+        count += 1
+        cash_flow -= float(t.get("entry_cost") or 0.0) + float(t.get("entry_commission") or 0.0)
+        at_risk += abs(float(t.get("max_loss") or 0.0))
+    return {"count": count, "cash_flow": round(cash_flow, 4), "at_risk": round(at_risk, 4)}
 
 
 def open_trades_for_expiry(
@@ -522,7 +571,9 @@ def build_equity_curve(
     """בונה עקומת שווי תיק מעסקאות סגורות.
 
     מחזיר list[{"ts": datetime, "balance": float}] ממוין כרונולוגית.
-    כל נקודה מייצגת את היתרה המצטברת אחרי סגירת עסקה.
+    הנקודה הראשונה היא נקודת הפתיחה (ההון ההתחלתי, בחותמת הזמן של הסגירה
+    הראשונה); בלעדיה עסקה סגורה בודדת נותנת נקודה יחידה שלא מציירת קו.
+    כל נקודה אחריה מייצגת את היתרה המצטברת אחרי סגירת עסקה.
     מחזיר [] אם אין עסקאות סגורות תקינות.
     """
     valid = [
@@ -536,7 +587,9 @@ def build_equity_curve(
 
     valid_sorted = sorted(valid, key=lambda t: _norm_ts(t["closed_at"]))
 
-    points: list[dict] = []
+    points: list[dict] = [
+        {"ts": _norm_ts(valid_sorted[0]["closed_at"]), "balance": round(float(initial_balance), 2)}
+    ]
     balance = initial_balance
     for t in valid_sorted:
         balance = round(balance + float(t["pnl"]), 2)

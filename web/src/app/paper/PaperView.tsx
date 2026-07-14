@@ -27,16 +27,25 @@ function Row({ k, v, cls = "text-text1" }: { k: string; v: React.ReactNode; cls?
 }
 
 function PortfolioCard({ p }: { p: PortfolioCardData }) {
+  // ממומש בלבד — פוזיציות פתוחות (והפרמיה שנגבתה עליהן) לא נספרות כתשואה.
   const pnl = p.current - p.initial;
   const pnlPct = p.initial > 0 ? (pnl / p.initial) * 100 : 0;
   const tone = pnlTone(pnl);
+  const exp = p.exposure;
   return (
     <Card className="border-t-2 border-t-accent/50 p-5">
       <div className="mb-3 text-base font-bold text-text1">{p.name}</div>
-      <Row k="שווי נוכחי" v={`₪${en(p.current)}`} cls="font-semibold text-text1" />
+      <Row k="שווי ממומש" v={`₪${en(p.current)}`} cls="font-semibold text-text1" />
       <Row k="שווי התחלתי" v={`₪${en(p.initial)}`} cls="text-text2" />
-      <Row k="תשואה" v={`${money(pnl)} (${pnl > 0 ? "+" : ""}${pnlPct.toFixed(1)}%)`} cls={`font-bold ${tone}`} />
+      <Row k="תשואה ממומשת" v={`${money(pnl)} (${pnl > 0 ? "+" : ""}${pnlPct.toFixed(1)}%)`} cls={`font-bold ${tone}`} />
       <Row k="עסקאות פתוחות / סגורות" v={`${p.open} / ${p.closed}`} cls="text-text2" />
+      {exp.count > 0 && (
+        <Row
+          k={exp.cashFlow >= 0 ? "פרמיה פתוחה (טרם מומשה)" : "עלות פתוחה (טרם מומשה)"}
+          v={`₪${en(Math.abs(exp.cashFlow))}`}
+          cls="text-text3"
+        />
+      )}
       <Row k="עמלה לרגל" v={`₪${p.commission.toFixed(1)}`} cls="text-text2" />
       <div className="mt-2 text-sm">
         <div className="text-text3">אסטרטגיות</div>

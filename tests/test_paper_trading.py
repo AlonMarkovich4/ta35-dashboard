@@ -34,6 +34,8 @@ from paper_trading import (
     close_matured_expiry,
     close_trades_for_expiry,
     compute_balance,
+    compute_open_exposure,
+    compute_realized,
     open_trades_for_expiry,
     summarize_closed_pnl,
 )
@@ -1083,6 +1085,73 @@ class TestNormTs:
         assert result.year == 2026
 
 
+# ─── compute_realized / compute_open_exposure — ממומש מול צף ───────────
+
+class TestComputeRealized:
+    _PF = {"initial_balance": 100_000.0}
+
+    def test_empty_returns_initial(self):
+        assert compute_realized(self._PF, []) == pytest.approx(100_000.0)
+        assert compute_realized(self._PF, None) == pytest.approx(100_000.0)
+        assert compute_realized({}, []) == pytest.approx(0.0)
+
+    def test_closed_trade_adds_pnl(self):
+        trades = [{"status": "closed", "entry_cost": 999.0, "entry_commission": 999.0, "pnl": 500.0}]
+        assert compute_realized(self._PF, trades) == pytest.approx(100_500.0)
+
+    def test_open_trade_contributes_nothing(self):
+        """עסקה פתוחה — לא רווח ולא הפסד, בשני כיווני ה-entry_cost."""
+        debit  = [{"status": "open", "entry_cost":  2000.0, "entry_commission": 10.0, "pnl": None}]
+        credit = [{"status": "open", "entry_cost": -2000.0, "entry_commission": 10.0, "pnl": None}]
+        assert compute_realized(self._PF, debit)  == pytest.approx(100_000.0)
+        assert compute_realized(self._PF, credit) == pytest.approx(100_000.0)
+
+    def test_open_credit_condor_premium_is_not_profit(self):
+        """רגרסיה: תיק ההמלצות (id=8) הציג תשואה של +1,824₪ בעוד שמומשו +40₪
+        בלבד — הפרמיה של 4 קונדורים פתוחים (entry_cost שלילי = זיכוי) נספרה
+        כרווח לפני הסגירה. compute_balance עדיין מחזיר את המזומן (101,824);
+        compute_realized חייב להחזיר רק את הממומש."""
+        trades = [
+            {"status": "closed", "entry_cost":  -60.0, "entry_commission": 10.0, "pnl": 40.0},
+            {"status": "open",   "entry_cost": -277.0, "entry_commission": 10.0, "pnl": None},
+            {"status": "open",   "entry_cost": -387.0, "entry_commission": 10.0, "pnl": None},
+            {"status": "open",   "entry_cost": -497.0, "entry_commission": 10.0, "pnl": None},
+            {"status": "open",   "entry_cost": -663.0, "entry_commission": 10.0, "pnl": None},
+        ]
+        assert compute_realized(self._PF, trades) == pytest.approx(100_040.0)
+        assert compute_balance(self._PF, trades)  == pytest.approx(101_824.0)  # מזומן — לא תשואה
+
+    def test_other_statuses_ignored(self):
+        trades = [{"status": "skipped", "entry_cost": 5000.0, "entry_commission": 5000.0, "pnl": 5000.0}]
+        assert compute_realized(self._PF, trades) == pytest.approx(100_000.0)
+
+
+class TestComputeOpenExposure:
+    def test_empty(self):
+        assert compute_open_exposure([]) == {"count": 0, "cash_flow": 0.0, "at_risk": 0.0}
+        assert compute_open_exposure(None) == {"count": 0, "cash_flow": 0.0, "at_risk": 0.0}
+
+    def test_open_credit_reports_positive_cash_flow_net_of_commission(self):
+        trades = [
+            {"status": "open", "entry_cost": -277.0, "entry_commission": 10.0, "max_loss": 1500.0},
+            {"status": "open", "entry_cost": -387.0, "entry_commission": 10.0, "max_loss": 2000.0},
+        ]
+        assert compute_open_exposure(trades) == {
+            "count": 2, "cash_flow": pytest.approx(644.0), "at_risk": pytest.approx(3500.0),
+        }
+
+    def test_open_debit_reports_negative_cash_flow(self):
+        trades = [{"status": "open", "entry_cost": 580.0, "entry_commission": 10.0, "max_loss": None}]
+        assert compute_open_exposure(trades) == {
+            "count": 1, "cash_flow": pytest.approx(-590.0), "at_risk": pytest.approx(0.0),
+        }
+
+    def test_closed_trades_excluded(self):
+        trades = [{"status": "closed", "entry_cost": -60.0, "entry_commission": 10.0, "pnl": 40.0,
+                   "max_loss": 900.0}]
+        assert compute_open_exposure(trades) == {"count": 0, "cash_flow": 0.0, "at_risk": 0.0}
+
+
 # ─── build_equity_curve ────────────────────────────────────────────────
 
 def _closed_trade(trade_id: int, pnl: float, closed_at: datetime,
@@ -1112,12 +1181,15 @@ class TestBuildEquityCurve:
         trades = [{"id": 1, "status": "closed", "pnl": 500.0, "closed_at": None}]
         assert build_equity_curve(trades, 100_000) == []
 
-    def test_single_closed_trade_accumulates(self):
+    def test_starts_with_opening_anchor_at_initial(self):
+        """נקודה ראשונה = ההון ההתחלתי. בלעדיה עסקה סגורה בודדת נותנת נקודה
+        יחידה, ובגרף אזור (area) היא מתנוונת למשולש סביב הנקודה."""
         trades = [_closed_trade(1, 500.0, datetime(2026, 5, 29, 10, 0))]
         result = build_equity_curve(trades, 100_000)
-        assert len(result) == 1
-        assert result[0]["balance"] == pytest.approx(100_500.0)
-        assert result[0]["ts"] == datetime(2026, 5, 29, 10, 0)
+        assert len(result) == 2
+        assert result[0]["balance"] == pytest.approx(100_000.0)   # עוגן פתיחה
+        assert result[1]["balance"] == pytest.approx(100_500.0)
+        assert result[1]["ts"] == datetime(2026, 5, 29, 10, 0)
 
     def test_multiple_trades_accumulate_correctly(self):
         trades = [
@@ -1126,10 +1198,11 @@ class TestBuildEquityCurve:
             _closed_trade(3,  800.0, datetime(2026, 6,  5, 10)),
         ]
         result = build_equity_curve(trades, 100_000)
-        assert len(result) == 3
-        assert result[0]["balance"] == pytest.approx(100_500.0)   # +500
-        assert result[1]["balance"] == pytest.approx(100_300.0)   # -200
-        assert result[2]["balance"] == pytest.approx(101_100.0)   # +800
+        assert len(result) == 4                                   # עוגן + 3 עסקאות
+        assert result[0]["balance"] == pytest.approx(100_000.0)   # עוגן
+        assert result[1]["balance"] == pytest.approx(100_500.0)   # +500
+        assert result[2]["balance"] == pytest.approx(100_300.0)   # -200
+        assert result[3]["balance"] == pytest.approx(101_100.0)   # +800
 
     def test_sorted_chronologically(self):
         """מבטיח שהנקודות ממוינות לפי closed_at גם אם הקלט לא מסודר."""
@@ -1139,9 +1212,9 @@ class TestBuildEquityCurve:
             _closed_trade(2, -50.0, datetime(2026, 5, 29, 10)),
         ]
         result = build_equity_curve(trades, 100_000)
-        assert result[0]["ts"] == datetime(2026, 5, 22, 10)
-        assert result[1]["ts"] == datetime(2026, 5, 29, 10)
-        assert result[2]["ts"] == datetime(2026, 6,  5, 10)
+        assert result[1]["ts"] == datetime(2026, 5, 22, 10)
+        assert result[2]["ts"] == datetime(2026, 5, 29, 10)
+        assert result[3]["ts"] == datetime(2026, 6,  5, 10)
 
     def test_open_trades_excluded(self):
         """עסקאות פתוחות לא נכללות בעקומה."""
@@ -1150,22 +1223,22 @@ class TestBuildEquityCurve:
             {"id": 2, "status": "open", "pnl": 999.0, "closed_at": datetime(2026, 5, 23, 10)},
         ]
         result = build_equity_curve(trades, 100_000)
-        assert len(result) == 1
-        assert result[0]["balance"] == pytest.approx(100_500.0)
+        assert len(result) == 2                                   # עוגן + הסגורה בלבד
+        assert result[-1]["balance"] == pytest.approx(100_500.0)
 
     def test_string_timestamp_normalized(self):
         """closed_at כ-string מטופל נכון."""
         trades = [{"id": 1, "status": "closed", "pnl": 300.0,
                    "closed_at": "2026-05-29T10:00:00"}]
         result = build_equity_curve(trades, 100_000)
-        assert len(result) == 1
-        assert isinstance(result[0]["ts"], datetime)
-        assert result[0]["balance"] == pytest.approx(100_300.0)
+        assert len(result) == 2
+        assert isinstance(result[-1]["ts"], datetime)
+        assert result[-1]["balance"] == pytest.approx(100_300.0)
 
     def test_negative_pnl_decreases_balance(self):
         trades = [_closed_trade(1, -1500.0, datetime(2026, 5, 29, 10))]
         result = build_equity_curve(trades, 100_000)
-        assert result[0]["balance"] == pytest.approx(98_500.0)
+        assert result[-1]["balance"] == pytest.approx(98_500.0)
 
     def test_mixed_open_closed_skipped(self):
         trades = [
@@ -1175,9 +1248,10 @@ class TestBuildEquityCurve:
             _closed_trade(4, -100.0, datetime(2026, 5, 27, 10)),
         ]
         result = build_equity_curve(trades, 50_000)
-        assert len(result) == 2
-        assert result[0]["balance"] == pytest.approx(50_200.0)
-        assert result[1]["balance"] == pytest.approx(50_100.0)
+        assert len(result) == 3                                   # עוגן + 2 סגורות
+        assert result[0]["balance"] == pytest.approx(50_000.0)
+        assert result[1]["balance"] == pytest.approx(50_200.0)
+        assert result[2]["balance"] == pytest.approx(50_100.0)
 
 
 # ─── build_track_record ────────────────────────────────────────────────

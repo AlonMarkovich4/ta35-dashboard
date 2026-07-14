@@ -1,6 +1,9 @@
 import "server-only";
 import { sql } from "@/lib/db";
-import { computeBalance, parseLegs, type TradeLite, type LegData } from "@/lib/paperMath";
+import {
+  computeRealized, computeOpenExposure, parseLegs,
+  type TradeLite, type LegData, type OpenExposure,
+} from "@/lib/paperMath";
 import { findAtm } from "@/lib/chainMath";
 import {
   buildValidationRows,
@@ -259,7 +262,8 @@ export type PortfolioCardData = {
   id: number;
   name: string;
   initial: number;
-  current: number;   // מחושב לפי הנוסחה — לא current_balance
+  current: number;   // שווי ממומש = initial + Σ pnl של סגורות. פוזיציות פתוחות לא נספרות.
+  exposure: OpenExposure; // הפתוחות — מוצגות בנפרד, לא נכנסות לתשואה
   open: number;
   closed: number;
   commission: number;
@@ -276,9 +280,9 @@ export async function getPortfolios(): Promise<PortfolioCardData[]> {
       WHERE is_active IS DISTINCT FROM false
       ORDER BY id
     `;
-    const trades = await sql<TradeLite[]>`
+    const trades = await sql<(TradeLite & { max_loss: number | null })[]>`
       SELECT portfolio_id, strategy_name, expiry_date, status,
-             entry_cost, entry_commission, pnl, pnl_pct, closed_at
+             entry_cost, entry_commission, max_loss, pnl, pnl_pct, closed_at
       FROM paper_trades
     `;
     return ports.map((p) => {
@@ -288,7 +292,8 @@ export async function getPortfolios(): Promise<PortfolioCardData[]> {
         id: Number(p.id),
         name: p.name,
         initial: Number(p.initial_balance),
-        current: computeBalance(Number(p.initial_balance), mine),
+        current: computeRealized(Number(p.initial_balance), mine),
+        exposure: computeOpenExposure(mine),
         open: mine.filter((t) => t.status === "open").length,
         closed: mine.filter((t) => t.status === "closed").length,
         commission: Number(p.commission_per_leg ?? 0),
@@ -361,11 +366,17 @@ export async function getEquityCurve(portfolioId?: number): Promise<{ points: Eq
             )
           ORDER BY closed_at`;
 
+    // בלי עסקאות סגורות אין עקומה (ה-view מציג הודעה במקום גרף).
+    if (!rows.length) return { points: [], initial };
+
+    // נקודת פתיחה = ההון ההתחלתי. בלעדיה עסקה סגורה בודדת נותנת נקודה יחידה,
+    // וה-polygon של האזור מתנוון למשולש סביבה.
     let balance = initial;
-    const points = rows.map((r) => {
+    const points: EquityPoint[] = [{ label: "פתיחה", value: initial }];
+    for (const r of rows) {
       balance = Math.round((balance + Number(r.pnl)) * 100) / 100;
-      return { label: fmtDate(r.closed_at), value: balance };
-    });
+      points.push({ label: fmtDate(r.closed_at), value: balance });
+    }
     return { points, initial };
   }, { points: [], initial: 0 });
 }
@@ -426,6 +437,7 @@ export type TradeRowData = {
 export type PortfolioDetail = {
   id: number; name: string; strategies: string;
   initial: number; current: number; commission: number;
+  exposure: OpenExposure;
   total: number; wins: number; closed: number;
   trades: TradeRowData[];
 };
@@ -438,10 +450,10 @@ export async function getPortfolioDetail(id: number): Promise<PortfolioDetail | 
     if (!p) return null;
 
     const rows = await sql<
-      (TradeLite & { legs_json: unknown })[]
+      (TradeLite & { max_loss: number | null; legs_json: unknown })[]
     >`
       SELECT portfolio_id, strategy_name, expiry_date, status,
-             entry_cost, entry_commission, pnl, pnl_pct, closed_at, legs_json
+             entry_cost, entry_commission, max_loss, pnl, pnl_pct, closed_at, legs_json
       FROM paper_trades
       WHERE portfolio_id = ${id}
       ORDER BY opened_at DESC
@@ -455,7 +467,8 @@ export async function getPortfolioDetail(id: number): Promise<PortfolioDetail | 
       name: p.name,
       strategies: names.length ? names.join(", ") : "—",
       initial: Number(p.initial_balance),
-      current: computeBalance(Number(p.initial_balance), rows),
+      current: computeRealized(Number(p.initial_balance), rows),
+      exposure: computeOpenExposure(rows),
       commission: Number(p.commission_per_leg ?? 0),
       total: rows.length,
       wins: closedPnls.filter((t) => Number(t.pnl) > 0).length,

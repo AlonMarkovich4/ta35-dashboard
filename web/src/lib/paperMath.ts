@@ -12,20 +12,44 @@ export type TradeLite = {
   closed_at: string | null;
 };
 
-// יתרה נגזרת: initial − (עלות+עמלה של פתוחות) + Σ pnl של סגורות.
-export function computeBalance(
-  initial: number,
-  trades: Pick<TradeLite, "status" | "entry_cost" | "entry_commission" | "pnl">[],
-): number {
-  let balance = initial;
+const r4 = (v: number) => Math.round(v * 10000) / 10000;
+
+type PnlTrade = Pick<TradeLite, "status" | "entry_cost" | "entry_commission" | "pnl">;
+
+// P&L ממומש: Σ pnl של עסקאות סגורות בלבד.
+//
+// פוזיציה פתוחה לא תורמת כלום. במיוחד: הפרמיה שנגבתה על Short Iron Condor
+// (entry_cost שלילי = זיכוי) אינה רווח — היא התחייבות פתוחה שעוד יכולה
+// להימחק, ואף להפוך להפסד עד max_loss. לספור אותה כרווח לפני שהעסקה נסגרה
+// מנפח את התשואה. ראה computeOpenExposure להצגת הפוזיציות הפתוחות בנפרד.
+export function computeRealized(initial: number, trades: PnlTrade[]): number {
+  let equity = initial;
   for (const t of trades) {
-    if (t.status === "open") {
-      balance -= Number(t.entry_cost ?? 0) + Number(t.entry_commission ?? 0);
-    } else if (t.status === "closed") {
-      balance += Number(t.pnl ?? 0);
-    }
+    if (t.status === "closed") equity += Number(t.pnl ?? 0);
   }
-  return Math.round(balance * 10000) / 10000;
+  return r4(equity);
+}
+
+export type OpenExposure = {
+  count: number;    // כמה פוזיציות פתוחות
+  cashFlow: number; // תזרים בפועל על הפתוחות: חיובי = פרמיה שנגבתה, שלילי = עלות ששולמה
+  atRisk: number;   // סכום max_loss של הפתוחות (0 אם לא ידוע) — ההפסד התיאורטי המרבי
+};
+
+// חשיפה פתוחה — מוצגת בנפרד מה-P&L, אף פעם לא מתווספת לתשואה.
+// cashFlow = −Σ(entry_cost + עמלה) על הפתוחות: זהו התזרים שכבר עבר בחשבון,
+// אבל התוצאה של העסקאות האלה עדיין לא ידועה.
+export function computeOpenExposure(
+  trades: (PnlTrade & { max_loss?: number | null })[],
+): OpenExposure {
+  let count = 0, cashFlow = 0, atRisk = 0;
+  for (const t of trades) {
+    if (t.status !== "open") continue;
+    count += 1;
+    cashFlow -= Number(t.entry_cost ?? 0) + Number(t.entry_commission ?? 0);
+    atRisk += Math.abs(Number(t.max_loss ?? 0));
+  }
+  return { count, cashFlow: r4(cashFlow), atRisk: r4(atRisk) };
 }
 
 export type LegData = { action: string; type: string; strike: number; qty: number; pts: number; nis: number };
