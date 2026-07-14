@@ -100,6 +100,29 @@ describe("parseLegs", () => {
     expect(parseLegs([{ strike: 4100 }])[0].qty).toBe(1);
   });
 
+  // מחיר לא ידוע: 4 העסקאות הראשונות בתיק ההמלצות (30–34) נכתבו עם price_pts=0
+  // כי המחירים לא נשמרו. 0 אינו מחיר — הוא "לא ידוע", והתצוגה חייבת להראות "—".
+  it("maps a zero price to null (unknown), not 0", () => {
+    const raw = [{ action: "מכור", type: "Put", strike: 3980, qty: 1, price_pts: 0, price_nis: 0 }];
+    const leg = parseLegs(raw)[0];
+    expect(leg.pts).toBeNull();
+    expect(leg.nis).toBeNull();
+    expect(leg.strike).toBe(3980); // ה-strike עדיין נשמר
+  });
+
+  it("maps a missing price to null", () => {
+    const leg = parseLegs([{ action: "קנה", type: "Call", strike: 4150, qty: 1 }])[0];
+    expect(leg.pts).toBeNull();
+    expect(leg.nis).toBeNull();
+  });
+
+  it("keeps real prices as numbers", () => {
+    const raw = [{ action: "מכור", type: "Put", strike: 3980, qty: 1, price_pts: 6.5, price_nis: 325 }];
+    const leg = parseLegs(raw)[0];
+    expect(leg.pts).toBe(6.5);
+    expect(leg.nis).toBe(325);
+  });
+
   it("returns [] for non-array input", () => {
     expect(parseLegs({ not: "array" })).toEqual([]);
     expect(parseLegs(null)).toEqual([]);

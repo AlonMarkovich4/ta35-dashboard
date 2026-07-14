@@ -39,6 +39,7 @@ from paper_db import (
     get_trades,
     insert_trade,
 )
+from payoff import MULTIPLIER   # ₪ לנקודה — מקור אמת אחד (50), לא מספר קסם
 
 logger = logging.getLogger(__name__)
 
@@ -129,26 +130,48 @@ def _fetch_latest_recommendation(eng, exp_dt) -> dict | None:
         "max_loss":          num(rj.get("max_loss"), scr.get("max_loss")),
         "base_index":        num(rj.get("base_index"), scr.get("base_index")),
         "wing_pct":          num(rj.get("wing_pct"), scr.get("wing_pct")),
+        # מחיר כל רגל בנקודות — מה-chain שממנו חושבה הפרמיה (margin_calculator).
+        # None בהמלצות שנרשמו לפני שהמחירים נשמרו → הרגליים ייווצרו בלי מחיר,
+        # ולא עם 0.0 (0 הוא שקר: הוא אומר "האופציה לא שווה כלום").
+        "leg_prices": {
+            "long_put":   num(rj.get("long_put_price_pts"),   scr.get("long_put_price_pts")),
+            "short_put":  num(rj.get("short_put_price_pts"),  scr.get("short_put_price_pts")),
+            "short_call": num(rj.get("short_call_price_pts"), scr.get("short_call_price_pts")),
+            "long_call":  num(rj.get("long_call_price_pts"),  scr.get("long_call_price_pts")),
+        },
     }
 
 
 def _reco_legs(rec: dict) -> list[dict] | None:
     """4 רגלי ה-condor בפורמט strategy_legs_detail, מה-strikes של ההמלצה. None אם חסרות רגליים
-    (המלצה ישנה בלי long strikes) → אין עסקה. price_pts=0 (לא נשמר בהמלצה; תצוגה בלבד)."""
+    (המלצה ישנה בלי long strikes) → אין עסקה.
+
+    price_pts/price_nis נלקחים מההמלצה (leg_prices — המחירים מה-chain שממנו חושבה
+    הפרמיה), כך שנשמר כמה התקבל על כל מכירה וכמה שולם על כל קנייה. בהמלצה ישנה
+    שאין בה מחירים → None, ולא 0.0: אפס משמעו "האופציה לא שווה כלום", וזה שקר שנכנס
+    ל-DB ומזהם דאטה ל-ML. תצוגה מציגה "—" כשאין מחיר.
+    """
     lp, sp = rec.get("long_put_strike"), rec.get("short_put_strike")
     sc, lc = rec.get("short_call_strike"), rec.get("long_call_strike")
     if any(v is None for v in (lp, sp, sc, lc)):
         return None
 
-    def leg(action: str, typ: str, strike: float) -> dict:
-        return {"action": action, "type": typ, "qty": 1,
-                "strike": float(strike), "price_pts": 0.0, "price_nis": 0.0}
+    prices = rec.get("leg_prices") or {}
+
+    def leg(action: str, typ: str, strike: float, key: str) -> dict:
+        pts = prices.get(key)
+        pts = float(pts) if pts is not None else None
+        return {
+            "action": action, "type": typ, "qty": 1, "strike": float(strike),
+            "price_pts": round(pts, 4) if pts is not None else None,
+            "price_nis": round(pts * MULTIPLIER, 2) if pts is not None else None,
+        }
 
     return [
-        leg("קנה",  "Put",  lp),   # long put (הגנה תחתונה)
-        leg("מכור", "Put",  sp),   # short put (מכור)
-        leg("מכור", "Call", sc),   # short call (מכור)
-        leg("קנה",  "Call", lc),   # long call (הגנה עליונה)
+        leg("קנה",  "Put",  lp, "long_put"),    # long put (הגנה תחתונה)
+        leg("מכור", "Put",  sp, "short_put"),   # short put (מכור)
+        leg("מכור", "Call", sc, "short_call"),  # short call (מכור)
+        leg("קנה",  "Call", lc, "long_call"),   # long call (הגנה עליונה)
     ]
 
 

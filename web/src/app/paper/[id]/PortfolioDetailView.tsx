@@ -21,7 +21,10 @@ const statusInfo = (s: string) => STATUS_MAP[s] ?? { label: s || "—", tone: "t
 
 function LegsTable({ legs }: { legs: LegData[] }) {
   if (!legs.length) return <p className="text-xs text-text3">אין פירוט רגליים לעסקה זו.</p>;
+  // מחיר לא ידוע → "—". עסקאות שנפתחו לפני שמחירי הרגליים נשמרו אינן ניתנות לשחזור.
+  const noPrices = legs.every((l) => l.pts === null && l.nis === null);
   return (
+    <>
     <table className="w-full text-right text-xs">
       <thead>
         <tr className="text-text3">
@@ -40,12 +43,23 @@ function LegsTable({ legs }: { legs: LegData[] }) {
             <td className="py-1 text-text2">{lg.type}</td>
             <td className="py-1 tabular-nums text-text2">{en(lg.strike)}</td>
             <td className="py-1 tabular-nums text-text2">{lg.qty}</td>
-            <td className="py-1 tabular-nums text-text2">{lg.pts.toFixed(1)}</td>
-            <td className="py-1 tabular-nums text-text2">₪{en(lg.nis)}</td>
+            <td className={`py-1 tabular-nums ${lg.pts === null ? "text-text3" : "text-text2"}`}>
+              {lg.pts === null ? "—" : lg.pts.toFixed(1)}
+            </td>
+            <td className={`py-1 tabular-nums ${lg.nis === null ? "text-text3" : "text-text2"}`}>
+              {lg.nis === null ? "—" : `₪${en(lg.nis)}`}
+            </td>
           </tr>
         ))}
       </tbody>
     </table>
+    {noPrices && (
+      <p className="mt-2 text-xs text-text3">
+        מחירי הרגליים לא נשמרו בעסקה זו (נפתחה לפני שהמחירים נשמרו) ואינם ניתנים לשחזור —
+        שרשרת האופציות ההיסטורית נדרסת בכל עדכון. עסקאות חדשות נשמרות עם מחיר לכל רגל.
+      </p>
+    )}
+    </>
   );
 }
 

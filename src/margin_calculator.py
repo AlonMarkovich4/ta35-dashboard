@@ -127,6 +127,8 @@ def _build_one_margin(
 
     ratio = round(net_premium / abs(max_loss), 4) if abs(max_loss) > 1e-9 else None
 
+    P_sp, P_sc, P_lp, P_lc = prices
+
     return {
         "margin_pct":                round(float(margin_pct), 4),
         "base_index":                float(base_index),
@@ -135,6 +137,15 @@ def _build_one_margin(
         "short_call_strike":         K_sc,
         "long_put_strike":           K_lp,
         "long_call_strike":          K_lc,
+        # מחיר כל רגל בנקודות, מה-chain שממנו חושבה הפרמיה. מפתחות שטוחים (כמו
+        # ה-*_strike) כדי שלא לשבור צרכנים שעושים pd.DataFrame(curve).
+        # נשמרים ב-recommendation_json ומשם מגיעים ל-legs_json של העסקה: בלעדיהם
+        # מחירי הרגליים אובדים לתמיד בכל פקיעה שעוברת (דאטה ל-ML).
+        # אינווריאנטה: (short_put + short_call) − (long_put + long_call) == credit_pts.
+        "short_put_price_pts":       round(P_sp, 4),
+        "short_call_price_pts":      round(P_sc, 4),
+        "long_put_price_pts":        round(P_lp, 4),
+        "long_call_price_pts":       round(P_lc, 4),
         "wing_pct":                  round(float(wing_pct), 4),
         "wing_width":                wing_width,
         "credit_pts":                round(credit_pts, 4),
@@ -171,6 +182,8 @@ def build_margin_curve(
     list[dict], שורה לכל מרווח. שורה תקינה כוללת:
       margin_pct, base_index, skipped=False,
       short_put_strike, short_call_strike, long_put_strike, long_call_strike,
+      short_put_price_pts, short_call_price_pts, long_put_price_pts, long_call_price_pts
+        (מחיר כל רגל בנקודות מה-chain; (shorts) − (longs) == credit_pts),
       wing_pct, wing_width (נק'), credit_pts (נק'), net_premium (₪),
       max_loss (₪, שלילי), breakeven_down_pct, breakeven_up_pct (תנועה % ששוברת כל צד),
       premium_to_max_loss_ratio.

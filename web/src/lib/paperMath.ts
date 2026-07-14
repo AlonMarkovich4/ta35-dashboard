@@ -52,7 +52,24 @@ export function computeOpenExposure(
   return { count, cashFlow: r4(cashFlow), atRisk: r4(atRisk) };
 }
 
-export type LegData = { action: string; type: string; strike: number; qty: number; pts: number; nis: number };
+// pts/nis הם null כשמחיר הרגל לא ידוע — עסקאות שנפתחו לפני שמחירי הרגליים נשמרו
+// (ה-chain ההיסטורי נדרס, אי-אפשר לשחזר). התצוגה מציגה "—", לא ₪0.
+export type LegData = {
+  action: string; type: string; strike: number; qty: number;
+  pts: number | null; nis: number | null;
+};
+
+// מחיר רגל: null כשחסר/לא ידוע. 0 מטופל גם הוא כלא-ידוע — אופציה סחירה לעולם לא
+// שווה 0 (margin_calculator פוסל רגל עם price<=0), ולכן 0 ב-DB הוא הערך שנכתב
+// כשהמחיר לא נשמר — לא מחיר אמיתי.
+function legPrice(...cands: unknown[]): number | null {
+  for (const c of cands) {
+    if (c === null || c === undefined || c === "") continue;
+    const n = Number(c);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  return null;
+}
 
 // מיפוי גמיש מ-legs_json (מאומת מול הדאטה: price_nis, price_pts, action, type, strike, qty).
 export function parseLegs(raw: unknown): LegData[] {
@@ -64,8 +81,8 @@ export function parseLegs(raw: unknown): LegData[] {
       type: String(l.type ?? l.option_type ?? ""),
       strike: Number(l.strike ?? 0),
       qty: Number(l.qty ?? l.quantity ?? l.contracts ?? 1),
-      pts: Number(l.price_pts ?? l.pts ?? l.price ?? 0),
-      nis: Number(l.price_nis ?? l.price_ils ?? l.nis ?? 0),
+      pts: legPrice(l.price_pts, l.pts, l.price),
+      nis: legPrice(l.price_nis, l.price_ils, l.nis),
     }));
   } catch {
     return [];

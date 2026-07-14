@@ -167,6 +167,58 @@ class TestRowFields:
 
 # ─── margin_pnl: בתוך הטווח / פריצת כנף / ביניים ─────────────────────────
 
+class TestLegPrices:
+    """מחיר כל רגל נשמר בשורת העקומה — ומשם ל-recommendation_json ול-legs_json של
+    העסקה. בלי זה, מחירי האופציות הבודדות אובדים לתמיד בכל פקיעה (ה-chain נדרס)."""
+
+    _KEYS = ("short_put_price_pts", "short_call_price_pts",
+             "long_put_price_pts", "long_call_price_pts")
+
+    def test_row_exposes_all_four_leg_prices(self):
+        chain, base = _exact_chain()
+        curve = build_margin_curve(chain, base, wing_pct=1.0, margins=[2.0])
+        row = curve[0]
+        assert not row["skipped"]
+        for k in self._KEYS:
+            assert k in row, f"חסר {k} בשורת העקומה"
+
+    def test_leg_prices_are_the_actual_chain_prices(self):
+        chain, base = _exact_chain()
+        row = build_margin_curve(chain, base, wing_pct=1.0, margins=[2.0])[0]
+        assert row["short_put_price_pts"]  == pytest.approx(10.0)
+        assert row["short_call_price_pts"] == pytest.approx(12.0)
+        assert row["long_put_price_pts"]   == pytest.approx(4.0)
+        assert row["long_call_price_pts"]  == pytest.approx(3.0)
+
+    def test_leg_prices_reconcile_to_credit_pts(self):
+        """האינווריאנטה שמחזיקה את הכל: (shorts) − (longs) == credit_pts.
+        אם היא נשברת, מחירי הרגליים לא מסבירים את הפרמיה שנרשמה בעסקה."""
+        chain, base = _exact_chain()
+        for row in build_margin_curve(chain, base, wing_pct=1.0):
+            if row["skipped"]:
+                continue
+            shorts = row["short_put_price_pts"] + row["short_call_price_pts"]
+            longs  = row["long_put_price_pts"] + row["long_call_price_pts"]
+            assert (shorts - longs) == pytest.approx(row["credit_pts"], abs=1e-3)
+
+    def test_leg_prices_are_positive(self):
+        """רגל לא סחירה (price<=0) נפסלת בשער 2, ולכן שורה תקינה לעולם לא נושאת 0."""
+        chain = _realistic_chain()
+        for row in build_margin_curve(chain, 2000.0):
+            if row["skipped"]:
+                continue
+            for k in self._KEYS:
+                assert row[k] > 0
+
+    def test_leg_prices_survive_dataframe_roundtrip(self):
+        """מפתחות שטוחים (ולא dict מקונן) — כדי ש-pd.DataFrame(curve) לא יישבר."""
+        chain = _realistic_chain()
+        curve = build_margin_curve(chain, 2000.0)
+        df = pd.DataFrame(curve)
+        for k in self._KEYS:
+            assert k in df.columns
+
+
 class TestMarginPnl:
     def _row(self):
         chain, base = _exact_chain()

@@ -399,8 +399,23 @@ def _render_track_record(trades: list[dict]) -> None:
     st.dataframe(styled, use_container_width=True, hide_index=True)
 
 
+def _leg_price(v, prefix: str = "", decimals: int = 1) -> str:
+    """מחיר רגל לתצוגה — מחזיר מחרוזת מוכנה (ולכן לא עובר .format של ה-Styler).
+
+    None/0 → "—" (לא ידוע): אופציה סחירה לא שווה 0, ולכן 0 הוא מה שנכתב כשהמחיר
+    לא נשמר — לא מחיר אמיתי. אסור להציגו כ-₪0.
+    """
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return "—"
+    if f <= 0:
+        return "—"
+    return f"{prefix}{f:,.{decimals}f}"
+
+
 def _render_legs_table(legs: list[dict]) -> None:
-    """טבלת רגליים צבעונית (קנה ירוק / מכור אדום)."""
+    """טבלת רגליים צבעונית (קנה ירוק / מכור אדום). מחיר לא ידוע מוצג כ-"—"."""
     rows = []
     for lg in legs:
         rows.append({
@@ -408,8 +423,8 @@ def _render_legs_table(legs: list[dict]) -> None:
             "סוג":          lg.get("type") or "—",
             "סטרייק":       lg.get("strike"),
             "כמות":         lg.get("qty", 1),
-            "מחיר (נק׳)":   lg.get("price_pts"),
-            "מחיר (₪)":     lg.get("price_nis"),
+            "מחיר (נק׳)":   _leg_price(lg.get("price_pts")),
+            "מחיר (₪)":     _leg_price(lg.get("price_nis"), prefix="₪", decimals=0),
         })
     df = pd.DataFrame(rows)
 
@@ -423,10 +438,10 @@ def _render_legs_table(legs: list[dict]) -> None:
     styled = (
         df.style
         .map(_color_action, subset=["פעולה"])
+        # עמודות המחיר כבר מחרוזות מוכנות (_leg_price) — אסור להעביר אותן ב-.format
+        # מספרי, הוא יקרוס על "—". רק הסטרייק נשאר מספרי.
         .format({
-            "סטרייק":     lambda v: f"{v:,.0f}" if v is not None else "—",
-            "מחיר (נק׳)": lambda v: f"{v:,.1f}" if v is not None else "—",
-            "מחיר (₪)":   lambda v: f"₪{v:,.0f}" if v is not None else "—",
+            "סטרייק": lambda v: f"{v:,.0f}" if v is not None else "—",
         })
     )
     st.dataframe(styled, use_container_width=True, hide_index=True)

@@ -34,6 +34,14 @@ def _rec():
         "max_loss":          -1069.0,   # −(רוחב 30נק'×50 − 431)
         "base_index":        4050.0,
         "wing_pct":          0.75,
+        # מחירי הרגליים מה-chain. אינווריאנטה: (shorts) − (longs) == credit_pts,
+        # כאן (6.5+5.4) − (1.6+1.68) = 8.62 נק' × 50 = 431 ₪ = premium_ils.
+        "leg_prices": {
+            "long_put":   1.6,
+            "short_put":  6.5,
+            "short_call": 5.4,
+            "long_call":  1.68,
+        },
     }
 
 
@@ -67,12 +75,13 @@ def test_opens_with_exact_recommendation_strikes(monkeypatch):
     insert.assert_called_once()
     trade = insert.call_args.args[0]
 
-    # 4 רגליים בפורמט המדויק, עם ה-strikes מההמלצה (buy long, sell short).
+    # 4 רגליים בפורמט המדויק, עם ה-strikes *וגם המחירים* מההמלצה (buy long, sell short).
+    # price_pts היה 0.0 עד שנסגר פער הדאטה — ראה TestLegPrices.
     assert trade["legs_json"] == [
-        {"action": "קנה",  "type": "Put",  "qty": 1, "strike": 3950.0, "price_pts": 0.0, "price_nis": 0.0},
-        {"action": "מכור", "type": "Put",  "qty": 1, "strike": 3980.0, "price_pts": 0.0, "price_nis": 0.0},
-        {"action": "מכור", "type": "Call", "qty": 1, "strike": 4120.0, "price_pts": 0.0, "price_nis": 0.0},
-        {"action": "קנה",  "type": "Call", "qty": 1, "strike": 4150.0, "price_pts": 0.0, "price_nis": 0.0},
+        {"action": "קנה",  "type": "Put",  "qty": 1, "strike": 3950.0, "price_pts": 1.6,  "price_nis": 80.0},
+        {"action": "מכור", "type": "Put",  "qty": 1, "strike": 3980.0, "price_pts": 6.5,  "price_nis": 325.0},
+        {"action": "מכור", "type": "Call", "qty": 1, "strike": 4120.0, "price_pts": 5.4,  "price_nis": 270.0},
+        {"action": "קנה",  "type": "Call", "qty": 1, "strike": 4150.0, "price_pts": 1.68, "price_nis": 84.0},
     ]
     assert trade["strategy_id"] == rt.RECO_STRATEGY_ID       # ייעודי (102), לא 2
     assert trade["strategy_name"] == rt.RECO_STRATEGY_NAME
@@ -194,6 +203,62 @@ def test_insert_failure_returns_db_error(monkeypatch):
     monkeypatch.setattr(rt, "insert_trade", MagicMock(return_value=None))
     res = rt.open_recommended_condor("2026-07-14", engine="ENG", portfolio_id=99)
     assert res["status"] == "db_error"
+
+
+# ─── מחירי הרגליים — שקיפות + דאטה ל-ML ─────────────────────────────────
+
+class TestLegPrices:
+    """הפער שנסגר: _reco_legs כתב price_pts=0.0/price_nis=0.0 לכל רגל, ולכן מחירי
+    האופציות הבודדות אבדו בכל פקיעה (ה-chain ההיסטורי נדרס ואי-אפשר לשחזר)."""
+
+    def test_legs_carry_real_prices_from_recommendation(self):
+        legs = rt._reco_legs(_rec())
+        by = {(l["action"], l["type"]): l for l in legs}
+        assert by[("קנה",  "Put")]["price_pts"]  == pytest.approx(1.6)
+        assert by[("מכור", "Put")]["price_pts"]  == pytest.approx(6.5)
+        assert by[("מכור", "Call")]["price_pts"] == pytest.approx(5.4)
+        assert by[("קנה",  "Call")]["price_pts"] == pytest.approx(1.68)
+
+    def test_price_nis_is_pts_times_multiplier(self):
+        legs = rt._reco_legs(_rec())
+        for lg in legs:
+            assert lg["price_nis"] == pytest.approx(lg["price_pts"] * 50)
+
+    def test_legs_reconcile_to_the_recorded_premium(self):
+        """הבדיקה שסוגרת את הלולאה: סכום הרגליים חייב להסתדר עם entry_cost של העסקה.
+        (מכירות − קניות) × 50 == premium_ils == −entry_cost."""
+        rec = _rec()
+        legs = rt._reco_legs(rec)
+        shorts = sum(l["price_pts"] for l in legs if l["action"] == "מכור")
+        longs  = sum(l["price_pts"] for l in legs if l["action"] == "קנה")
+        assert (shorts - longs) * 50 == pytest.approx(rec["premium_ils"])
+
+    def test_old_recommendation_without_prices_yields_none_not_zero(self):
+        """המלצה ישנה (בלי leg_prices) → מחיר None, לא 0.0. אפס הוא שקר: הוא אומר
+        "האופציה לא שווה כלום", וזה מזהם דאטה ש-ML ילמד ממנו."""
+        rec = {**_rec()}
+        rec.pop("leg_prices")
+        legs = rt._reco_legs(rec)
+        assert len(legs) == 4
+        for lg in legs:
+            assert lg["price_pts"] is None
+            assert lg["price_nis"] is None
+            assert lg["strike"] is not None      # ה-strikes עדיין נשמרים
+
+    def test_partial_leg_prices_only_fill_what_exists(self):
+        rec = {**_rec(), "leg_prices": {"short_put": 6.5, "long_put": None,
+                                        "short_call": None, "long_call": None}}
+        legs = rt._reco_legs(rec)
+        by = {(l["action"], l["type"]): l for l in legs}
+        assert by[("מכור", "Put")]["price_pts"] == pytest.approx(6.5)
+        assert by[("מכור", "Call")]["price_pts"] is None
+
+    def test_prices_reach_the_persisted_trade(self, monkeypatch):
+        """מקצה לקצה: ההמלצה → build_reco_trade → legs_json שנכתב ל-DB."""
+        trade = rt.build_reco_trade(8, _rec(), rt._reco_legs(_rec()), commission_per_leg=2.5)
+        pts = [l["price_pts"] for l in trade["legs_json"]]
+        assert all(p is not None and p > 0 for p in pts)
+        assert trade["entry_cost"] == pytest.approx(-431.0)
 
 
 # ─── התאמה למנגנון הסגירה (הרגליים + entry_cost → P&L נכון) ───────────────
