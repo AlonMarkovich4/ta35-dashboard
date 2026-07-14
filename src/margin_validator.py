@@ -291,6 +291,12 @@ def build_margin_validation_rows(engine=None) -> list[dict]:
         gap     = round(rmargin - optimal, 4) if optimal is not None else None
         est_pnl = _est_pnl(rj.get("selected_curve_row"), move)
 
+        # "מדד הפחד" — מה השוק ציפה בזמן ההמלצה (None בהמלצות שנרשמו לפני שלב א').
+        # מאפשר את ההשוואה שתכריע בשלב ג': השוק ציפה X%, ההיסטוריה אמרה Y% (=המרווח
+        # שנבחר), בפועל זז Z% (=actual_abs_move_pct) — מי ניבא טוב יותר.
+        im = rj.get("implied_move") or {}
+        implied = _f(im.get("expected_move_pct")) if not im.get("skipped") else None
+
         rows.append({
             "expiry_date":              exp,
             "recommended_at":           rec.get("recommended_at"),
@@ -305,6 +311,12 @@ def build_margin_validation_rows(engine=None) -> list[dict]:
             "est_pnl":                  est_pnl,
             "below_floor":              rec.get("below_floor"),
             "n_recommendations":        rec.get("n_recommendations"),
+            # ציפיית השוק (%) והשגיאה שלה מול המציאות. implied_error > 0 = השוק ציפה
+            # ליותר תנועה משהייתה (over-priced fear); < 0 = השוק הופתע.
+            "implied_move_pct":         round(implied, 4) if implied is not None else None,
+            "implied_vs_margin":        _f(im.get("implied_vs_margin")),
+            "implied_error":            (round(implied - abs_move, 4)
+                                         if implied is not None else None),
         })
 
     rows.sort(key=lambda r: str(r["expiry_date"]), reverse=True)

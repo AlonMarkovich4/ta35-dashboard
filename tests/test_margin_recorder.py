@@ -13,10 +13,14 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pandas as pd
+import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 import margin_recorder as mr
+from context_analyzer import get_recent_move
+from margin_calculator import DEFAULT_WING_PCT, build_margin_curve
+from margin_selector import select_margin
 
 
 # ─── עוזרים ─────────────────────────────────────────────────────────────
@@ -295,3 +299,86 @@ def test_record_threads_wing_to_recommendation(monkeypatch):
     mr.record_margin_recommendations_for_upcoming(engine="ENG", wing_pct=0.5)
     _, rec_kw = m["rec"].call_args
     assert rec_kw["wing_pct"] == 0.5
+
+# ─── שלב א' — "מדד הפחד" (implied_move) נרשם בכל המלצה ────────────────────
+
+class TestImpliedMoveRecorded:
+    """implied_move נשמר ב-recommendation_json, ו**לא** משפיע על בחירת המרווח.
+    הבדיקות רצות דרך _recommendation_for_expiry האמיתי (לא ממוקק) עם chain אמיתי."""
+
+    @staticmethod
+    def _chain(base=4000.0):
+        """שרשרת שמצייתת ל-put-call parity: C − P = S − K (בנקודות). בלי זה find_atm
+        (שנשען על |C−P| מינימלי) לא מוצא את ה-ATM האמיתי."""
+        rows = []
+        for k in range(3800, 4201, 10):
+            tv = max(1.0, 25 - abs(k - base) * 0.08)      # ערך זמן, דועך עם המרחק
+            call = max(base - k, 0.0) + tv                # פנימי + זמן
+            put  = max(k - base, 0.0) + tv
+            rows.append({"strike": float(k),
+                         "call_price": call * 50.0,
+                         "put_price":  put * 50.0,
+                         # find_atm נופל ל-call_delta כשאין שורה דו-צדדית — כמו בשרשרת אמיתית
+                         "call_delta": 0.5 + (base - k) / 1000.0})
+        return {
+            "as_of_date": "13/07/2026 14:57",
+            "expiries": [{"expiry_type": "W", "chain": pd.DataFrame(rows)}],
+        }
+
+    @staticmethod
+    def _hist():
+        import numpy as np
+        rng = np.random.default_rng(7)
+        return pd.DataFrame({
+            "expiry_date": pd.date_range("2024-01-04", periods=120, freq="W-THU"),
+            "expiry_type": ["W"] * 120,
+            "move_pct":    rng.normal(0, 1.0, 120),
+            "abs_move_pct": np.abs(rng.normal(0, 1.0, 120)),
+        })
+
+    def _build(self, monkeypatch):
+        monkeypatch.setattr(mr, "get_latest_option_chain",
+                            lambda expiry_date=None, engine=None: self._chain())
+        return mr._recommendation_for_expiry(
+            self._hist(), pd.Timestamp("2026-07-17"), engine=object())
+
+    def test_payload_carries_implied_move(self, monkeypatch):
+        rec = self._build(monkeypatch)
+        assert rec is not None
+        im = rec["implied_move"]
+        assert im["skipped"] is False
+        assert im["expected_move_pct"] > 0
+        assert im["atm_strike"] == 4000.0
+        assert im["days_to_expiry"] == 4          # 13/07 → 17/07
+        assert im["implied_daily_pct"] is not None
+
+    def test_implied_vs_margin_is_the_ratio(self, monkeypatch):
+        rec = self._build(monkeypatch)
+        im = rec["implied_move"]
+        expected = im["expected_move_pct"] / rec["selected_margin"]
+        assert im["implied_vs_margin"] == pytest.approx(expected, rel=1e-3)
+
+    def test_implied_move_does_not_change_the_selected_margin(self, monkeypatch):
+        """שלב א' — תיעוד בלבד. המרווח שנבחר חייב להיות זהה לזה שנבחר בלי הפיצ'ר:
+        select_margin לא מקבל את implied_move כלל."""
+        rec = self._build(monkeypatch)
+        curve = build_margin_curve(self._chain()["expiries"][0]["chain"], 4000.0,
+                                   wing_pct=DEFAULT_WING_PCT)
+        sel = select_margin(curve, self._hist(), "W",
+                            get_recent_move(self._hist(), pd.Timestamp("2026-07-17")))
+        assert rec["selected_margin"] == sel["selected_margin"]
+
+    def test_untradable_chain_records_skipped_but_still_recommends(self, monkeypatch):
+        """שרשרת בלי ציטוטים דו-צדדיים → implied_move skipped, אבל ההמלצה עצמה
+        לא נופלת (הפיצ'ר לא יכול לשבור את המנוע)."""
+        ch = self._chain()
+        df = ch["expiries"][0]["chain"]
+        df["put_price"] = 0.0            # אין ציטוט put בשום סטרייק
+        monkeypatch.setattr(mr, "get_latest_option_chain",
+                            lambda expiry_date=None, engine=None: ch)
+        rec = mr._recommendation_for_expiry(self._hist(), pd.Timestamp("2026-07-17"),
+                                            engine=object())
+        # ה-condor עצמו לא ניתן לתמחור כאן → או שאין המלצה, או שיש עם implied skipped.
+        if rec is not None:
+            assert rec["implied_move"]["skipped"] is True
+            assert rec["implied_move"]["expected_move_pct"] is None

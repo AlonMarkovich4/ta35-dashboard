@@ -728,6 +728,10 @@ export type MarginLiveRow = {
   longCallStrike: number | null;
   maxLoss: number | null;         // ₪ (שלילי)
   wingPct: number | null;         // רוחב הכנף שהונחה; null = לא ידוע (המלצה ישנה)
+  // "מדד הפחד": התנועה שהשוק מתמחר לפקיעה (ATM straddle). null בהמלצות שנרשמו
+  // לפני שלב א'. impliedVsMargin > 1 → השוק מצפה לתנועה גדולה מהמרווח.
+  impliedMovePct: number | null;
+  impliedVsMargin: number | null;
   legsSource: "recorded" | "computed" | "none";
   belowFloor: boolean;
   floorUsed: number | null;
@@ -779,6 +783,7 @@ export async function getMarginData(): Promise<MarginData> {
           ? JSON.parse(r.recommendation_json)
           : r.recommendation_json) ?? {};
       const scr = (rj.selected_curve_row ?? {}) as Record<string, unknown>;
+      const im = (rj.implied_move ?? {}) as Record<string, unknown>;
       const gridMargins: number[] = Array.isArray(rj.grid)
         ? rj.grid
             .map((g: { margin_pct?: unknown }) => Number(g.margin_pct))
@@ -806,6 +811,9 @@ export async function getMarginData(): Promise<MarginData> {
         recordedLongCall: jnum(rj.long_call_strike, scr.long_call_strike),
         recMaxLoss: jnum(rj.max_loss, scr.max_loss),
         wingPct: jnum(rj.wing_pct, scr.wing_pct),
+        // implied_move נשמר רק מהמלצות שלב א' ואילך; skipped=true → אין מספר להציג.
+        impliedMovePct: im.skipped ? null : jnum(im.expected_move_pct, null),
+        impliedVsMargin: im.skipped ? null : jnum(im.implied_vs_margin, null),
       };
     });
     const latest = pickLatestRecommendations(recs);
@@ -890,6 +898,8 @@ export async function getMarginData(): Promise<MarginData> {
         belowFloor: r.belowFloor,
         floorUsed: r.floorUsed,
         reason: r.reason,
+        impliedMovePct: r.impliedMovePct,
+        impliedVsMargin: r.impliedVsMargin,
       });
     }
     live.sort((a, b) => (a.expiryIso < b.expiryIso ? -1 : a.expiryIso > b.expiryIso ? 1 : 0));

@@ -11,7 +11,7 @@ import type { MarginLiveRow } from "@/lib/data";
 // טבלת ההמלצות החיות — כל שורה נלחצת ופותחת מתחתיה גרף Payoff (expand/collapse, סגור כברירת מחדל).
 export function LiveRecommendations({ live }: { live: MarginLiveRow[] }) {
   const [open, setOpen] = useState<number | null>(null);
-  const COLS = 11;
+  const COLS = 12;   // +1: "תנועה צפויה (שוק)"
 
   return (
     <div className="space-y-4">
@@ -37,6 +37,12 @@ export function LiveRecommendations({ live }: { live: MarginLiveRow[] }) {
                   <th className="pb-2 font-medium" aria-label="פתח גרף" />
                   <th className="pb-2 font-medium">פקיעה</th>
                   <th className="pb-2 font-medium">מרווח מומלץ</th>
+                  <th
+                    className="pb-2 font-medium"
+                    title="מחושב ממחיר ה-straddle — כמה תנועה השוק מתמחר לפקיעה"
+                  >
+                    תנועה צפויה (שוק)
+                  </th>
                   <th className="pb-2 font-medium">hold משוקלל</th>
                   <th className="pb-2 font-medium">hold מותנה</th>
                   <th className="pb-2 font-medium">hold גלובלי</th>
@@ -70,6 +76,34 @@ export function LiveRecommendations({ live }: { live: MarginLiveRow[] }) {
                           {r.belowFloor && (
                             <span className="mr-2 rounded-md bg-warn/15 px-1.5 py-0.5 text-[10px] font-semibold text-warn">
                               מתחת לסף
+                            </span>
+                          )}
+                        </td>
+                        {/* תנועה צפויה (שוק) — מה-straddle. סימון עדין כשהשוק מתמחר
+                            תנועה גדולה מהמרווח (implied_vs_margin > 1): המרווח עלול להישבר.
+                            תיעוד בלבד — לא משפיע על בחירת המרווח. */}
+                        <td className="py-2.5 tabular-nums" dir="ltr">
+                          {r.impliedMovePct == null ? (
+                            <span className="text-text3">—</span>
+                          ) : (
+                            <span
+                              className={
+                                r.impliedVsMargin != null && r.impliedVsMargin > 1
+                                  ? "font-semibold text-warn"
+                                  : "text-text2"
+                              }
+                              title={
+                                r.impliedVsMargin == null
+                                  ? undefined
+                                  : `השוק מתמחר ${r.impliedVsMargin.toFixed(2)}× מהמרווח המומלץ`
+                              }
+                            >
+                              {pct(r.impliedMovePct, 2)}
+                              {r.impliedVsMargin != null && r.impliedVsMargin > 1 && (
+                                <span className="mr-1 text-[10px]" title="השוק מצפה לתנועה גדולה מהמרווח">
+                                  ⚠
+                                </span>
+                              )}
                             </span>
                           )}
                         </td>

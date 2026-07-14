@@ -25,6 +25,7 @@ import pandas as pd
 
 from context_analyzer import get_recent_move
 from data_loader import load_from_db
+from implied_move import expected_move_pct, implied_vs_margin
 from margin_calculator import DEFAULT_WING_PCT, build_margin_curve
 from margin_selector import DEFAULT_HOLD_FLOOR, select_margin
 from options_parser import find_atm
@@ -36,6 +37,19 @@ from paper_db import (
 from supabase_loader import get_available_expiries, get_latest_option_chain
 
 logger = logging.getLogger(__name__)
+
+
+def _as_of_date(v):
+    """as_of_date של השרשרת → date. הפורמט הוא יום-ראשון ("13/07/2026 14:57"),
+    ולכן dayfirst=True — בלעדיו 07/08 היה נקרא כ-8 ביולי במקום 7 באוגוסט.
+    None כשלא ניתן לפרסר (אז לא יחושב implied_daily — לא נופלים)."""
+    if not v:
+        return None
+    try:
+        return pd.to_datetime(str(v), dayfirst=True).date()
+    except Exception:  # noqa: BLE001
+        logger.debug("margin_recorder: as_of_date לא פריק (%r)", v)
+        return None
 
 
 def _norm_expiry_type(raw) -> str:
@@ -107,6 +121,14 @@ def _recommendation_for_expiry(
     if sm is None:
         return None
 
+    # "מדד הפחד" פר-פקיעה — התנועה שהשוק מתמחר, מאותו chain שממנו נבחר המרווח.
+    # שלב א': מחושב ונשמר בלבד, **לא משפיע על בחירת המרווח** (sel כבר נקבע מעליו).
+    # נשמר בכל המלצה כדי שיצטבר דאטה: בלי זה, כל פקיעה שעוברת = ציפיית-שוק שאבדה.
+    as_of = (chain or {}).get("as_of_date", "")
+    imove = expected_move_pct(chain_df, base_index,
+                              expiry_date=exp_ts.date(), as_of_date=_as_of_date(as_of))
+    imove["implied_vs_margin"] = implied_vs_margin(imove.get("expected_move_pct"), sm)
+
     # שורת ה-grid הנבחרת (hold מותנה/גלובלי/n) ושורת העקומה הנבחרת (strikes).
     grow = next((g for g in sel.get("grid", [])
                  if round(float(g["margin_pct"]), 4) == round(float(sm), 4)), {})
@@ -138,6 +160,9 @@ def _recommendation_for_expiry(
         "wing_pct":           wing_pct,          # הכנף שהונחה (שקיפות — נשמר ב-recommendation_json)
         "reason":             sel.get("reason"),
         "grid":               sel.get("grid"),
+        # "מדד הפחד" — ציפיית השוק לתנועה (ATM straddle). תיעוד בלבד בשלב א'.
+        # implied_vs_margin > 1 → השוק מתמחר תנועה גדולה מהמרווח שנבחר.
+        "implied_move":       imove,
         "selected_curve_row": crow,       # לשחזור margin_pnl בולידציה (שלב 4, חלק ג)
         "engine_version":     engine_version,
         "trigger":            trigger,
