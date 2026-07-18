@@ -12,6 +12,10 @@ scripts/auto_close_expiries.py — סגירה אוטומטית של פקיעות
 idempotent: get_expiries_ready_to_close מחזיר רק פקיעות עם עסקאות 'open'.
 אחרי סגירה הן 'closed' ולא יחזרו — ריצה חוזרת לא תסגור שוב את אותן עסקאות.
 
+**סגירת לולאת הלמידה:** אחרי הסגירה, מריץ update_expiry_history_from_settlements —
+מזרים כל פקיעה שנסגרה (condor_settled_detail) ל-expiry_history (append-only, אידמפוטנטי),
+כדי שהמנוע ילמד מהתנועות האחרונות. כישלון שם לא מפיל את הסגירה (רק WARN).
+
 משתמש בקוד הקיים בלבד (close_matured_expiry → close_trades_for_expiry) —
 אפס שכפול של לוגיקת P&L.
 
@@ -40,6 +44,7 @@ if str(_SRC) not in sys.path:
 from sqlalchemy import create_engine, text          # noqa: E402
 from paper_db import get_expiries_ready_to_close      # noqa: E402
 from paper_trading import close_matured_expiry        # noqa: E402  (לא משכפלים P&L)
+from history_updater import update_expiry_history_from_settlements  # noqa: E402  (סגירת לולאת הלמידה)
 
 # ── קודי יציאה ────────────────────────────────────────────────────────────
 EXIT_OK     = 0
@@ -170,6 +175,17 @@ def main() -> int:
 
     try:
         summary = run(engine)
+        # לולאת הלמידה: אחרי סגירת הפקיעות, מזרים אותן ל-expiry_history (append-only,
+        # אידמפוטנטי). כישלון כאן לא מפיל את הסגירה — העסקאות כבר נסגרו; רק לוג WARN.
+        try:
+            upd = update_expiry_history_from_settlements(engine, dry_run=False)
+            log(f"עדכון expiry_history: נוספו {upd['inserted']} פקיעות "
+                f"(מסולקות {upd['settled_total']}, כבר קיימות {upd['already_present']}, "
+                f"דולגו-בלי-base {len(upd['skipped_no_base'])}).")
+            for w in upd.get("warnings", []):
+                log(w, level="WARN")
+        except Exception as exc:  # noqa: BLE001
+            log(f"עדכון expiry_history נכשל (הסגירה תקינה, ממשיך): {exc}", level="WARN")
     except Exception as exc:  # noqa: BLE001
         log(f"ריצת הסגירה נכשלה: {exc}", level="ERROR")
         return EXIT_ERROR

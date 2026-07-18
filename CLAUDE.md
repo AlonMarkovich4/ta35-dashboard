@@ -39,6 +39,20 @@
 - `src/margin_validator.py` + `src/margin_backtest.py` — שכבת ולידציה + backtest היסטורי של המנגנון.
 - `src/margin_recorder.py` — רישום ההמלצות ל-`margin_recommendations` (Action יומי, idempotent).
 
+## לולאת הלמידה — סגירת הפער settlement → expiry_history — ✅ הושלם
+המנוע לומד מ-`expiry_history`. הפער שהתגלה בשבוע ההרצה הראשון: הטבלה נעצרה ב-2026-05-07
+ופקיעות שנסגרו (`condor_settled_detail`) לא הוזרמו אליה, כך ש-`select_margin` בחר `recent_move`
+ממאי — המנוע היה עיוור לשבועות האחרונים.
+- `src/history_updater.py` — `update_expiry_history_from_settlements(engine, dry_run=True)`.
+  append-only, אידמפוטנטי (קיים→דלג), `dry_run` כברירת מחדל. כותב דרך `data_loader.save_to_db`
+  (אותו נתיב-כתיבה היסטורי, ללא שכפול). CLI: `python3 src/history_updater.py [--commit]`.
+- **`move_pct` — עקבי להגדרה ההיסטורית (קריטי):** `(expiry−base)/base·100`, כאשר
+  `base_price ← condor_settled_detail.base_index_value` (הבסיס הרשמי) ו-`expiry_price ← actual_index_close`.
+  זהו *אותו סוג בסיס* כמו `expiry_history.base_price`. הפער 5.04% (מ-base_index_value) מול 2.50%
+  (מ-`recommendation_json.base_index`, אומדן ATM מזמן אחר) — ה-5.04% הוא העקבי, לכן בו משתמשים.
+- **חיווט Action:** `scripts/auto_close_expiries.py` מריץ את העדכון *אחרי* סגירת העסקאות
+  (`dry_run=False`). כישלון שם לא מפיל את הסגירה (WARN בלבד) — כל פקיעה שנסגרת נכנסת אוטומטית.
+
 ## שכבת "המנוע מול המציאות" (גשרים 1–2) — ✅ הושלם
 - `src/decision_recorder.py` (גשר 1) — רושם החלטות מנוע ל-`decision_log`.
 - `src/decision_validator.py` (גשר 2) — hit-rate / regret מול ה-P&L האמיתי. **guard:** מצרף רק את
