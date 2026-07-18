@@ -6,12 +6,14 @@ weekly_summary.py — סיכום שבוע ההרצה הראשון + חקירת �
 **קריאה בלבד (SELECT בלבד).** אפס INSERT/UPDATE/DELETE. אפס כתיבה ל-DB.
 DATABASE_URL נקרא מהסביבה בלבד — לעולם לא בקוד ולא בפלט.
 
-5 חלקים:
+6 חלקים:
   1. חקירת 17/7 (הדחוף) — עסקה #33: תקין-ומחכה או תקלה? (סטלמנט? cron של auto_close?)
   2. סיכום השבוע — תיק ההמלצות (פקיעות 14–17/7): P&L, ממומש, Win Rate, מול 537₪/שבוע.
   3. ולידציית מרווח שבועית — לכל פקיעה: המלצה, תנועה בפועל, החזיק/נשבר, implied מול בפועל.
   4. מבט קדימה — עסקאות פתוחות (21–23/7) + ה-implied העדכני לכל אחת.
   5. Benchmark — תיק ה-IC הקבוע (תיק 3) על אותן פקיעות: "דינמי מול קבוע".
+  6. בפועל מול סימולציה (דוח לקחים מצטבר) — קצב שבירות מול 3%, P&L/שבוע מול 537₪,
+     drawdown מול 3,712₪, עם סימון ✅/🟠/🔴 לכל מדד.
 
 הרצה (הזרקת הסוד inline, לא נשמר בהיסטוריית shell אם מקדימים ברווח):
     DATABASE_URL="postgresql://..." python3 scripts/weekly_summary.py
@@ -34,6 +36,9 @@ TARGET_EXPIRY      = date(2026, 7, 17)   # פקיעת שישי שלא נסגרה
 WEEK_START         = date(2026, 7, 14)   # פקיעות השבוע: 14–17/7
 WEEK_END           = date(2026, 7, 17)
 SIM_WEEKLY_AVG     = 537.0               # ממוצע ארוך-טווח מהסימולציה (₪/שבוע)
+# ציפיות ארוכות-טווח מהסימולציה — הבסיס ל"דוח הלקחים" (סעיף 6):
+SIM_BREAK_RATE     = 0.03                # קצב שבירות צפוי/שבוע (= 1 − hold_floor 0.97; ≈23/עשור)
+SIM_MAX_DRAWDOWN   = 3712.0              # drawdown מקסימלי צפוי (₪) בסימולציה ארוכת-הטווח
 
 # cron של auto_close: '0 7-13 * * 0-4' — DOW 0–4 (ראשון–חמישי), שעות 07–13 UTC.
 CRON_DOWS  = {0, 1, 2, 3, 4}             # pg-style: ראשון=0 ... חמישי=4 (שישי=5, שבת=6)
@@ -549,6 +554,84 @@ def part5_benchmark(eng, week_reco: dict | None):
     print("הערה: פקיעות שעדיין פתוחות (כולל 17/7) לא נכללות בממומש — ההשוואה תתעדכן כשייסגרו.")
 
 
+# ─── חלק 6: בפועל מול סימולציה — "דוח הלקחים" המצטבר ─────────────────────────
+
+def part6_actual_vs_sim(eng, settlements: dict):
+    _title("⑥ בפועל מול סימולציה — מצטבר מאז תחילת המסחר (דוח הלקחים)")
+
+    # כל עסקאות ההמלצה (102) כרונולוגית — לעקומת ההון, לספירת שבירות ול-P&L/שבוע.
+    with eng.connect() as conn:
+        rows = conn.execute(text("""
+            SELECT id, expiry_date::date AS exp, status, pnl, market_snapshot_json
+            FROM paper_trades
+            WHERE strategy_id = :sid
+            ORDER BY expiry_date::date, id
+        """), {"sid": RECO_STRATEGY_ID}).fetchall()
+
+    closed = [r._mapping for r in rows
+              if r._mapping["status"] == "closed" and r._mapping["pnl"] is not None]
+    if not closed:
+        print("אין עדיין עסקאות המלצה סגורות — הדוח המצטבר יתמלא ככל שפקיעות ייסגרו.")
+        return
+
+    # שבירה = הנעילה מחוץ ל-[short_put, short_call] (מ-market_snapshot_json); גיבוי: pnl<0.
+    breaks = 0
+    break_exps = []
+    for m in closed:
+        strikes = (_loads(m["market_snapshot_json"]).get("strikes") or {})
+        sp, sc = _num(strikes.get("short_put")), _num(strikes.get("short_call"))
+        close = settlements.get(m["exp"])
+        broke = (not (sp <= close <= sc)) if (sp is not None and sc is not None and close is not None) \
+            else (float(m["pnl"]) < 0)
+        if broke:
+            breaks += 1
+            break_exps.append(m["exp"])
+
+    n_weeks = len({m["exp"] for m in closed})
+    realized_total = sum(float(m["pnl"]) for m in closed)
+    avg_week = realized_total / n_weeks if n_weeks else 0.0
+    break_rate = breaks / n_weeks if n_weeks else 0.0
+
+    # עקומת הון מצטברת (לפי סדר פקיעה) → drawdown נוכחי + מקסימלי שנצפה.
+    cum = peak = max_dd = 0.0
+    for m in closed:
+        cum += float(m["pnl"])
+        peak = max(peak, cum)
+        max_dd = max(max_dd, peak - cum)
+    cur_dd = peak - cum
+
+    # ── דגלים: ✅ בטווח · 🟠 גבולי · 🔴 חורג ──
+    def _flag_break(rate):
+        r = rate / SIM_BREAK_RATE if SIM_BREAK_RATE else 0
+        return "✅" if r <= 1.5 else ("🟠" if r <= 3 else "🔴")
+
+    def _flag_pnl(avg):
+        return "✅" if avg >= 0.5 * SIM_WEEKLY_AVG else ("🟠" if avg >= 0 else "🔴")
+
+    def _flag_dd(dd):
+        return "✅" if dd <= 0.5 * SIM_MAX_DRAWDOWN else ("🟠" if dd <= SIM_MAX_DRAWDOWN else "🔴")
+
+    print(f"מצטבר: {len(closed)} עסקאות סגורות · {n_weeks} שבועות-פקיעה · "
+          f"ממומש כולל {_fmt(realized_total)} ₪")
+    print()
+    print(f"  {'מדד':<20}{'בפועל':>20}{'צפוי (סימולציה)':>22}   דגל")
+    _hr("─")
+    print(f"  {'קצב שבירות':<20}{f'{break_rate:.1%} ({breaks}/{n_weeks})':>20}"
+          f"{f'{SIM_BREAK_RATE:.1%} (≈23/עשור)':>22}   {_flag_break(break_rate)}")
+    print(f"  {'P&L ממוצע/שבוע':<20}{_fmt(avg_week) + ' ₪':>20}"
+          f"{_fmt(SIM_WEEKLY_AVG, 0) + ' ₪':>22}   {_flag_pnl(avg_week)}")
+    print(f"  {'drawdown נוכחי':<20}{_fmt(cur_dd) + ' ₪':>20}"
+          f"{'≤ ' + _fmt(SIM_MAX_DRAWDOWN, 0) + ' ₪':>22}   {_flag_dd(cur_dd)}")
+    print(f"  {'drawdown מקס שנצפה':<20}{_fmt(max_dd) + ' ₪':>20}"
+          f"{'≤ ' + _fmt(SIM_MAX_DRAWDOWN, 0) + ' ₪':>22}   {_flag_dd(max_dd)}")
+    _hr("─")
+    if break_exps:
+        print("שבירות עד כה: " + ", ".join(str(e) for e in break_exps))
+    if n_weeks < 10:
+        print(f"⚠️  מדגם זעיר ({n_weeks} שבועות): קצב-שבירות ו-P&L/שבוע רועשים מאוד — drawdown הוא המדד")
+        print("    היציב ביותר כרגע. הדגלים יתייצבו ככל שיצטברו שבועות מסחר.")
+
+
 # ─── main ───────────────────────────────────────────────────────────────────
 
 def _section(fn, *a):
@@ -574,6 +657,7 @@ def main() -> int:
     _section(part3_margin_validation, eng, settlements)
     _section(part4_lookahead, eng)
     _section(part5_benchmark, eng, week_reco)
+    _section(part6_actual_vs_sim, eng, settlements)
 
     print()
     _hr("═")
