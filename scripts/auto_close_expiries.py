@@ -58,6 +58,19 @@ def log(msg: str, level: str = "INFO") -> None:
     print(f"[{ts}Z] {level:<5}| {msg}", flush=True)
 
 
+# ── דגל הזרמת expiry_history ──────────────────────────────────────────────
+# ⛔ כבוי כברירת מחדל מ-27/07/2026.
+# הסיבה: ההזרמה מחשבת move_pct מ-condor_settled_detail.base_index_value, שהוא
+# עוגן *חודשי* — אותו ערך חוזר על עצמו עד 4 פקיעות שבועיות רצופות (אומת ב-DB).
+# שורות ה-CSV, לעומת זאת, מודדות תנועת **מושב אחד** (base_price[i] == close_price[i-1],
+# אומת 12/12). התוצאה: אותה עמודה מכילה שתי הגדרות — ממוצע |תנועה| 1.45% בשורות
+# המוזרמות מול 0.49% בשורות ה-CSV. זהו הקורפוס היחיד שהמנוע לומד ממנו.
+# להדלקה מחדש: HISTORY_UPDATER_ENABLED=true, אחרי הכרעה בסמנטיקת base_price.
+def _history_updater_enabled() -> bool:
+    """מחזיר True רק אם HISTORY_UPDATER_ENABLED=='true' (ברירת מחדל: כבוי)."""
+    return os.getenv("HISTORY_UPDATER_ENABLED", "").strip().lower() == "true"
+
+
 def _build_engine(db_url: str):
     """יוצר engine מ-DATABASE_URL (postgres:// → postgresql://, pool_pre_ping)."""
     if db_url.startswith("postgres://"):
@@ -177,15 +190,19 @@ def main() -> int:
         summary = run(engine)
         # לולאת הלמידה: אחרי סגירת הפקיעות, מזרים אותן ל-expiry_history (append-only,
         # אידמפוטנטי). כישלון כאן לא מפיל את הסגירה — העסקאות כבר נסגרו; רק לוג WARN.
-        try:
-            upd = update_expiry_history_from_settlements(engine, dry_run=False)
-            log(f"עדכון expiry_history: נוספו {upd['inserted']} פקיעות "
-                f"(מסולקות {upd['settled_total']}, כבר קיימות {upd['already_present']}, "
-                f"דולגו-בלי-base {len(upd['skipped_no_base'])}).")
-            for w in upd.get("warnings", []):
-                log(w, level="WARN")
-        except Exception as exc:  # noqa: BLE001
-            log(f"עדכון expiry_history נכשל (הסגירה תקינה, ממשיך): {exc}", level="WARN")
+        if not _history_updater_enabled():
+            log("הזרמת expiry_history מושבתת (HISTORY_UPDATER_ENABLED != 'true') — מדלג. "
+                "ראה הערת הדגל בראש הקובץ.", level="WARN")
+        else:
+            try:
+                upd = update_expiry_history_from_settlements(engine, dry_run=False)
+                log(f"עדכון expiry_history: נוספו {upd['inserted']} פקיעות "
+                    f"(מסולקות {upd['settled_total']}, כבר קיימות {upd['already_present']}, "
+                    f"דולגו-בלי-base {len(upd['skipped_no_base'])}).")
+                for w in upd.get("warnings", []):
+                    log(w, level="WARN")
+            except Exception as exc:  # noqa: BLE001
+                log(f"עדכון expiry_history נכשל (הסגירה תקינה, ממשיך): {exc}", level="WARN")
     except Exception as exc:  # noqa: BLE001
         log(f"ריצת הסגירה נכשלה: {exc}", level="ERROR")
         return EXIT_ERROR

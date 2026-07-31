@@ -153,3 +153,59 @@ class TestMain:
         with patch.object(ace, "_build_engine", return_value=_ok_engine()), \
              patch.object(ace, "get_expiries_ready_to_close", side_effect=Exception("boom")):
             assert ace.main() == ace.EXIT_ERROR
+
+
+# ─── דגל הזרמת expiry_history (אירוע 23/07/2026) ───────────────────────
+
+class TestHistoryUpdaterFlag:
+    """
+    הדגל שמגן על קורפוס הלמידה. ברירת מחדל **כבוי** — כל עוד סמנטיקת
+    base_price לא הוכרעה, ההזרמה מערבבת תנועת-חודש עם תנועת-מושב באותה עמודה.
+    """
+
+    @pytest.mark.parametrize("value,expected", [
+        (None,     False),   # לא מוגדר כלל → ברירת המחדל הבטוחה
+        ("",       False),
+        ("false",  False),
+        ("0",      False),
+        ("yes",    False),   # רק 'true' מדליק — לא כל ערך "חיובי"
+        ("true",   True),
+        ("True",   True),    # case-insensitive
+        ("  true ", True),   # רווחים נסבלים
+    ])
+    def test_flag_parsing(self, monkeypatch, value, expected):
+        if value is None:
+            monkeypatch.delenv("HISTORY_UPDATER_ENABLED", raising=False)
+        else:
+            monkeypatch.setenv("HISTORY_UPDATER_ENABLED", value)
+        assert ace._history_updater_enabled() is expected
+
+    def test_disabled_by_default_does_not_write(self, monkeypatch):
+        """ברירת מחדל: הסגירה רצה כרגיל, אבל expiry_history לא נגעת כלל."""
+        monkeypatch.setenv("DATABASE_URL", "postgresql://x")
+        monkeypatch.delenv("HISTORY_UPDATER_ENABLED", raising=False)
+        with patch.object(ace, "_build_engine", return_value=_ok_engine()), \
+             patch.object(ace, "get_expiries_ready_to_close", return_value=[_ready("2026-06-16")]), \
+             patch.object(ace, "close_matured_expiry",
+                          return_value=_close_result("2026-06-16", closed=6, errors=0)), \
+             patch.object(ace, "update_expiry_history_from_settlements") as upd:
+            rc = ace.main()
+        assert rc == ace.EXIT_OK      # כיבוי הדגל אינו כישלון
+        upd.assert_not_called()       # ← העיקר: אין כתיבה לקורפוס הלמידה
+
+    def test_enabled_writes_with_commit(self, monkeypatch):
+        """עם הדגל דלוק — ההזרמה נקראת כרגיל, ובמפורש עם dry_run=False."""
+        monkeypatch.setenv("DATABASE_URL", "postgresql://x")
+        monkeypatch.setenv("HISTORY_UPDATER_ENABLED", "true")
+        with patch.object(ace, "_build_engine", return_value=_ok_engine()), \
+             patch.object(ace, "get_expiries_ready_to_close", return_value=[_ready("2026-06-16")]), \
+             patch.object(ace, "close_matured_expiry",
+                          return_value=_close_result("2026-06-16", closed=6, errors=0)), \
+             patch.object(ace, "update_expiry_history_from_settlements",
+                          return_value={"inserted": 1, "settled_total": 1,
+                                        "already_present": 0, "skipped_no_base": [],
+                                        "warnings": []}) as upd:
+            rc = ace.main()
+        assert rc == ace.EXIT_OK
+        upd.assert_called_once()
+        assert upd.call_args.kwargs.get("dry_run") is False
