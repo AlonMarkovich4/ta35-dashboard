@@ -17,6 +17,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 from data_loader import load_from_db, load_market_csv, save_to_db
 from history_updater import (
     compute_move_pct,
+    find_shared_bases,
+    is_plausible_move,
     update_expiry_history_from_settlements,
 )
 
@@ -175,9 +177,11 @@ def test_skipped_when_base_missing_or_zero(engine):
 def test_expiry_type_derived_from_date(engine):
     """בלי עמודת-סוג: 31/07/2026 (שישי אחרון בחודש) → M; 16/07 (חמישי) → W."""
     _seed_history(engine, ["2026-05-07"])
+    # בסיס **שונה** לכל פקיעה — בסיס-מושב אמיתי הוא לעולם פר-פקיעה. בסיס משותף
+    # הוא חתימת העוגן החודשי ונחסם ע"י find_shared_bases (ראה TestSharedBaseGate).
     _seed_settled(engine, [
         {"expiry_date": "2026-07-31", "base_index_value": 4000.0, "actual_index_close": 4040.0},
-        {"expiry_date": "2026-07-16", "base_index_value": 4000.0, "actual_index_close": 4040.0},
+        {"expiry_date": "2026-07-16", "base_index_value": 4010.0, "actual_index_close": 4050.0},
     ])
     res = update_expiry_history_from_settlements(engine, dry_run=True)
     types = {str(r["expiry_date"]): r["expiry_type"] for r in res["to_insert"]}
@@ -211,3 +215,79 @@ def test_multiple_strike_rows_collapse_to_one(engine):
     assert res["inserted"] == 1
     df = load_from_db(engine)
     assert len(df[df["expiry_date"] == pd.Timestamp("2026-07-16")]) == 1
+
+
+# ─── שער העוגן החודשי (אירוע 31/07/2026) ──────────────────────────────────
+
+class TestSharedBaseGate:
+    """
+    base תקין הוא פר-פקיעה (סגירת המושב הקודם). ערך שמשותף לכמה פקיעות הוא
+    עוגן של סדרה חודשית, ו-move_pct ממנו בולע את דריפט החודש.
+    """
+
+    def test_unique_bases_are_not_flagged(self):
+        """בסיס ייחודי לכל פקיעה → מפה ריקה."""
+        settled = {"2026-07-14": {"base": 4058.08}, "2026-07-15": {"base": 4086.02}}
+        assert find_shared_bases(settled) == {}
+
+    def test_shared_base_detected_with_all_dates(self):
+        """אותו בסיס ל-3 פקיעות → מזוהה, עם כל התאריכים ממוינים."""
+        settled = {
+            "2026-07-17": {"base": 3994.63},
+            "2026-07-14": {"base": 3994.63},
+            "2026-07-16": {"base": 3994.63},
+            "2026-07-21": {"base": 4143.93},
+        }
+        shared = find_shared_bases(settled)
+        assert list(shared) == [3994.63]
+        assert shared[3994.63] == ["2026-07-14", "2026-07-16", "2026-07-17"]
+
+    def test_invalid_bases_ignored(self):
+        """base של None/0/שלילי אינו נספר כשיתוף."""
+        settled = {"a": {"base": None}, "b": {"base": 0.0}, "c": {"base": -5.0}}
+        assert find_shared_bases(settled) == {}
+
+    def test_empty_input(self):
+        assert find_shared_bases({}) == {}
+        assert find_shared_bases(None) == {}
+
+    def test_shared_base_blocks_insert(self, engine):
+        """
+        רגרסיה לאירוע עצמו: 4 פקיעות שבועיות שחולקות base=3994.63 —
+        אף אחת מהן לא נכנסת, וכולן מדווחות עם סיבה מפורשת.
+        """
+        _seed_history(engine, ["2026-05-07"])
+        _seed_settled(engine, [
+            {"expiry_date": "2026-07-14", "base_index_value": 3994.63, "actual_index_close": 4058.08},
+            {"expiry_date": "2026-07-15", "base_index_value": 3994.63, "actual_index_close": 4086.02},
+            {"expiry_date": "2026-07-16", "base_index_value": 3994.63, "actual_index_close": 4196.09},
+            {"expiry_date": "2026-07-17", "base_index_value": 3994.63, "actual_index_close": 4156.43},
+        ])
+        res = update_expiry_history_from_settlements(engine, dry_run=False)
+        assert res["inserted"] == 0
+        assert res["to_insert"] == []
+        assert len(res["skipped_no_base"]) == 4
+        assert all("עוגן חודשי" in s["reason"] for s in res["skipped_no_base"])
+        assert any("3994.63" in w for w in res["warnings"])
+        assert load_from_db(engine)["expiry_date"].max() == pd.Timestamp("2026-05-07")
+
+
+class TestPlausibilityGate:
+    """גבול שפיות על התנועה — השיא ההיסטורי ב-768 פקיעות W הוא 5.92%."""
+
+    @pytest.mark.parametrize("value,expected", [
+        (0.0, True), (0.49, True), (-5.92, True), (8.0, True),
+        (8.01, False), (-12.5, False), (100.0, False), (None, False),
+    ])
+    def test_bounds(self, value, expected):
+        assert is_plausible_move(value) is expected
+
+    def test_implausible_move_blocked_even_with_unique_base(self, engine):
+        """בסיס ייחודי אך תנועה של 25% → נחסמת (שער שני, בלתי-תלוי)."""
+        _seed_history(engine, ["2026-05-07"])
+        _seed_settled(engine, [
+            {"expiry_date": "2026-07-16", "base_index_value": 4000.0, "actual_index_close": 5000.0},
+        ])
+        res = update_expiry_history_from_settlements(engine, dry_run=True)
+        assert res["to_insert"] == []
+        assert "לא סבירה" in res["skipped_no_base"][0]["reason"]

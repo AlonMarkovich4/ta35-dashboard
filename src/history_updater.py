@@ -111,6 +111,54 @@ def compute_move_pct(base_price, expiry_price):
     return mv, abs(mv)
 
 
+# ─── שערי שפיות על הבסיס (אירוע 31/07/2026) ─────────────────────────────────
+# הרקע: condor_settled_detail.base_index_value הוא עוגן של **סדרה חודשית** — אותו
+# ערך חוזר על עצמו עד 4 פקיעות שבועיות רצופות. expiry_history.base_price, לעומת
+# זאת, הוא סגירת **המושב הקודם** (אומת: base_price[i] == close_price[i-1], 27/27).
+# הזרמה מהעוגן החודשי בולעת את כל דריפט החודש: ממוצע |תנועה| 1.68% מול 0.49%
+# בקורפוס ההיסטורי, ובקצה 5.04% ל"פקיעה שבועית".
+#
+# הבדיקה הקיימת (base_varies) בודקת שוני *בתוך* פקיעה אחת ולכן לא תפסה את זה —
+# העוגן החודשי עקבי לחלוטין בתוך כל פקיעה. החתימה האמיתית היא שיתוף *בין* פקיעות.
+_MAX_PLAUSIBLE_ABS_MOVE = 8.0   # אחוז; מעבר לזה — כמעט ודאי בעיית עוגן, לא תנועה
+
+
+def find_shared_bases(settled: dict) -> dict:
+    """
+    מזהה ערכי base שמשותפים ליותר מפקיעה אחת — החתימה של עוגן חודשי.
+
+    בסיס תקין נקבע לכל פקיעה בנפרד (סגירת המושב הקודם), ולכן שני תאריכי פקיעה
+    שונים כמעט לעולם לא יחלקו את אותו ערך. שיתוף כזה מוכיח שהערך אינו בסיס-מושב.
+
+    Parameters
+    ----------
+    settled : מפת פקיעה(date) → {"base": float|None, ...} כפי ש-_fetch_settled מחזיר.
+
+    Returns
+    -------
+    dict: {base_value: [dates ממוינים]} — רק ערכים שמופיעים ביותר מפקיעה אחת.
+          מפה ריקה = הבסיסים ייחודיים לכל פקיעה (תקין).
+    """
+    by_base: dict = {}
+    for d, rec in (settled or {}).items():
+        b = _f((rec or {}).get("base"))
+        if b is None or b <= 0:
+            continue
+        by_base.setdefault(round(b, 4), []).append(d)
+    return {b: sorted(ds) for b, ds in by_base.items() if len(ds) > 1}
+
+
+def is_plausible_move(move_pct) -> bool:
+    """
+    האם התנועה סבירה כתנועת מושב-אחד. חוסם ערכים שמסגירים בעיית עוגן.
+
+    None או |move| > _MAX_PLAUSIBLE_ABS_MOVE → False. השיא ההיסטורי בקורפוס
+    (768 פקיעות שבועיות) הוא 5.92%, ולכן 8% הוא סף שמרני שלא חוסם תנועות אמיתיות.
+    """
+    v = _f(move_pct)
+    return v is not None and abs(v) <= _MAX_PLAUSIBLE_ABS_MOVE
+
+
 # ─── קריאות DB (קריאה בלבד, ללא CAST תלוי-דיאלקט) ────────────────────────────
 
 def _table_columns(engine, table: str) -> set[str]:
@@ -212,15 +260,43 @@ def update_expiry_history_from_settlements(engine, dry_run: bool = True) -> dict
     skipped_no_base: list[dict] = []
     warnings: list[str] = []
 
+    # שער שורש: בסיס שמשותף למספר פקיעות אינו בסיס-מושב אלא עוגן חודשי.
+    # חוסמים *לפני* הלולאה — כל הפקיעות שחולקות בסיס נפסלות, ולא נכנסת אף שורה
+    # מזוהמת. ראה הערת _MAX_PLAUSIBLE_ABS_MOVE.
+    shared = find_shared_bases(settled)
+    blocked = {d for dates in shared.values() for d in dates}
+    if shared:
+        for b, dates in sorted(shared.items()):
+            warnings.append(
+                f"בסיס {b} משותף ל-{len(dates)} פקיעות ({dates[0]}…{dates[-1]}) — "
+                f"עוגן חודשי, לא בסיס-מושב. הפקיעות נחסמו."
+            )
+        logger.error(
+            "history_updater: %d פקיעות נחסמו — base_index_value משותף בין פקיעות "
+            "(עוגן חודשי). לא הוזרמה אף שורה עבורן.", len(blocked)
+        )
+
     for d in sorted(settled):
         if d in existing:
             continue                                  # אידמפוטנטי — כבר בהיסטוריה
         rec = settled[d]
         base, close = rec["base"], rec["close"]
+        if d in blocked:
+            skipped_no_base.append({"expiry_date": str(d),
+                                    "reason": "base משותף בין פקיעות (עוגן חודשי)",
+                                    "close": close})
+            continue
         move_pct, abs_move = compute_move_pct(base, close)
         if move_pct is None:
             skipped_no_base.append({"expiry_date": str(d),
                                     "reason": f"base לא תקין ({base!r})", "close": close})
+            continue
+        if not is_plausible_move(move_pct):
+            skipped_no_base.append({"expiry_date": str(d),
+                                    "reason": f"תנועה לא סבירה ({move_pct:.2f}%) — חשד לבעיית עוגן",
+                                    "close": close})
+            logger.error("history_updater: %s נחסמה — move_pct=%.2f%% חורג מ-%.1f%%.",
+                         d, move_pct, _MAX_PLAUSIBLE_ABS_MOVE)
             continue
         if rec["base_varies"]:
             warnings.append(f"{d}: נצפו ערכי base_index_value שונים לאותה פקיעה — נבחר המקסימלי.")
