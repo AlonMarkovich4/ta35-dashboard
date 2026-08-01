@@ -100,11 +100,45 @@ def _open_reco_trades(engine, results) -> int:
     return errs
 
 
+def _trading_day_guard() -> int | None:
+    """
+    שער יום-מסחר: מדלג על הריצה כשהבורסה סגורה.
+
+    מחזיר EXIT_OK לדילוג, None להמשך רגיל. FORCE_RUN=true עוקף (להרצה ידנית
+    מ-workflow_dispatch) אך עדיין מרעיש בלוג.
+
+    נוסף אחרי אירוע תשעה באב (23/07/2026): ה-cron לבדו אינו יודע על חגים, והמערכת
+    רשמה החלטות והמלצות לפקיעה ביום שהבורסה הייתה סגורה — כשכל הריצות ירוקות.
+    """
+    from zoneinfo import ZoneInfo
+
+    from trading_calendar import holidays_are_current, is_trading_day, skip_reason
+
+    today = datetime.now(ZoneInfo("Asia/Jerusalem")).date()
+    force = os.getenv("FORCE_RUN", "").strip().lower() == "true"
+
+    if not holidays_are_current(today):
+        log(f"רשימת החגים ב-trading_calendar אינה מכסה את {today} — יש לעדכן אותה. "
+            f"עד אז חגים חדשים לא ייחסמו.", level="WARN")
+
+    reason = skip_reason(today, force=force)
+    if reason is not None:
+        log(f"{reason} — אין ריצה. (FORCE_RUN=true לעקיפה.)")
+        return EXIT_OK
+
+    if force and not is_trading_day(today):
+        log(f"FORCE_RUN=true — רץ למרות ש-{today} אינו יום מסחר.", level="WARN")
+    return None
+
+
 def main() -> int:
     db_url = os.environ.get("DATABASE_URL", "").strip()
     if not db_url:
         log("DATABASE_URL לא מוגדר בסביבה — לא ניתן לרוץ. יציאה.", level="ERROR")
         return EXIT_CONFIG
+
+    if (rc := _trading_day_guard()) is not None:
+        return rc
 
     # ייבוא אחרי בדיקת ה-env, כדי שכשל env ייתן הודעה ברורה לפני כל טעינה כבדה.
     try:

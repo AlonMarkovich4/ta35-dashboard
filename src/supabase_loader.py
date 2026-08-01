@@ -280,7 +280,7 @@ def _load_chains(eng, expiry_date: Optional[str]) -> Optional[dict]:
             if result is None:
                 continue
 
-            chain_df, drvtype_val, fetch_ts, baserate = result
+            chain_df, drvtype_val, fetch_ts, baserate, fetch_date_val = result
 
             if latest_ts is None or fetch_ts > latest_ts:
                 latest_ts = fetch_ts
@@ -294,6 +294,12 @@ def _load_chains(eng, expiry_date: Optional[str]) -> Optional[dict]:
                 "expiry_type": exp_type,
                 "chain":       chain_df,
                 "baserate":    baserate,
+                # ── מקור הנתונים ברמת הפקיעה הבודדת ──────────────────────
+                # as_of_date/fetched_at ברמה העליונה הם MAX על כל הפקיעות, ולכן
+                # פקיעה ישנה יכולה לרשת חותמת של אחות טרייה. אלה הערכים שלה עצמה,
+                # והם מה שצריך לבדוק כשמחליטים אם לפעול לפי השרשרת.
+                "fetch_date":  fetch_date_val,
+                "fetched_at":  fetch_ts,
             })
 
     if not expiries:
@@ -315,8 +321,11 @@ def _load_one_expiry(eng, conn, target: str):
     """
     טוען שרשרת פקיעה אחת ומחיל סינון רב-שכבתי.
 
-    מחזיר (DataFrame, drvtype, fetched_at, atm_level) או None אם הנתונים לא תקינים.
-    None מוחזר גם אם נותרות פחות מ-_MIN_CHAIN_ROWS שורות לאחר הסינון.
+    מחזיר (DataFrame, drvtype, fetched_at, atm_level, fetch_date) או None אם הנתונים
+    לא תקינים. None מוחזר גם אם נותרות פחות מ-_MIN_CHAIN_ROWS שורות לאחר הסינון.
+
+    fetch_date מוחזר כדי שהקורא יוכל לבדוק טריות **פר-פקיעה** — ראה
+    trading_calendar.is_chain_fresh.
     """
     # fetch_date ו-fetch_time זהים לכל ה-batches של אותה משיכה (נכתבים במפורש ע"י ה-pipeline)
     # בניגוד ל-fetched_at שמוגדר DEFAULT now() ומקבל ערך שונה לכל batch
@@ -507,4 +516,4 @@ def _load_one_expiry(eng, conn, target: str):
     df["put_pts"]  = (df["put_price"]  / MULTIPLIER).round(2)
 
     _dbg(f"✅ **תוצאה סופית:** {len(df)} שורות | ATM={atm_level:.0f}")
-    return df, str(drvtype_val), fetch_ts, atm_level
+    return df, str(drvtype_val), fetch_ts, atm_level, fetch_date_val

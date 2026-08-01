@@ -46,12 +46,38 @@
 - `src/history_updater.py` — `update_expiry_history_from_settlements(engine, dry_run=True)`.
   append-only, אידמפוטנטי (קיים→דלג), `dry_run` כברירת מחדל. כותב דרך `data_loader.save_to_db`
   (אותו נתיב-כתיבה היסטורי, ללא שכפול). CLI: `python3 src/history_updater.py [--commit]`.
-- **`move_pct` — עקבי להגדרה ההיסטורית (קריטי):** `(expiry−base)/base·100`, כאשר
-  `base_price ← condor_settled_detail.base_index_value` (הבסיס הרשמי) ו-`expiry_price ← actual_index_close`.
-  זהו *אותו סוג בסיס* כמו `expiry_history.base_price`. הפער 5.04% (מ-base_index_value) מול 2.50%
-  (מ-`recommendation_json.base_index`, אומדן ATM מזמן אחר) — ה-5.04% הוא העקבי, לכן בו משתמשים.
-- **חיווט Action:** `scripts/auto_close_expiries.py` מריץ את העדכון *אחרי* סגירת העסקאות
-  (`dry_run=False`). כישלון שם לא מפיל את הסגירה (WARN בלבד) — כל פקיעה שנסגרת נכנסת אוטומטית.
+- ⛔ **ההנחה המקורית הייתה שגויה — תוקן 31/07/2026.** הטענה שהייתה כאן ("`base_price ←
+  condor_settled_detail.base_index_value`, זהו *אותו סוג בסיס* כמו `expiry_history.base_price`,
+  ולכן 5.04% הוא העקבי") **הופרכה מול הנתונים**:
+  - `base_index_value` הוא עוגן של **סדרה חודשית** — אותו ערך חוזר עד 4 פקיעות שבועיות רצופות.
+  - `expiry_history.base_price` הוא **סגירת המושב הקודם** (אומת: `base_price[i] == close_price[i-1]`, 12/12).
+  - התוצאה: ממוצע |תנועה| 1.68% בשורות שהוזרמו מול 0.49% בקורפוס — פי 3.4. 27 שורות
+    (2.7% מהטבלה) הפכו את ה-regime ל-volatile, ריסקו את המדגם המותנה ל-0, והרחיבו את
+    המרווח הנבחר מ-1.75% ל-2.25%.
+  - השורות נמחקו (גיבוי: `expiry_history_backup_20260731`) ושוחזרו נכון.
+- **ההגדרה הנכונה:** `move_pct = (expiry_price − base_price)/base_price·100`, כאשר
+  `base_price` = סגירת המושב הקודם ו-`expiry_price` = מחיר הסילוק (פתיחת יום הפקיעה).
+- ⚠️ **`actual_index_close` אינו מה ששמו אומר:** הוא **סגירת המושב הקודם** (אומת מול Yahoo, 27/27).
+  הבאג ב-`tase-pipeline/strategy_engine._fetch_settlement_price`, **לא ב-repo הזה**. לכן גם
+  `iron_condor_strategies.actual_pnl_ils` ו-`close_index` של עסקאות סגורות מחושבים ממחיר מוסט.
+- **שני שערים ב-`history_updater`:** `find_shared_bases` (base משותף בין פקיעות ⇒ חסימה) ו-
+  `is_plausible_move` (|move| > 8% ⇒ חסימה; השיא ההיסטורי 5.92%).
+- **חיווט Action:** `scripts/auto_close_expiries.py` מריץ את העדכון *אחרי* סגירת העסקאות,
+  **מאחורי `HISTORY_UPDATER_ENABLED` שכבוי כברירת מחדל** עד שהבאג ב-`tase-pipeline` יתוקן.
+- **שחזור ידני:** `scripts/backfill_expiry_history.py` (dry-run כברירת מחדל).
+
+## לוח מסחר ושער טריות — ✅ נוסף 31/07/2026 (אירוע תשעה באב)
+- `src/trading_calendar.py` — `is_trading_day`, `trading_days_between`, `skip_reason`,
+  `is_chain_fresh`. מודול טהור, אפס תלויות.
+- **שבוע המסחר השתנה:** TASE עברה מ-ראשון–חמישי ל-**שני–שישי** בתחילת 2026. אומת
+  משני מקורות (expiry_history + Yahoo). ה-cron של שלושת ה-Actions תוקן מ-`0-4` ל-`1-5`.
+- **`_trading_day_guard`** בשני הרושמים (`auto_record_decisions`, `auto_record_margins`).
+  `auto_close_expiries` **בכוונה בלי שער** — הטריגר שלו הוא קיום הסטלמנט, לא הזמן.
+  עקיפה ידנית: `FORCE_RUN=true`.
+- **`is_chain_fresh` — ברירת מחדל 0 = "נמשכה היום".** זו הרמה לכל מי שכותב ל-DB.
+- ⚠️ **רשימת החגים מכוסה עד 31/12/2026 בלבד.** שלושה תאריכים בספטמבר עדיין **לא אומתו**
+  מול לוח TASE הרשמי (11/09 ערב ר"ה, 25/09 ערב סוכות — נוהג הבורסה משתנה; 21/09 יום כיפור ודאי).
+  `holidays_are_current()` מרעישה כשהרשימה מתיישנת.
 
 ## שכבת "המנוע מול המציאות" (גשרים 1–2) — ✅ הושלם
 - `src/decision_recorder.py` (גשר 1) — רושם החלטות מנוע ל-`decision_log`.
