@@ -20,6 +20,8 @@ before_date: לא נשלח (=None). הפקיעות כאן *חיות* (>= היו�
 from __future__ import annotations
 
 import logging
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
@@ -35,6 +37,9 @@ from paper_db import (
     margin_recommendation_logged_today,
 )
 from supabase_loader import get_available_expiries, get_latest_option_chain
+from trading_calendar import is_chain_fresh
+
+TZ_IL = ZoneInfo("Asia/Jerusalem")
 
 logger = logging.getLogger(__name__)
 
@@ -106,6 +111,28 @@ def _recommendation_for_expiry(
     chain_df = entry.get("chain")
     if chain_df is None or len(chain_df) == 0:
         return None
+
+    # ── שער טריות ────────────────────────────────────────────────────────
+    # נבדק על fetch_date של **הפקיעה הזו**, לא על as_of_date שהוא MAX על כל
+    # הפקיעות — אחרת פקיעה ישנה יורשת חותמת של אחות טרייה.
+    #
+    # הקריטריון: השרשרת חייבת להיות משיכה של היום. ביום מסחר תקין האוסף מושך
+    # כל 15 דקות מ-09:30 והרשם רץ ב-12:00, ולכן היעדר משיכה של היום פירושו
+    # שהאוסף לא עבד — ואז אסור לגזור המלצה. זה השער שהיה חסר ב-23/07/2026.
+    #
+    # חשוב להבחנה שביקשנו: ביום שאינו יום מסחר הרשם כלל לא מגיע לכאן
+    # (_trading_day_guard חוסם קודם), ולכן הגעה לכאן עם שרשרת ישנה = תקלה
+    # אמיתית, לא חג.
+    today = datetime.now(TZ_IL).date()
+    fetch_date = entry.get("fetch_date")
+    if not is_chain_fresh(fetch_date, today):
+        logger.error(
+            "margin_recorder: שרשרת לא טרייה לפקיעה %s — fetch_date=%r, היום %s. "
+            "לא נגזרת המלצה.", exp_str, fetch_date, today,
+        )
+        return {"_stale_chain": True,
+                "expiry_date": exp_ts.date(),
+                "chain_fetch_date": str(fetch_date) if fetch_date else None}
 
     atm = find_atm(chain_df)
     if not atm:
@@ -235,6 +262,14 @@ def record_margin_recommendations_for_upcoming(
             )
             if rec is None:
                 rec_summary["status"] = "no_recommendation"  # אין שרשרת/מרווח תקין
+                results.append(rec_summary)
+                continue
+
+            # שרשרת ישנה — לא כותבים כלום, אבל **מדווחים במפורש**. הסטטוס נבדל
+            # מ-no_recommendation בכוונה: זו תקלת דאטה, לא היעדר מרווח תקין.
+            if rec.get("_stale_chain"):
+                rec_summary["status"] = "stale_chain"
+                rec_summary["chain_fetch_date"] = rec.get("chain_fetch_date")
                 results.append(rec_summary)
                 continue
 

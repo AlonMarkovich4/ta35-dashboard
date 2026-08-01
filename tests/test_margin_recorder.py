@@ -9,6 +9,7 @@ insert_margin_recommendation / margin_recommendation_logged_today), טעינת �
 תאריכי הבדיקה הם 2099 (עתיד) ו-2000 (עבר) כדי שסינון ">= היום" יהיה דטרמיניסטי.
 """
 import sys
+from datetime import date
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -193,7 +194,9 @@ def _assembly_setup(monkeypatch, *, etype_text, sel):
     monkeypatch.setattr(mr, "get_latest_option_chain", lambda exp, engine=None: {
         "as_of_date": "12/07/2026",
         "expiries": [{"expiry_type": etype_text,
-                      "chain": pd.DataFrame({"strike": [1, 2, 3]})}],
+                      "chain": pd.DataFrame({"strike": [1, 2, 3]}),
+                      # שרשרת של היום — המצב התקין. שער הטריות נבדק ב-TestChainFreshnessGate.
+                      "fetch_date": date.today()}],
     })
     monkeypatch.setattr(mr, "find_atm",
                         lambda chain_df: {"index_estimate": 2000.0, "strike": 2000})
@@ -322,7 +325,8 @@ class TestImpliedMoveRecorded:
                          "call_delta": 0.5 + (base - k) / 1000.0})
         return {
             "as_of_date": "13/07/2026 14:57",
-            "expiries": [{"expiry_type": "W", "chain": pd.DataFrame(rows)}],
+            "expiries": [{"expiry_type": "W", "chain": pd.DataFrame(rows),
+                          "fetch_date": date.today()}],
         }
 
     @staticmethod
@@ -382,3 +386,77 @@ class TestImpliedMoveRecorded:
         if rec is not None:
             assert rec["implied_move"]["skipped"] is True
             assert rec["implied_move"]["expected_move_pct"] is None
+
+
+# ─── שער הטריות (אירוע תשעה באב, 23/07/2026) ─────────────────────────────
+
+class TestChainFreshnessGate:
+    """
+    ההבחנה בין "חג" ל"תקלה". ביום שאינו יום מסחר הרשם כלל לא מגיע לכאן
+    (_trading_day_guard חוסם קודם), ולכן שרשרת ישנה כאן = האוסף לא סיפק
+    נתונים ביום מסחר — תקלה אמיתית, שאסור לרשום המלצה על בסיסה.
+    """
+
+    @staticmethod
+    def _setup_chain(monkeypatch, fetch_date):
+        monkeypatch.setattr(mr, "get_latest_option_chain", lambda exp, engine=None: {
+            "as_of_date": "31/07/2026 12:00",
+            "expiries": [{"expiry_type": "W",
+                          "chain": pd.DataFrame({"strike": [1, 2, 3]}),
+                          "fetch_date": fetch_date}],
+        })
+        monkeypatch.setattr(mr, "find_atm",
+                            lambda chain_df: {"index_estimate": 2000.0, "strike": 2000})
+
+    def test_stale_chain_returns_sentinel_and_writes_nothing(self, monkeypatch):
+        """שרשרת של אתמול → sentinel, ו-select_margin כלל לא נקרא."""
+        self._setup_chain(monkeypatch, date(2020, 1, 1))
+        called = []
+        monkeypatch.setattr(mr, "select_margin",
+                            lambda *a, **k: called.append(1) or {"selected_margin": 2.0})
+
+        rec = mr._recommendation_for_expiry(
+            pd.DataFrame({"move_pct": [0.5], "expiry_type": ["W"]}),
+            pd.Timestamp("2099-02-19"), engine=MagicMock(),
+        )
+        assert rec is not None
+        assert rec["_stale_chain"] is True
+        assert rec["chain_fetch_date"] == "2020-01-01"
+        assert called == []           # לא בוזבזה עבודה, ובעיקר — לא נגזרה המלצה
+
+    def test_fresh_chain_passes_the_gate(self, monkeypatch):
+        """שרשרת של היום → ממשיך כרגיל (select_margin נקרא)."""
+        self._setup_chain(monkeypatch, date.today())
+        monkeypatch.setattr(mr, "build_margin_curve", lambda *a, **k: [])
+        monkeypatch.setattr(mr, "select_margin", lambda *a, **k: {"selected_margin": None})
+
+        hist = pd.DataFrame({"move_pct": [0.5], "expiry_type": ["W"],
+                             "expiry_date": [pd.Timestamp("2026-07-31")]})
+        rec = mr._recommendation_for_expiry(
+            hist, pd.Timestamp("2099-02-19"), engine=MagicMock(),
+        )
+        assert rec is None            # None כי אין מרווח — אבל **לא** נחסם כשרשרת ישנה
+
+    def test_missing_fetch_date_is_treated_as_stale(self, monkeypatch):
+        """fail-safe: שרשרת בלי fetch_date נחשבת ישנה, לא טרייה."""
+        self._setup_chain(monkeypatch, None)
+        rec = mr._recommendation_for_expiry(
+            pd.DataFrame({"move_pct": [0.5], "expiry_type": ["W"]}),
+            pd.Timestamp("2099-02-19"), engine=MagicMock(),
+        )
+        assert rec["_stale_chain"] is True
+        assert rec["chain_fetch_date"] is None
+
+    def test_recorder_reports_stale_status_distinctly(self, monkeypatch):
+        """
+        הסטטוס נבדל מ-no_recommendation בכוונה — זו תקלת דאטה, לא היעדר מרווח,
+        והיא זו שמפילה את ה-Action לאדום.
+        """
+        m = _setup(monkeypatch, expiries=["2099-02-19"])
+        monkeypatch.setattr(mr, "_recommendation_for_expiry",
+                            lambda *a, **k: {"_stale_chain": True,
+                                             "chain_fetch_date": "2026-07-22"})
+        res = mr.record_margin_recommendations_for_upcoming(engine=MagicMock())
+        assert [r["status"] for r in res] == ["stale_chain"]
+        assert res[0]["chain_fetch_date"] == "2026-07-22"
+        m["insert"].assert_not_called()      # ← העיקר: אפס כתיבה ל-DB

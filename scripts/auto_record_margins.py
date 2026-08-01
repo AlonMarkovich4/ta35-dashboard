@@ -176,7 +176,7 @@ def main() -> int:
         log("אין פקיעות קרובות לתיעוד — אין מה לעשות (מצב רגיל).")
         return EXIT_OK
 
-    recorded = skipped = no_rec = errored = 0
+    recorded = skipped = no_rec = stale = errored = 0
     for r in results:
         status = r.get("status")
         if status == "recorded":
@@ -185,16 +185,23 @@ def main() -> int:
             skipped += 1
         elif status == "no_recommendation":
             no_rec += 1
+        elif status == "stale_chain":
+            stale += 1
         else:  # "error"
             errored += 1
-        log(
-            f"פקיעה {r.get('expiry_date')} (סוג {r.get('expiry_type')}): "
-            f"מרווח={_fmt_margin(r.get('selected_margin'))} "
-            f"hold={_fmt_hold(r.get('hold_blended'))} → {status}"
-        )
+
+        if status == "stale_chain":
+            log(f"פקיעה {r.get('expiry_date')}: שרשרת לא טרייה "
+                f"(נמשכה {r.get('chain_fetch_date')}) → לא נגזרה המלצה.", level="ERROR")
+        else:
+            log(
+                f"פקיעה {r.get('expiry_date')} (סוג {r.get('expiry_type')}): "
+                f"מרווח={_fmt_margin(r.get('selected_margin'))} "
+                f"hold={_fmt_hold(r.get('hold_blended'))} → {status}"
+            )
 
     log(f"סיכום: נרשמו {recorded} · דולגו {skipped} · "
-        f"ללא-המלצה {no_rec} · שגיאות {errored}.")
+        f"ללא-המלצה {no_rec} · שרשרת-ישנה {stale} · שגיאות {errored}.")
 
     # ── גשר 3: פתיחת עסקאות לפי המלצה (רק אם ה-kill-switch דלוק; אחרת אפס כתיבה) ──
     trade_errors = _open_reco_trades(engine, results)
@@ -202,6 +209,17 @@ def main() -> int:
     if errored or trade_errors:
         log("היו שגיאות (תיעוד/מסחר) — יציאה עם קוד שגיאה.", level="ERROR")
         return EXIT_ERROR
+
+    # ── ההבחנה שביקשנו: חג מול תקלה ──────────────────────────────────────
+    # להגיע לכאן פירושו שהיום **הוא** יום מסחר (_trading_day_guard כבר חסם אחרת).
+    # לכן שרשרת שאינה של היום איננה "חג" — היא אומרת שהאוסף לא סיפק נתונים היום.
+    # exit != 0 בכוונה: זה המצב היחיד שבו ריצה ירוקה הייתה מסתירה תקלה אמיתית,
+    # וזה בדיוק מה שקרה ב-23/07/2026.
+    if stale:
+        log(f"{stale} פקיעות עם שרשרת לא טרייה ביום מסחר — האוסף לא סיפק נתונים היום. "
+            f"יציאה עם קוד שגיאה כדי שה-Action יסומן אדום.", level="ERROR")
+        return EXIT_ERROR
+
     if recorded == 0 and (skipped or no_rec):
         log("לא נרשמו המלצות חדשות (הכל כבר תועד היום / אין שרשרת מלאה) — מצב רגיל.")
     return EXIT_OK
