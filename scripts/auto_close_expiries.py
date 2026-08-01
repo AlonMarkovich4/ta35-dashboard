@@ -171,6 +171,67 @@ def _safe_dispose(engine) -> None:
 # לעולם) בלי להרוויח דבר. השערים נדרשים בשני הרושמים, שהטריגר שלהם הוא cron.
 
 
+# ── גילוי עסקאות יתומות ───────────────────────────────────────────────────
+# הרקע (31/07/2026): שש עסקאות benchmark לפקיעת 19/06 נשארו פתוחות שישה שבועות
+# בלי שאיש ידע. הסטלמנט שלהן **היה קיים**, אבל כל שורותיו סומנו is_valid=false
+# ולכן נפלו מה-VIEW condor_settled_detail — שהוא כל מה שהסקריפט הזה רואה.
+# המנגנון היחיד שהיה אמור לתפוס את זה (daily_review) הושתק ברשימת KNOWN_UNSETTLED.
+#
+# הלקח: כישלון לסגור חייב להיות רועש. עסקה שפקיעתה עברה ולא נסגרה מזייפת
+# P&L, win-rate, ואת שכבת הוולידציה — עד שמישהו מסתכל.
+_ORPHAN_GRACE_TRADING_DAYS = 2
+
+# יתומות מוכרות: **לא מושתקות** — הן מדווחות בכל ריצה, רק לא מפילות אותה.
+# כל הוספה כאן חייבת סיבה ותאריך. זה ההבדל מ-KNOWN_UNSETTLED שרק הסתיר.
+_ACKNOWLEDGED_ORPHANS = {
+    "2026-07-23": "תשעה באב — הבורסה לא נפתחה, אין ולא יהיה סילוק. "
+                  "ממתין לבירור מול TASE אם החוזה גולגל או בוטל (נרשם 31/07/2026).",
+}
+
+
+def _report_orphans(engine) -> int:
+    """
+    מדווח על עסקאות פתוחות שפקיעתן עברה. מחזיר את מספר היתומות **הלא-מוכרות**.
+
+    הגיל נמדד בימי מסחר: פקיעה של יום שישי אינה "יתומה בת 3 ימים" ביום שני.
+    יתומה מוכרת (_ACKNOWLEDGED_ORPHANS) מדווחת אך אינה נספרת.
+    """
+    from datetime import date as _date
+    from zoneinfo import ZoneInfo
+
+    from trading_calendar import trading_days_between
+
+    today = datetime.now(ZoneInfo("Asia/Jerusalem")).date()
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(text("""
+                SELECT id, portfolio_id, expiry_date, max_loss
+                FROM paper_trades
+                WHERE status = 'open' AND expiry_date < :today
+                ORDER BY expiry_date, id
+            """), {"today": today}).fetchall()
+    except Exception as exc:  # noqa: BLE001
+        log(f"בדיקת יתומות נכשלה (לא מפיל את הריצה): {exc}", level="WARN")
+        return 0
+
+    unacknowledged = 0
+    for tid, pid, exp, max_loss in rows:
+        exp_d = exp if isinstance(exp, _date) else _date.fromisoformat(str(exp)[:10])
+        age = trading_days_between(exp_d, today)
+        if age <= _ORPHAN_GRACE_TRADING_DAYS:
+            continue                       # עדיין בחלון הסגירה הרגיל
+        note = _ACKNOWLEDGED_ORPHANS.get(exp_d.isoformat())
+        if note:
+            log(f"יתומה מוכרת: עסקה {tid} (תיק {pid}, פקיעה {exp_d}, "
+                f"{age} ימי מסחר) — {note}")
+        else:
+            unacknowledged += 1
+            log(f"עסקה {tid} (תיק {pid}) פתוחה {age} ימי מסחר אחרי פקיעת {exp_d} "
+                f"— אין סטלמנט ב-condor_settled_detail. חשיפה {max_loss}. "
+                f"בדוק is_valid ב-iron_condor_strategies.", level="ERROR")
+    return unacknowledged
+
+
 def main() -> int:
     """נקודת כניסה: קורא env, מאמת חיבור, מריץ סגירה. מחזיר קוד יציאה."""
     log("=== auto_close_expiries: התחלה ===")
@@ -210,6 +271,8 @@ def main() -> int:
                     log(w, level="WARN")
             except Exception as exc:  # noqa: BLE001
                 log(f"עדכון expiry_history נכשל (הסגירה תקינה, ממשיך): {exc}", level="WARN")
+        # אחרי הסגירה — מה נשאר פתוח ולא היה אמור.
+        orphans = _report_orphans(engine)
     except Exception as exc:  # noqa: BLE001
         log(f"ריצת הסגירה נכשלה: {exc}", level="ERROR")
         return EXIT_ERROR
@@ -220,6 +283,13 @@ def main() -> int:
     # ויינסו שוב בריצה הבאה (idempotent self-healing).
     if summary.get("trades_failed", 0) > 0:
         log("היו כשלי-סגירה — יציאה עם קוד שגיאה לסימון ב-CI.", level="ERROR")
+        return EXIT_ERROR
+
+    # יתומות: עסקה שפקיעתה עברה ולא נסגרה מזייפת P&L ו-win-rate עד שמישהו מסתכל.
+    # exit != 0 כדי שמישהו יסתכל. נבדק אחרי dispose? לא — לפניו, ה-engine עוד חי.
+    if orphans:
+        log(f"{orphans} עסקאות יתומות שאינן ברשימת המוכרות — יציאה עם קוד שגיאה.",
+            level="ERROR")
         return EXIT_ERROR
 
     log("=== auto_close_expiries: סיום תקין ===")

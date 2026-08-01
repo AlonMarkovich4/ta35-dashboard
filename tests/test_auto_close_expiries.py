@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from datetime import date
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -209,3 +210,88 @@ class TestHistoryUpdaterFlag:
         assert rc == ace.EXIT_OK
         upd.assert_called_once()
         assert upd.call_args.kwargs.get("dry_run") is False
+
+
+# ─── גילוי יתומות (אירוע 19/06 — שישה שבועות בשקט) ────────────────────────
+
+def _orphan_engine(rows):
+    """engine שמחזיר את השורות הנתונות לשאילתת היתומות."""
+    conn = MagicMock()
+    conn.__enter__ = MagicMock(return_value=conn)
+    conn.__exit__ = MagicMock(return_value=False)
+    conn.execute.return_value.fetchall.return_value = rows
+    eng = MagicMock()
+    eng.connect.return_value = conn
+    return eng
+
+
+class TestOrphanDetection:
+    """
+    שש עסקאות benchmark לפקיעת 19/06 נשארו פתוחות שישה שבועות. הסטלמנט היה
+    קיים, אבל is_valid=false הפיל אותו מה-VIEW — וההתראה היחידה הושתקה ברשימה.
+    כישלון לסגור חייב להיות רועש.
+    """
+
+    def _run(self, monkeypatch, rows, today=date(2026, 8, 1)):
+        import datetime as _dt
+
+        class _Now:
+            def now(self, tz=None):
+                return _dt.datetime(today.year, today.month, today.day, 12, 0, tzinfo=tz)
+
+        monkeypatch.setattr(ace, "datetime", _Now())
+        return ace._report_orphans(_orphan_engine(rows))
+
+    def test_no_open_trades_is_clean(self, monkeypatch):
+        assert self._run(monkeypatch, []) == 0
+
+    def test_within_grace_is_not_flagged(self, monkeypatch):
+        """פקיעה של אתמול — עדיין בחלון הסגירה הרגיל."""
+        rows = [(50, 8, date(2026, 7, 31), -1240.0)]
+        assert self._run(monkeypatch, rows) == 0
+
+    def test_old_orphan_is_flagged(self, monkeypatch):
+        """רגרסיה ל-19/06: פקיעה מלפני שבועות שעדיין פתוחה ⇒ נספרת."""
+        rows = [(11, 2, date(2026, 6, 19), -580.0)]
+        assert self._run(monkeypatch, rows) == 1
+
+    def test_acknowledged_orphan_is_reported_but_not_counted(self, monkeypatch):
+        """23/07 מוכרת — מדווחת בכל ריצה, אך אינה מפילה את הריצה."""
+        rows = [(36, 8, date(2026, 7, 23), -1240.0)]
+        assert self._run(monkeypatch, rows) == 0
+
+    def test_mixed_counts_only_unacknowledged(self, monkeypatch):
+        rows = [
+            (36, 8, date(2026, 7, 23), -1240.0),   # מוכרת
+            (11, 2, date(2026, 6, 19), -580.0),    # לא מוכרת
+            (50, 8, date(2026, 7, 31), -1240.0),   # בתוך החלון
+        ]
+        assert self._run(monkeypatch, rows) == 1
+
+    def test_db_error_does_not_break_the_run(self, monkeypatch):
+        """בדיקת היתומות היא דיווח — כשל בה לא יפיל סגירה שכבר הצליחה."""
+        eng = MagicMock()
+        eng.connect.side_effect = Exception("DB down")
+        import datetime as _dt
+
+        class _Now:
+            def now(self, tz=None):
+                return _dt.datetime(2026, 8, 1, 12, 0, tzinfo=tz)
+
+        monkeypatch.setattr(ace, "datetime", _Now())
+        assert ace._report_orphans(eng) == 0
+
+    def test_main_exits_error_on_unacknowledged_orphan(self, monkeypatch):
+        """היתומה מפילה את הריצה לאדום — זה כל העניין."""
+        monkeypatch.setenv("DATABASE_URL", "postgresql://x")
+        with patch.object(ace, "_build_engine", return_value=_ok_engine()), \
+             patch.object(ace, "get_expiries_ready_to_close", return_value=[]), \
+             patch.object(ace, "_report_orphans", return_value=1):
+            assert ace.main() == ace.EXIT_ERROR
+
+    def test_main_ok_when_orphans_all_acknowledged(self, monkeypatch):
+        monkeypatch.setenv("DATABASE_URL", "postgresql://x")
+        with patch.object(ace, "_build_engine", return_value=_ok_engine()), \
+             patch.object(ace, "get_expiries_ready_to_close", return_value=[]), \
+             patch.object(ace, "_report_orphans", return_value=0):
+            assert ace.main() == ace.EXIT_OK
