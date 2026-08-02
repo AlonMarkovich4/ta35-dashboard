@@ -295,6 +295,7 @@ def test_as_date_parses_types():
 def test_summarize_empty():
     assert mv.summarize_margin_validation([]) == {
         "n_validated": 0, "hold_rate": 0.0, "n_held": 0,
+        "hold_rate_1session": 0.0,
         "avg_margin_gap": 0.0, "est_pnl_total": 0.0,
     }
 

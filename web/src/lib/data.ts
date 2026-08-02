@@ -829,13 +829,24 @@ export async function getMarginData(): Promise<MarginData> {
     for (const s of settleRows) if (s.iso && s.close != null) settlements.set(s.iso, Number(s.close));
 
     // move_pct הקנוני מ-expiry_history.
-    const histRows = await sql<{ iso: string; move_pct: string | number }[]>`
-      SELECT expiry_date::date::text AS iso, move_pct
+    const histRows = await sql<
+      { iso: string; move_pct: string | number; expiry_price: string | number | null }[]
+    >`
+      SELECT expiry_date::date::text AS iso, move_pct, expiry_price
       FROM expiry_history
       WHERE move_pct IS NOT NULL
     `;
     const historyMoves = new Map<string, number>();
-    for (const h of histRows) if (h.iso) historyMoves.set(h.iso, Number(h.move_pct));
+    // מחיר הסילוק **האמיתי**. לא condor_settled_detail.actual_index_close — הוא
+    // בפועל סגירת המושב הקודם (באג ב-tase-pipeline, אומת 27/27).
+    const settlementPrices = new Map<string, number>();
+    for (const h of histRows) {
+      if (!h.iso) continue;
+      historyMoves.set(h.iso, Number(h.move_pct));
+      if (h.expiry_price != null && Number(h.expiry_price) > 0) {
+        settlementPrices.set(h.iso, Number(h.expiry_price));
+      }
+    }
 
     // ── ולידציה (המקור-אמת: marginMath.buildMarginValidationRows) ──
     const valRows = buildMarginValidationRows(
@@ -845,9 +856,12 @@ export async function getMarginData(): Promise<MarginData> {
         marginPct: r.marginPct,
         baseIndex: r.baseIndex,
         gridMargins: r.gridMargins,
+        shortPutStrike: r.shortPutStrike,
+        shortCallStrike: r.shortCallStrike,
       })),
       settlements,
       historyMoves,
+      settlementPrices,
     );
     const summary = summarizeMarginValidation(valRows);
     const validationRows: MarginValidationDisplayRow[] = valRows.map((r) => ({

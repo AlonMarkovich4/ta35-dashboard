@@ -58,7 +58,11 @@ export function MarginView({ data }: { data: MarginData }) {
                 label="hold בפועל"
                 value={pctFrac(summary.holdRate, 0)}
                 tone="text-accent"
-                sub={`${summary.nHeld}/${summary.nValidated} החזיקו`}
+                sub={
+                  summary.holdRate1session == null
+                    ? `${summary.nHeld}/${summary.nValidated} החזיקו`
+                    : `${summary.nHeld}/${summary.nValidated} החזיקו · לפי הגדרת הבקטסט: ${pctFrac(summary.holdRate1session, 0)}`
+                }
               />
               <Kpi
                 label="פער ממוצע מהאופטימום"
@@ -139,8 +143,13 @@ export function MarginView({ data }: { data: MarginData }) {
             הפרמיה בין ה-shorts, ירידה ליניארית עד ה-longs, והפסד-מקס מעבר להם.
           </li>
           <li>
-            <b className="text-text1">החזיק / נשבר:</b> |תנועה בפועל| ≤ המרווח המומלץ — אותה הגדרה
-            בדיוק כמו בסימולציה ההיסטורית, כך ש-hold בפועל בר-השוואה ל-hold של הבקטסט.
+            <b className="text-text1">החזיק / נשבר:</b> מחיר הסילוק האמיתי נפל בין ה-short
+            strikes של ההמלצה — כלומר האם הפוזיציה שנפתחה באמת שרדה, על פני כל תקופת
+            החשיפה (5–7 מושבים).{" "}
+            <b className="text-text1">שים לב:</b> המספר בסוגריים (&quot;לפי הגדרת הבקטסט&quot;)
+            מודד תנועת <b className="text-text1">מושב אחד</b> בלבד, וקיים רק כדי להשוות
+            ל-<code>margin_backtest</code>. הוא גבוה בהרבה, והוא <b className="text-text1">אינו</b>{" "}
+            שיעור ההחזקה בפועל — עד 02/08/2026 הוא זה שהוצג כאן בטעות.
           </li>
           <li>
             <b className="text-text1">אופטימום בדיעבד ופער:</b> המרווח הצר ביותר שהיה מחזיק את

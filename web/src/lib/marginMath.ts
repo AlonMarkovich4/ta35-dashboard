@@ -22,6 +22,9 @@ export type MarginRecommendation = {
   marginPct: number | null; // המרווח שהומלץ
   baseIndex: number | null; // recommendation_json.base_index (לגיבוי חישוב התנועה)
   gridMargins: number[]; // recommendation_json.grid[].margin_pct (לאופטימום בדיעבד)
+  // ה-short strikes בפועל — הבדיקה הטובה ביותר של held (מתחשבת בהצמדה לגריד).
+  shortPutStrike?: number | null;
+  shortCallStrike?: number | null;
 };
 
 // ─── טיפוסי פלט ──────────────────────────────────────────────────────────
@@ -32,14 +35,19 @@ export type MarginValidationRow = {
   actualMovePct: number; // התנועה בפועל (חתומה)
   actualAbsMovePct: number; // |move|
   moveSource: "expiry_history" | "settlement";
-  held: boolean; // |move| ≤ margin
+  held: boolean; // הסילוק בין ה-short strikes בפועל — המספר האמיתי
+  held1session?: boolean; // ההגדרה הישנה (מושב אחד) — להשוואה לבקטסט בלבד
+  settlementPrice?: number | null;
+  realMovePct?: number | null;
+  heldSource?: "strikes" | "real_move" | "1session";
   marginOptimalHindsight: number | null; // הצר ביותר שהיה מחזיק; null אם חרגה מהגריד
   marginGap: number | null; // recommended − optimal (חתום); null אם optimal=null
 };
 
 export type MarginValidationSummary = {
   nValidated: number;
-  holdRate: number; // [0,1] — העקביות בפועל
+  holdRate: number; // [0,1] — **hold אמיתי**: הסילוק בין ה-short strikes
+  holdRate1session?: number; // ההגדרה הישנה (מושב אחד) — להשוואה לבקטסט בלבד
   nHeld: number;
   avgMarginGap: number; // פער ממוצע מהאופטימום
 };
@@ -98,8 +106,9 @@ export function optimalHindsight(absMove: number, gridMargins: number[]): number
 // settlement כגיבוי ((close − base_index)/base_index). ללא settlement → לא ולידבילית.
 export function buildMarginValidationRows(
   latestRecs: MarginRecommendation[],
-  settlements: Map<string, number>, // expiryKey → actual_index_close
-  historyMoves: Map<string, number>, // expiryKey → move_pct
+  settlements: Map<string, number>, // expiryKey → actual_index_close (T-1! ראה למטה)
+  historyMoves: Map<string, number>, // expiryKey → move_pct (מושב אחד)
+  settlementPrices?: Map<string, number>, // expiryKey → expiry_price (הסילוק האמיתי)
 ): MarginValidationRow[] {
   const rows: MarginValidationRow[] = [];
   for (const rec of latestRecs) {
@@ -125,8 +134,31 @@ export function buildMarginValidationRows(
     const rmargin = rec.marginPct;
     if (rmargin == null) continue;
     const absMove = Math.abs(move);
-    const held = absMove <= rmargin;
-    const optimal = optimalHindsight(absMove, rec.gridMargins);
+    // ההגדרה הישנה — תנועת מושב אחד. נשמרת **רק** להשוואה לבקטסט.
+    const held1session = absMove <= rmargin;
+
+    // ── התנועה האמיתית: מהעוגן של ההמלצה ועד הסילוק ──────────────────
+    const settle = settlementPrices?.get(exp) ?? null;
+    const realMove =
+      settle != null && rec.baseIndex != null && rec.baseIndex !== 0
+        ? ((settle - rec.baseIndex) / rec.baseIndex) * 100
+        : null;
+
+    // הבדיקה הטובה ביותר: הסילוק נפל בין ה-short strikes בפועל.
+    const heldStrikes =
+      settle != null && rec.shortPutStrike != null && rec.shortCallStrike != null
+        ? settle >= rec.shortPutStrike && settle <= rec.shortCallStrike
+        : null;
+
+    const held =
+      heldStrikes != null
+        ? heldStrikes
+        : realMove != null
+          ? Math.abs(realMove) <= rmargin
+          : held1session;
+
+    const optMove = realMove != null ? Math.abs(realMove) : absMove;
+    const optimal = optimalHindsight(optMove, rec.gridMargins);
     const gap = optimal == null ? null : round4(rmargin - optimal);
 
     rows.push({
@@ -136,6 +168,10 @@ export function buildMarginValidationRows(
       actualAbsMovePct: round4(absMove),
       moveSource: source,
       held,
+      held1session,
+      settlementPrice: settle == null ? null : round4(settle),
+      realMovePct: realMove == null ? null : round4(realMove),
+      heldSource: heldStrikes != null ? "strikes" : realMove != null ? "real_move" : "1session",
       marginOptimalHindsight: optimal,
       marginGap: gap,
     });
@@ -147,18 +183,23 @@ export function buildMarginValidationRows(
 }
 
 // שדות המינימום לסיכום — מאפשר לבדיקות להזין שורות חלקיות (כמו במקור).
-type SummarizableMarginRow = Pick<MarginValidationRow, "held" | "marginGap">;
+type SummarizableMarginRow = Pick<MarginValidationRow, "held" | "marginGap"> & {
+  held1session?: boolean;
+};
 
 // מסכם שורות ולידציה. מקביל 1:1 ל-summarize_margin_validation: n, hold_rate בפועל,
 // n_held, פער ממוצע מהאופטימום (None-ים מדולגים). רשימה ריקה → כל האפסים.
 export function summarizeMarginValidation(rows: SummarizableMarginRow[]): MarginValidationSummary {
   const n = rows.length;
-  if (n === 0) return { nValidated: 0, holdRate: 0, nHeld: 0, avgMarginGap: 0 };
+  if (n === 0)
+    return { nValidated: 0, holdRate: 0, nHeld: 0, holdRate1session: 0, avgMarginGap: 0 };
   const nHeld = rows.filter((r) => r.held).length;
+  const n1session = rows.filter((r) => r.held1session).length;
   const gaps = rows.map((r) => r.marginGap).filter((g): g is number => g != null);
   return {
     nValidated: n,
     holdRate: round4(nHeld / n),
+    holdRate1session: round4(n1session / n),
     nHeld,
     avgMarginGap: gaps.length ? round4(gaps.reduce((s, g) => s + g, 0) / gaps.length) : 0,
   };

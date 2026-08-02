@@ -16,20 +16,30 @@ margin_validator.py — שכבת ולידציה קדימה למנגנון המר
   • _fetch_settlements — מחיר הנעילה (actual_index_close) לכל פקיעה שנסגרה.
   • _fetch_history_moves — move_pct הקנוני מ-expiry_history.
 
-### מקור התנועה בפועל — למה expiry_history קודם, ו-settlement כגיבוי
+### 🔴 מקור התנועה — תוקן 02/08/2026. קרא לפני שינוי.
 
-לתנועה יש שני מקורות אפשריים, והבחירה חשובה:
-  1. expiry_history.move_pct — התנועה הקנונית ((פקיעה−בסיס)/בסיס), מערכי מדד אמיתיים,
-     מנוקה, ו**זו בדיוק ההגדרה** שעליה נבנו התפלגויות התנועות והבקטסט (margin_backtest,
-     שבו held = |move_pct| ≤ margin). לכן היא המקור האמין.
-  2. חישוב מה-settlement: (actual_index_close − base_index)/base_index. ה-base_index הוא
-     *אומדן* ה-ATM מרגע ההמלצה (עשוי להיות strike מעוגל) — ולכן נושא שגיאת-עיגול.
+**מה שהיה כאן קודם, ולמה זה היה שגוי.** המודול העדיף `expiry_history.move_pct`
+כדי ש-`held` יימדד באותה הגדרה כמו הבקטסט. הכוונה לגיטימית — אבל התוצאה תויגה
+"hold בפועל", וזה לא נכון: `move_pct` הוא תנועת **מושב אחד**
+(`base_price[i] == close_price[i-1]`), בעוד ההמלצה חשופה **5–7 מושבים**.
+הבקטסט עצמו סובל מאותה שגיאה (`margin_backtest.py:130`).
 
-מעדיפים (1) כדי שה-held של הולידציה יימדד על **הגדרה זהה** ל-held של הסימולציה — כך
-"hold_rate בפועל" בר-השוואה ישיר ל-hold_rate בבקטסט (זו כל מטרת הולידציה קדימה).
-נופלים ל-(2) רק כשפקיעה נסגרה אך expiry_history טרם רועננה (condor_settled_detail עשוי
-להתעדכן לפניה); שם ה-base_index של ההמלצה הוא הבסיס הישר שממנו נבנו ה-strikes. שדה
-move_source בכל שורה מתעד באיזה מקור נעשה שימוש.
+התוצאה: הדשבורד הציג `hold בפועל = 100%` (10/10) בזמן שההמלצות באמת החזיקו
+בכ-40%. דוגמה — פקיעת 30/07: הישן דיווח תנועה 0.63% מול מרווח 3.0% → HELD;
+בפועל הפוזיציה נעה ‎-3.6%, נסגרה מתחת ל-short put, והפסידה.
+
+**ההגדרה הנכונה, לפי סדר עדיפות:**
+  1. `_held_at_strikes` — הסילוק נפל בין ה-short strikes בפועל. הטובה ביותר,
+     כי היא מתחשבת בהצמדה לגריד.
+  2. `|(expiry_price − base_index)/base_index| ≤ margin_pct` — נומינלי, אך על
+     האופק הנכון ומהעוגן שממנו נבנו ה-strikes.
+  3. ההגדרה הישנה — רק כשאין סילוק. נשמרת תמיד כ-`held_1session` להשוואה לבקטסט.
+
+⚠️ **מחיר הסילוק מגיע מ-`expiry_history.expiry_price`, לא מ-`condor_settled_detail`.**
+`actual_index_close` הוא בפועל סגירת המושב הקודם (באג ב-`tase-pipeline`, אומת
+27/27) — ראה HANDOFF סעיף 2.
+
+`held_source` בכל שורה מתעד באיזו מהשלוש נעשה שימוש.
 
 טיפוסי expiry_date: margin_recommendations.expiry_date הוא DATE, אך
 condor_settled_detail.expiry_date הוא **TEXT** — לכן _fetch_settlements עושה CAST ::date
@@ -215,7 +225,7 @@ def _fetch_settlements(eng) -> dict:
 
 
 def _fetch_history_moves(eng) -> dict:
-    """מפת פקיעה(date)→move_pct מ-expiry_history (המקור הקנוני לתנועה). {} בכישלון."""
+    """מפת פקיעה(date)→move_pct מ-expiry_history (תנועת **מושב אחד**). {} בכישלון."""
     try:
         df = load_from_db(eng)
     except Exception as exc:  # noqa: BLE001
@@ -230,6 +240,48 @@ def _fetch_history_moves(eng) -> dict:
         if d is not None and mv is not None and pd.notna(mv):
             out[d] = float(mv)
     return out
+
+
+def _fetch_settlement_prices(eng) -> dict:
+    """
+    מפת פקיעה(date)→expiry_price מ-`expiry_history` — **מחיר הסילוק האמיתי**.
+
+    זהו המקור הנכון לוולידציה, ולא `condor_settled_detail.actual_index_close`:
+    האחרון הוא בפועל **סגירת המושב הקודם** (באג ב-`tase-pipeline`, אומת 27/27 מול
+    Yahoo — ראה HANDOFF סעיף 2). `expiry_history.expiry_price` אומת 6/6 מול מחיר
+    הסילוק הרשמי, עד האגורה.
+
+    {} בכישלון — הקורא נופל למקורות הישנים.
+    """
+    try:
+        df = load_from_db(eng)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("_fetch_settlement_prices נכשל: %s", exc, exc_info=True)
+        return {}
+    if df is None or len(df) == 0 or "expiry_price" not in df.columns:
+        return {}
+    out: dict = {}
+    for _, row in df.iterrows():
+        d = _as_date(row.get("expiry_date"))
+        px = row.get("expiry_price")
+        if d is not None and px is not None and pd.notna(px) and float(px) > 0:
+            out[d] = float(px)
+    return out
+
+
+def _held_at_strikes(curve_row, settlement):
+    """
+    האם הסילוק נפל **בין ה-short strikes בפועל** — הבדיקה האמיתית.
+
+    עדיף על `|move| <= margin_pct` הנומינלי, כי ה-strikes מוצמדים לגריד ולכן
+    הטווח בפועל נבדל מהמרווח המבוקש. None אם אין strikes או אין סילוק.
+    """
+    if not curve_row or settlement is None or curve_row.get("skipped"):
+        return None
+    sp, sc = curve_row.get("short_put_strike"), curve_row.get("short_call_strike")
+    if sp is None or sc is None:
+        return None
+    return bool(float(sp) <= float(settlement) <= float(sc))
 
 
 # ─── public API ─────────────────────────────────────────────────────────
@@ -263,6 +315,7 @@ def build_margin_validation_rows(engine=None) -> list[dict]:
     recs        = _fetch_latest_recommendations(eng)
     settlements = _fetch_settlements(eng)
     hist_moves  = _fetch_history_moves(eng)
+    settle_px   = _fetch_settlement_prices(eng)   # מחיר הסילוק האמיתי
 
     rows: list[dict] = []
     for rec in recs:
@@ -285,11 +338,33 @@ def build_margin_validation_rows(engine=None) -> list[dict]:
             continue
         rmargin  = float(rmargin)
         abs_move = abs(move)
-        held     = abs_move <= rmargin
+        # ההגדרה הישנה — תנועת מושב אחד. נשמרת **רק** לשם השוואה לבקטסט.
+        held_1session = abs_move <= rmargin
 
-        optimal = _optimal_hindsight(abs_move, rj.get("grid"))
+        # ── התנועה האמיתית: מהעוגן של ההמלצה ועד הסילוק ──────────────────
+        # base_index הוא הבסיס שממנו נבנו ה-strikes; expiry_price הוא הסילוק
+        # האמיתי. זו החשיפה בפועל של ההמלצה — 5–7 מושבים, לא אחד.
+        crow      = rj.get("selected_curve_row")
+        settle    = settle_px.get(exp)
+        real_move = None
+        if settle is not None and base is not None and float(base) != 0.0:
+            real_move = (float(settle) - float(base)) / float(base) * 100.0
+
+        held_strikes = _held_at_strikes(crow, settle)
+        if held_strikes is not None:
+            held = held_strikes                      # הבדיקה הטובה ביותר
+        elif real_move is not None:
+            held = abs(real_move) <= rmargin         # נומינלי, אך על האופק הנכון
+        else:
+            held = held_1session                     # אין סילוק — נופלים לישן
+
+        # האופטימום והפער נמדדים על התנועה האמיתית כשהיא זמינה.
+        opt_move = abs(real_move) if real_move is not None else abs_move
+        optimal = _optimal_hindsight(opt_move, rj.get("grid"))
         gap     = round(rmargin - optimal, 4) if optimal is not None else None
-        est_pnl = _est_pnl(rj.get("selected_curve_row"), move)
+        # ה-P&L המשוער — על התנועה האמיתית. עם התנועה הישנה הקונדור כמעט לעולם
+        # לא נפרץ, ולכן est_pnl יצא שווה למלוא הקרדיט בכל שורה.
+        est_pnl = _est_pnl(crow, real_move if real_move is not None else move)
 
         # "מדד הפחד" — מה השוק ציפה בזמן ההמלצה (None בהמלצות שנרשמו לפני שלב א').
         # מאפשר את ההשוואה שתכריע בשלב ג': השוק ציפה X%, ההיסטוריה אמרה Y% (=המרווח
@@ -305,6 +380,13 @@ def build_margin_validation_rows(engine=None) -> list[dict]:
             "actual_abs_move_pct":      round(abs_move, 4),
             "move_source":              source,
             "held":                     held,
+            # ── שקיפות: שתי ההגדרות זו לצד זו ────────────────────────────
+            "held_1session":            held_1session,   # להשוואה לבקטסט בלבד
+            "settlement_price":         round(settle, 2) if settle is not None else None,
+            "real_move_pct":            round(real_move, 4) if real_move is not None else None,
+            "held_source":              ("strikes" if held_strikes is not None
+                                         else "real_move" if real_move is not None
+                                         else "1session"),
             "margin_optimal_hindsight": optimal,
             "margin_gap":               gap,
             "premium_ils":              _f(rec.get("premium_ils")),
@@ -328,9 +410,13 @@ def summarize_margin_validation(rows: list[dict]) -> dict:
 
     מחזיר dict עם:
       • n_validated    — מספר הפקיעות שנוולדו.
-      • hold_rate      — אחוז הפקיעות שהמרווח המומלץ החזיק בפועל (0..1). ריק → 0.
-        זו העקביות בפועל — בת-השוואה ישיר ל-hold_rate של הבקטסט (אותה הגדרת held).
+      • hold_rate      — אחוז הפקיעות שההמלצה החזיקה **בפועל** (0..1): הסילוק
+        האמיתי נפל בין ה-short strikes. זהו המספר האמיתי.
       • n_held         — כמה החזיקו.
+      • hold_rate_1session — אותה שאלה תחת **הגדרת הבקטסט** (תנועת מושב אחד).
+        נשמר לשם השוואה ל-margin_backtest בלבד. ⚠️ הוא **אינו** "hold בפועל":
+        הבקטסט עצמו מודד מושב אחד בעוד הפוזיציה חשופה 5–7. הפער עצום —
+        1.00 מול ~0.40 על אותן 10 פקיעות.
       • avg_margin_gap — הפער הממוצע מהאופטימום (recommended − optimal). חיובי = בממוצע
         מרווח רחב מהנדרש (פרמיה שהוותרנו לטובת עקביות). None-ים מדולגים.
       • est_pnl_total  — סך ה-P&L המשוער של ההמלצות (indicative). None-ים מדולגים.
@@ -338,19 +424,22 @@ def summarize_margin_validation(rows: list[dict]) -> dict:
     n = len(rows)
     if n == 0:
         return {
-            "n_validated":    0,
-            "hold_rate":      0.0,
-            "n_held":         0,
-            "avg_margin_gap": 0.0,
-            "est_pnl_total":  0.0,
+            "n_validated":        0,
+            "hold_rate":          0.0,
+            "n_held":             0,
+            "hold_rate_1session": 0.0,
+            "avg_margin_gap":     0.0,
+            "est_pnl_total":      0.0,
         }
-    n_held = sum(1 for r in rows if r.get("held"))
-    gaps   = [r["margin_gap"] for r in rows if r.get("margin_gap") is not None]
-    pnls   = [r["est_pnl"] for r in rows if r.get("est_pnl") is not None]
+    n_held  = sum(1 for r in rows if r.get("held"))
+    n_1sess = sum(1 for r in rows if r.get("held_1session"))
+    gaps    = [r["margin_gap"] for r in rows if r.get("margin_gap") is not None]
+    pnls    = [r["est_pnl"] for r in rows if r.get("est_pnl") is not None]
     return {
-        "n_validated":    n,
-        "hold_rate":      round(n_held / n, 4),
-        "n_held":         n_held,
-        "avg_margin_gap": round(sum(gaps) / len(gaps), 4) if gaps else 0.0,
-        "est_pnl_total":  round(sum(pnls), 2) if pnls else 0.0,
+        "n_validated":        n,
+        "hold_rate":          round(n_held / n, 4),
+        "n_held":             n_held,
+        "hold_rate_1session": round(n_1sess / n, 4),
+        "avg_margin_gap":     round(sum(gaps) / len(gaps), 4) if gaps else 0.0,
+        "est_pnl_total":      round(sum(pnls), 2) if pnls else 0.0,
     }

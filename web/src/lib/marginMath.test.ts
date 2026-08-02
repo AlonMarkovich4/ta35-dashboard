@@ -143,6 +143,7 @@ describe("summarizeMarginValidation", () => {
       nValidated: 0,
       holdRate: 0,
       nHeld: 0,
+      holdRate1session: 0,
       avgMarginGap: 0,
     });
   });
