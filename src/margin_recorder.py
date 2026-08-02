@@ -79,6 +79,55 @@ def _upcoming_expiries(engine) -> list[pd.Timestamp]:
     return [d for d in parsed if d >= today]
 
 
+def _horizon_hold(base_index, expiry_day, today, margin_pct, crow) -> dict | None:
+    """
+    ה-hold האמיתי לאופק שבו הפוזיציה חשופה — **תיעוד בלבד, לא משנה את הבחירה.**
+
+    hold_blended נמדד על תנועת **מושב אחד** (סגירה→סילוק), אבל פוזיציה נפתחת
+    מספר מושבים לפני הפקיעה. הפער נמדד על 1,993 מושבים במרווח 2.25%:
+    97.5% למושב אחד מול 72.2% לחמישה.
+
+    מחזיר None (ולא זורק) אם סדרת המדד לא נטענה — כשל רשת לא מפיל ריצת המלצות.
+    """
+    try:
+        from index_series import fetch_index_sessions
+        from move_distribution import (
+            hold_probability,
+            hold_probability_at_margin,
+            horizon_move_distribution,
+        )
+        from trading_calendar import trading_days_between
+
+        # האופק נספר מ**לוח המסחר**, לא מהסדרה ההיסטורית: הפקיעה בעתיד, ולסדרה
+        # אין בה ימים. trading_days_between יודע גם לדלג על חגים — 22/07→24/07
+        # הם 2 ימי לוח אבל מושב אחד בלבד, כי 23/07 היה תשעה באב.
+        k = trading_days_between(today, expiry_day)
+        if k < 1:
+            return None
+
+        sessions = fetch_index_sessions("2y")
+        if not sessions:
+            return None
+
+        dist = horizon_move_distribution(sessions, k, before_date=today)
+        if not dist or dist.get("n", 0) < 30:
+            return None
+
+        out = {
+            "horizon_sessions": k,
+            "n":                dist["n"],
+            "hold_at_margin":   hold_probability_at_margin(dist, float(margin_pct)),
+            "abs_mean_move":    dist.get("abs_mean"),
+        }
+        # אם יש strikes בפועל — גם ה-hold לטווח האמיתי שלהם, לא רק לנומינלי.
+        if crow and not crow.get("skipped"):
+            out["hold_at_strikes"] = hold_probability(dist, crow)
+        return out
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("margin_recorder: חישוב hold-לפי-אופק נכשל (ממשיך): %s", exc)
+        return None
+
+
 def _recommendation_for_expiry(
     df_hist: pd.DataFrame,
     exp_ts: pd.Timestamp,
@@ -162,6 +211,9 @@ def _recommendation_for_expiry(
     crow = next((r for r in curve if not r.get("skipped")
                  and round(float(r["margin_pct"]), 4) == round(float(sm), 4)), {})
 
+    horizon = _horizon_hold(base_index=base_index, expiry_day=exp_ts.date(),
+                            today=today, margin_pct=sm, crow=crow)
+
     return {
         "expiry_date":        exp_ts.date(),
         "expiry_type":        etype,
@@ -191,6 +243,10 @@ def _recommendation_for_expiry(
         # implied_vs_margin > 1 → השוק מתמחר תנועה גדולה מהמרווח שנבחר.
         "implied_move":       imove,
         "selected_curve_row": crow,       # לשחזור margin_pnl בולידציה (שלב 4, חלק ג)
+        # ── hold לפי אופק אמיתי — תיעוד בלבד, **אינו משפיע על הבחירה** ──────
+        # hold_blended שלמעלה נמדד על תנועת מושב-אחד, אך הפוזיציה חשופה עד
+        # הפקיעה. שני המספרים נשמרים זה לצד זה כדי שהפער יהיה גלוי בכל המלצה.
+        "horizon":            horizon,
         "engine_version":     engine_version,
         "trigger":            trigger,
     }

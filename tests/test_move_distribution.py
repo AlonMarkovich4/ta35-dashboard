@@ -379,3 +379,90 @@ class TestExpectedValueWingParametric:
         e = expected_value_curve(self._dist, explicit_curve)[0]
         assert d["avg_loss"] == e["avg_loss"]
         assert d["ev"] == e["ev"]
+
+
+# ─── התפלגות לפי אופק (נוסף 02/08/2026) ──────────────────────────────────
+
+from datetime import date as _date          # noqa: E402
+
+from move_distribution import horizon_move_distribution  # noqa: E402
+
+
+def _sessions(closes, opens=None):
+    """בונה רצף מושבים. opens=None → open[i] == close[i] (תנועה רק בין ימים)."""
+    opens = opens if opens is not None else closes
+    return [{"date": _date(2026, 1, 1) + __import__("datetime").timedelta(days=i),
+             "open": opens[i], "close": closes[i]} for i in range(len(closes))]
+
+
+class TestHorizonMoveDistribution:
+    """
+    ההתפלגות שרלוונטית לפוזיציה שמוחזקת k מושבים. הבאג שזה מתקן: המנוע מדד
+    תנועת מושב-אחד (97.5% ב-2.25%) לפוזיציה שחשופה ~5 מושבים (72.2% בפועל).
+    """
+
+    def test_k1_matches_single_session_move(self):
+        """k=1: move = (open[i] − close[i−1]) / close[i−1]."""
+        s = _sessions(closes=[100.0, 110.0, 121.0], opens=[100.0, 101.0, 110.0])
+        d = horizon_move_distribution(s, 1)
+        # i=1: (101−100)/100=1% · i=2: (110−110)/110=0%
+        assert d["n"] == 2
+        assert sorted(round(m, 6) for m in d["moves"]) == [0.0, 1.0]
+
+    def test_k2_spans_two_sessions(self):
+        """k=2: הכניסה היא סגירת המושב שלפני-הקודם."""
+        s = _sessions(closes=[100.0, 110.0, 121.0], opens=[100.0, 101.0, 110.0])
+        d = horizon_move_distribution(s, 2)
+        # i=2 בלבד: (110−100)/100 = 10%
+        assert d["n"] == 1
+        assert round(float(d["moves"][0]), 6) == 10.0
+
+    def test_longer_horizon_is_more_dispersed(self):
+        """הליבה: אופק ארוך יותר ⇒ פיזור גדול יותר ⇒ hold נמוך יותר."""
+        import numpy as np
+        rng = np.random.default_rng(7)
+        closes = list(100 * np.cumprod(1 + rng.normal(0, 0.01, 400)))
+        s = _sessions(closes)
+        d1 = horizon_move_distribution(s, 1)
+        d5 = horizon_move_distribution(s, 5)
+        assert d5["std"] > d1["std"]
+        assert d5["abs_mean"] > d1["abs_mean"]
+
+    def test_plugs_into_hold_probability_at_margin(self):
+        """אותו מבנה מילון ⇒ עובד ישירות עם הפונקציה הקיימת, בלי התאמות."""
+        import numpy as np
+        rng = np.random.default_rng(3)
+        closes = list(100 * np.cumprod(1 + rng.normal(0, 0.008, 500)))
+        s = _sessions(closes)
+        h1 = hold_probability_at_margin(horizon_move_distribution(s, 1), 2.0)
+        h5 = hold_probability_at_margin(horizon_move_distribution(s, 5), 2.0)
+        assert h1 is not None and h5 is not None
+        assert h5 < h1          # ← הפער שהמנוע מפספס היום
+
+    def test_before_date_is_zero_lookahead(self):
+        s = _sessions(closes=[100.0] * 10)
+        full = horizon_move_distribution(s, 1)
+        cut = horizon_move_distribution(s, 1, before_date=_date(2026, 1, 5))
+        assert cut["n"] < full["n"]
+
+    @pytest.mark.parametrize("bad", [0, -1, None])
+    def test_invalid_horizon_raises(self, bad):
+        with pytest.raises(ValueError):
+            horizon_move_distribution(_sessions([100.0, 101.0]), bad)
+
+    def test_too_few_sessions_is_empty_not_crash(self):
+        assert horizon_move_distribution(_sessions([100.0, 101.0]), 5)["n"] == 0
+        assert horizon_move_distribution([], 1)["n"] == 0
+        assert horizon_move_distribution(None, 1)["n"] == 0
+
+    def test_bad_rows_are_skipped_not_fatal(self):
+        s = [{"date": _date(2026, 1, 1), "open": 100.0, "close": 100.0},
+             {"date": _date(2026, 1, 2), "open": None, "close": 101.0},
+             {"date": _date(2026, 1, 3), "open": 102.0, "close": 0.0},
+             {"date": _date(2026, 1, 4), "open": 103.0, "close": 103.0}]
+        d = horizon_move_distribution(s, 1)
+        assert d["n"] >= 1      # לא קורס; שורות פגומות מדולגות
+
+    def test_horizon_is_reported(self):
+        d = horizon_move_distribution(_sessions([100.0] * 10), 3)
+        assert d["horizon_sessions"] == 3

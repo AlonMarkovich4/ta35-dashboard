@@ -24,6 +24,18 @@ from margin_calculator import DEFAULT_WING_PCT, build_margin_curve
 from margin_selector import select_margin
 
 
+@pytest.fixture(autouse=True)
+def _no_network(monkeypatch):
+    """
+    _horizon_hold מוריד את סדרת המדד מ-Yahoo. בטסטים אין רשת — וגם אם יש,
+    בדיקה שתלויה בשרת חיצוני אינה בדיקה. מחזירים סדרה ריקה, ואז
+    _horizon_hold מחזיר None וה-rec נבנה עם horizon=None.
+    ההתנהגות של _horizon_hold עצמו נבדקת ב-TestHorizonHold למטה.
+    """
+    import index_series
+    monkeypatch.setattr(index_series, "fetch_index_sessions", lambda *a, **k: [])
+
+
 # ─── עוזרים ─────────────────────────────────────────────────────────────
 
 def _rec(exp_date, etype="W", margin=1.5, hold=0.98):
@@ -460,3 +472,85 @@ class TestChainFreshnessGate:
         assert [r["status"] for r in res] == ["stale_chain"]
         assert res[0]["chain_fetch_date"] == "2026-07-22"
         m["insert"].assert_not_called()      # ← העיקר: אפס כתיבה ל-DB
+
+
+# ─── hold לפי אופק (נוסף 02/08/2026) ─────────────────────────────────────
+
+class TestHorizonHold:
+    """
+    hold_blended נמדד על תנועת **מושב אחד**, אבל הפוזיציה חשופה עד הפקיעה.
+    הפער נמדד על 1,993 מושבים במרווח 2.25%: 97.5% למושב אחד מול 72.2% לחמישה.
+    השדה הזה חושף את הפער — **בלי לשנות את בחירת המרווח.**
+    """
+
+    @staticmethod
+    def _sessions(n=400, step=0.004):
+        """סדרה סינתטית עם תנועה קבועה — hold יורד מונוטונית עם האופק."""
+        import datetime as dt
+        out, lvl = [], 1000.0
+        for i in range(n):
+            lvl *= (1 + (step if i % 2 == 0 else -step * 0.6))
+            out.append({"date": dt.date(2024, 1, 1) + dt.timedelta(days=i),
+                        "open": lvl, "close": lvl})
+        return out
+
+    def _patch(self, monkeypatch, sessions):
+        import index_series
+        monkeypatch.setattr(index_series, "fetch_index_sessions", lambda *a, **k: sessions)
+
+    def test_returns_none_without_series(self, monkeypatch):
+        """כשל רשת ⇒ None, לא חריגה — ריצת ההמלצות ממשיכה."""
+        self._patch(monkeypatch, [])
+        assert mr._horizon_hold(base_index=1000.0, expiry_day=date(2026, 8, 10),
+                                today=date(2026, 8, 3), margin_pct=2.0, crow={}) is None
+
+    def test_counts_trading_sessions_not_calendar_days(self, monkeypatch):
+        """
+        הליבה: אופק נספר ב**מושבי מסחר** מלוח המסחר, לא בימי לוח.
+        28/07 (ג') → 04/08 (ג') הם 7 ימי לוח אבל 5 מושבים בלבד.
+        """
+        self._patch(monkeypatch, self._sessions())
+        out = mr._horizon_hold(base_index=1000.0, expiry_day=date(2026, 8, 4),
+                               today=date(2026, 7, 28), margin_pct=2.0, crow={})
+        assert out is not None
+        assert (date(2026, 8, 4) - date(2026, 7, 28)).days == 7
+        assert out["horizon_sessions"] == 5
+        assert out["n"] > 0
+
+    def test_holiday_shortens_the_horizon(self, monkeypatch):
+        """22/07 → 24/07: יומיים בלוח, מושב אחד — 23/07 היה תשעה באב."""
+        self._patch(monkeypatch, self._sessions())
+        out = mr._horizon_hold(1000.0, date(2026, 7, 24), date(2026, 7, 22), 2.0, {})
+        assert out["horizon_sessions"] == 1
+
+    def test_hold_is_lower_at_longer_horizon(self, monkeypatch):
+        """אופק ארוך ⇒ hold נמוך יותר. זה כל הממצא."""
+        s = self._sessions()
+        self._patch(monkeypatch, s)
+        entry = date(2026, 7, 27)
+        short = mr._horizon_hold(1000.0, date(2026, 7, 28), entry, 2.0, {})
+        long_ = mr._horizon_hold(1000.0, date(2026, 8, 5), entry, 2.0, {})
+        assert short["hold_at_margin"] >= long_["hold_at_margin"]
+
+    def test_expiry_not_after_today_is_none(self, monkeypatch):
+        self._patch(monkeypatch, self._sessions())
+        assert mr._horizon_hold(1000.0, date(2026, 7, 1), date(2026, 8, 1), 2.0, {}) is None
+
+    def test_does_not_alter_selected_margin(self, monkeypatch):
+        """
+        הבדיקה שמגנה על ההחלטה: השדה מתועד, אבל selected_margin נשאר זהה
+        בדיוק בין ריצה עם סדרה לריצה בלעדיה.
+        """
+        chain = TestImpliedMoveRecorded._chain()
+        hist = TestImpliedMoveRecorded._hist()
+        monkeypatch.setattr(mr, "get_latest_option_chain", lambda exp, engine=None, **k: chain)
+
+        self._patch(monkeypatch, [])
+        without = mr._recommendation_for_expiry(hist, pd.Timestamp("2099-02-19"), MagicMock())
+
+        self._patch(monkeypatch, self._sessions())
+        with_series = mr._recommendation_for_expiry(hist, pd.Timestamp("2099-02-19"), MagicMock())
+
+        assert without["selected_margin"] == with_series["selected_margin"]
+        assert without["hold_blended"] == with_series["hold_blended"]
+        assert without["short_put_strike"] == with_series["short_put_strike"]

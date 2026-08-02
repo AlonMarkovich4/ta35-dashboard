@@ -16,11 +16,27 @@ move_distribution.py — התפלגות תנועות היסטורית + הסתב
 
 API ציבורי:
   build_move_distribution(df, expiry_type=None, before_date=None) -> dict
+  horizon_move_distribution(sessions, horizon_sessions, before_date=None) -> dict
   hold_probability(dist, curve_row) -> float | None
   hold_probability_curve(dist, curve) -> list[dict]
   expected_value_curve(dist, curve) -> list[dict]
   conditioned_move_distribution(df, expiry_type, target_month, recent_move_pct,
                                 move_tolerance=0.5, before_date=None) -> dict
+
+⚠️ **אופק הזמן — קראו לפני שמסתמכים על hold_probability.**
+
+`build_move_distribution` בונה את ההתפלגות מ-`expiry_history.move_pct`, שהוא
+תנועת **מושב אחד** (סגירת המושב הקודם → מחיר הסילוק). אבל פוזיציה נפתחת מספר
+ימים לפני הפקיעה — תיק ההמלצות מחזיק בממוצע ~5 ימי לוח.
+
+הפער נמדד על 1,993 מושבי מסחר (TA-35, 10 שנים), במרווח 2.25%:
+    מושב אחד  97.5%   ·   3 מושבים  84.1%   ·   5 מושבים  72.2%   ·   7 מושבים  64.8%
+
+כלומר המספר שהמנוע מדווח היום נכון רק למי שנכנס במושב האחרון לפני הפקיעה.
+`horizon_move_distribution` מחשב את ההתפלגות הנכונה לאופק אמיתי.
+
+**√t אינו תחליף:** סטיית התקן בפועל גדולה ב-16%–29% מתחזית √t (מגמתיות),
+כלומר קנה-מידה פרמטרי היה מקטין את הסיכון בכ-30%.
 """
 from __future__ import annotations
 
@@ -108,6 +124,73 @@ def build_move_distribution(
         "std":         round(float(moves.std(ddof=0)), 4),
         "abs_mean":    round(float(_abs_move_series(frame).mean()), 4),
         "expiry_type": expiry_type,
+    }
+
+
+def horizon_move_distribution(
+    sessions,
+    horizon_sessions: int,
+    before_date=None,
+) -> dict:
+    """
+    התפלגות התנועות לאופק של k **מושבי מסחר** — ההתפלגות שרלוונטית לפוזיציה
+    שנפתחת k מושבים לפני הפקיעה.
+
+    לכל מושב i ≥ k:
+        entry  = close[i − k]     — המדד ברגע הכניסה
+        settle = open[i]          — מחיר הסילוק (אומת 6/6 מול הסילוק הרשמי)
+        move   = (settle − entry) / entry · 100
+
+    זו בדיוק החשיפה של Iron Condor שמוחזק עד פקיעה: ה-strikes נקבעים לפי המדד
+    בכניסה, והתוצאה נקבעת לפי הסילוק. המסלול בין לבין אינו משנה.
+
+    Parameters
+    ----------
+    sessions : רצף מושבי מסחר **ממוין עולה**, כל אחד
+               {"date": date, "open": float, "close": float}.
+    horizon_sessions : k ≥ 1. k=1 מחזיר את תנועת המושב-הבודד (מה שהמנוע מחשב היום).
+    before_date : אם מסופק — רק מושבים עם date < before_date (zero-lookahead).
+
+    Returns
+    -------
+    dict באותו מבנה כמו build_move_distribution, ולכן משתלב ישירות עם
+    hold_probability_at_margin ו-hold_probability. מדגם ריק → n=0.
+    """
+    if horizon_sessions is None or int(horizon_sessions) < 1:
+        raise ValueError(f"horizon_sessions חייב להיות ≥ 1 (התקבל {horizon_sessions!r})")
+    k = int(horizon_sessions)
+
+    rows = list(sessions or [])
+    if before_date is not None:
+        cutoff = pd.Timestamp(before_date)
+        rows = [s for s in rows if pd.Timestamp(s.get("date")) < cutoff]
+
+    if len(rows) <= k:
+        return _empty_distribution(None)
+
+    moves: list[float] = []
+    for i in range(k, len(rows)):
+        entry = rows[i - k].get("close")
+        settle = rows[i].get("open")
+        if entry is None or settle is None:
+            continue
+        entry = float(entry)
+        if entry <= 0:
+            continue
+        moves.append((float(settle) - entry) / entry * 100.0)
+
+    if not moves:
+        return _empty_distribution(None)
+
+    arr = np.sort(np.asarray(moves, dtype=float))
+    return {
+        "moves":            arr,
+        "n":                int(arr.size),
+        "mean":             round(float(arr.mean()), 4),
+        "std":              round(float(arr.std(ddof=0)), 4),
+        "abs_mean":         round(float(np.abs(arr).mean()), 4),
+        "expiry_type":      None,
+        "horizon_sessions": k,
     }
 
 
