@@ -118,6 +118,7 @@ def _horizon_hold(base_index, expiry_day, today, margin_pct, crow,
     try:
         from index_series import fetch_index_sessions
         from move_distribution import (
+            daily_volatility,
             hold_probability,
             hold_probability_at_margin,
             horizon_move_distribution,
@@ -150,6 +151,12 @@ def _horizon_hold(base_index, expiry_day, today, margin_pct, crow,
         # אם יש strikes בפועל — גם ה-hold לטווח האמיתי שלהם, לא רק לנומינלי.
         if crow and not crow.get("skipped"):
             out["hold_at_strikes"] = hold_probability(dist, crow)
+
+        # ── אות תנודתיות יומית — תיעוד בלבד, לצד recent_move ──────────────
+        # recent_move (תנועת הפקיעה האחרונה) הוא האות שמזין את הבחירה המותנית.
+        # נמדד על 1,967 נקודות: AUC 0.600 מול 0.657 לסטיית תקן יומית.
+        # נשמר כאן כדי שהשוואה על נתונים חיים תהיה אפשרית לפני שמחליפים.
+        out["daily_vol"] = daily_volatility(sessions, window=10, before_date=today)
         return out
     except Exception as exc:  # noqa: BLE001
         logger.warning("margin_recorder: חישוב hold-לפי-אופק נכשל (ממשיך): %s", exc)

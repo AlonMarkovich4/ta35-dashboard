@@ -93,6 +93,31 @@
 - **תיק ההמלצות:** id=8, "המלצות המערכת — Iron Condor" (הון 100k, עמלה 2.5). אל תיגע ב-6 התיקים
   הקיימים (ids 2–7) — benchmark קבוע.
 - מחובר ל-Action היומי `auto_record_margins` (`scripts/auto_record_margins.py::_open_reco_trades`).
+- ⛔ **`RECO_TRADING_ENABLED` כבוי מ-31/07/2026.** ההגנות לא מנעו פתיחה על שרשרת ישנה.
+  נסגר בשער הטריות; ההדלקה מחדש דורשת החלטה. ראה HANDOFF סעיף 0.
+
+## אוטומציית תיקי ה-benchmark — ✅ נוסף 02/08/2026
+`open_trades_for_expiry` נקראה **רק** מ-`pages/5_paper_trading.py` (Streamlit, שאינו פרוס),
+ולכן תיקים 2–7 לא שוגרו אוטומטית מעולם. 24 עסקאות נפתחו ידנית 15/06 ואז כלום.
+- `scripts/auto_open_benchmark_trades.py` + workflow — ב'–ו' 09:00 UTC.
+  דדופ ברמת ה-DB (`UNIQUE (portfolio_id, strategy_id, expiry_date)`).
+  kill-switch `BENCHMARK_TRADING_ENABLED`, **דלוק** — אין כאן תלות במנוע.
+- `scripts/backfill_benchmark_trades.py` — שחזר 132 עסקאות מהארכיון.
+  ⚠️ `_NO_SETTLEMENT` מחריג פקיעות שלא התרחשו (23/07) — פתיחה עליהן = יתומה קבועה.
+
+## אופק זמן ואות תנודתיות — 🔬 מדידה בלבד, לא משפיע על הבחירה
+**הממצא:** `hold_probability` נמדד על תנועת **מושב אחד**, אך הפוזיציה חשופה 5–6 מושבים.
+על 1,993 מושבים במרווח 2.25%: 97.5% למושב אחד מול 72.2% לחמישה.
+⚠️ **`floor=0.97` כויל על האופק הלא נכון** (`margin_backtest:130` משתמש ב-`move_pct`).
+- `src/index_series.py` — סדרת TA-35 היומית מ-Yahoo. כשל רשת ⇒ `[]`, לא חריגה.
+- `move_distribution.horizon_move_distribution(sessions, k)` — התפלגות לאופק k מושבים.
+  `entry=close[i−k]`, `settle=open[i]`. מחזיר אותו מבנה ולכן משתלב עם `hold_probability_at_margin`.
+- `move_distribution.daily_volatility(sessions, window)` — σ יומית + **מיקום בהתפלגות**
+  (`percentile`/`quintile`). הערך הגולמי חסר משמעות בלי המיקום.
+  נמדד: `recent_move` AUC 0.600 · σ-10-מושבים AUC **0.657**. הטיה, לא מתג.
+- `margin_recorder._horizon_hold` — שומר `horizon.{hold_at_margin, anchor_date, daily_vol}`
+  לצד `hold_blended`. **האופק נספר מ-`trade_date` (T-1)**, לא מהיום — ראה `_anchor_date`.
+- ⚠️ **אל תזריק מדד חי כעוגן.** כל השרשרת T-1, כולל המחירים. פירוט: HANDOFF 7.3.
 
 ## סביבה
 - repo: ta35-dashboard. נתיב מקומי: ~/Projects/ta35-dashboard/ta35-dashboard/ (הועבר מ-~/Desktop בגלל חסימות TCC של macOS)

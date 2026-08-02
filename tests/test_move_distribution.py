@@ -466,3 +466,78 @@ class TestHorizonMoveDistribution:
     def test_horizon_is_reported(self):
         d = horizon_move_distribution(_sessions([100.0] * 10), 3)
         assert d["horizon_sessions"] == 3
+
+
+# ─── תנודתיות יומית (נוסף 02/08/2026) ────────────────────────────────────
+
+from move_distribution import daily_volatility  # noqa: E402
+
+
+class TestDailyVolatility:
+    """
+    האות שמחליף/משלים את recent_move. נמדד על 1,967 נקודות:
+    recent_move AUC 0.600 · std10 AUC 0.657. הטיה, לא מתג.
+    """
+
+    @staticmethod
+    def _series(rets_pct, start=1000.0):
+        """בונה מושבים מרצף תשואות באחוזים."""
+        import datetime as dt
+        out, lvl = [], start
+        d0 = dt.date(2024, 1, 1)
+        out.append({"date": d0, "open": lvl, "close": lvl})
+        for i, r in enumerate(rets_pct):
+            lvl *= (1 + r / 100.0)
+            out.append({"date": d0 + dt.timedelta(days=i + 1), "open": lvl, "close": lvl})
+        return out
+
+    def test_quiet_series_has_low_std(self):
+        s = self._series([0.1, -0.1] * 30)
+        out = daily_volatility(s, window=10)
+        assert out["std"] is not None
+        assert out["std"] < 0.2
+
+    def test_volatile_series_has_high_std(self):
+        quiet = daily_volatility(self._series([0.1, -0.1] * 30), window=10)["std"]
+        loud = daily_volatility(self._series([2.0, -2.0] * 30), window=10)["std"]
+        assert loud > quiet * 5
+
+    def test_percentile_places_current_in_history(self):
+        """
+        סדרה שקטה שמסתיימת בסערה → האחוזון חייב להיות גבוה.
+        זה העיקר: הערך הגולמי חסר משמעות בלי המיקום.
+        """
+        s = self._series([0.1, -0.1] * 40 + [3.0, -3.0] * 6)
+        out = daily_volatility(s, window=10)
+        assert out["percentile"] > 80
+        assert out["quintile"] == 5
+
+    def test_quiet_ending_is_low_quintile(self):
+        s = self._series([3.0, -3.0] * 20 + [0.05, -0.05] * 12)
+        out = daily_volatility(s, window=10)
+        assert out["percentile"] < 30
+        assert out["quintile"] <= 2
+
+    def test_before_date_is_zero_lookahead(self):
+        """הסערה שאחרי before_date לא נספרת."""
+        import datetime as dt
+        s = self._series([0.1, -0.1] * 20 + [5.0, -5.0] * 10)
+        cut = s[25]["date"]
+        assert daily_volatility(s, window=10, before_date=cut)["std"] < \
+               daily_volatility(s, window=10)["std"]
+
+    def test_too_short_returns_none_not_crash(self):
+        for bad in ([], None, self._series([0.1, 0.2])):
+            out = daily_volatility(bad, window=10)
+            assert out["std"] is None and out["quintile"] is None
+
+    @pytest.mark.parametrize("bad", [0, 1, None])
+    def test_invalid_window_raises(self, bad):
+        with pytest.raises(ValueError):
+            daily_volatility(self._series([0.1] * 30), window=bad)
+
+    def test_bad_rows_skipped(self):
+        s = self._series([0.2, -0.2] * 20)
+        s[3]["close"] = None
+        s[7]["close"] = 0.0
+        assert daily_volatility(s, window=5)["std"] is not None

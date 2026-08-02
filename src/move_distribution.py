@@ -194,6 +194,82 @@ def horizon_move_distribution(
     }
 
 
+def daily_volatility(
+    sessions,
+    window: int = 10,
+    before_date=None,
+) -> dict:
+    """
+    תנודתיות יומית — סטיית התקן של N המושבים האחרונים, **ומיקומה בהתפלגות
+    ההיסטורית**. האות עצמו חסר משמעות בלי המיקום: 0.9% הוא שקט או סערה תלוי
+    בתקופה.
+
+    **למה זה קיים:** `context_analyzer.get_recent_move` מזין את המנוע בתנועת
+    **הפקיעה האחרונה**. נמדד על 1,967 נקודות (10 שנים, אופק 5 מושבים, סף כאוס
+    2.5%) שהאות הזה חלש:
+
+        recent_move (התנועה האחרונה) : AUC 0.600 · הפרדה +16.0 נק'
+        סטיית תקן 10 מושבים          : AUC 0.657 · הפרדה +29.2 נק'
+
+    בחמישון התחתון P(כאוס)=8.6% ובעליון 37.8%, מול בסיס 24%. שלושת גרסאות
+    האות היומי (std5/std10/mean|r|5) נתנו כמעט אותו דבר — התוצאה יציבה ואינה
+    תלויה בבחירת הפרמטר.
+
+    ⚠️ **AUC 0.657 הוא הטיה, לא מתג.** גם בחמישון העליון המרווח מנצח ב-62%
+    מהמקרים. האות מזיז הסתברות; הוא אינו קובע תוצאה.
+
+    Parameters
+    ----------
+    sessions    : רצף מושבים ממוין עולה, {"date","open","close"} — כמו
+                  ב-horizon_move_distribution.
+    window      : כמה מושבים אחרונים בחלון (ברירת מחדל 10).
+    before_date : zero-lookahead — רק מושבים עם date < before_date.
+
+    Returns
+    -------
+    dict: std, abs_mean, window, n_history, percentile (0–100), quintile (1–5).
+    מדגם קטן מדי → כל השדות None (לא קורס).
+    """
+    if window is None or int(window) < 2:
+        raise ValueError(f"window חייב להיות ≥ 2 (התקבל {window!r})")
+    window = int(window)
+
+    rows = list(sessions or [])
+    if before_date is not None:
+        cutoff = pd.Timestamp(before_date)
+        rows = [s for s in rows if pd.Timestamp(s.get("date")) < cutoff]
+
+    closes = [float(s["close"]) for s in rows
+              if s.get("close") is not None and float(s["close"]) > 0]
+    empty = {"std": None, "abs_mean": None, "window": window,
+             "n_history": 0, "percentile": None, "quintile": None}
+    if len(closes) < window + 2:
+        return empty
+
+    arr = np.asarray(closes, dtype=float)
+    rets = np.diff(arr) / arr[:-1] * 100.0
+    if rets.size < window:
+        return empty
+
+    cur_std = float(np.std(rets[-window:], ddof=0))
+    cur_absmean = float(np.mean(np.abs(rets[-window:])))
+
+    # ההתפלגות ההיסטורית של אותו מדד — כדי לדעת אם זה שקט או סערה
+    hist = np.array([np.std(rets[i - window:i], ddof=0)
+                     for i in range(window, rets.size + 1)], dtype=float)
+    pct = float((hist < cur_std).mean() * 100.0) if hist.size else None
+    quint = int(min(5, max(1, pct // 20 + 1))) if pct is not None else None
+
+    return {
+        "std":        round(cur_std, 4),
+        "abs_mean":   round(cur_absmean, 4),
+        "window":     window,
+        "n_history":  int(hist.size),
+        "percentile": None if pct is None else round(pct, 1),
+        "quintile":   quint,
+    }
+
+
 def hold_probability(dist: dict, curve_row: dict) -> Optional[float]:
     """
     ההסתברות האמפירית שהמדד "יחזיק" בתוך טווח ה-short strikes של המרווח — כלומר
