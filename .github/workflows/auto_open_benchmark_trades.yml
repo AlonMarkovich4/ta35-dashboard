@@ -1,0 +1,53 @@
+name: auto-open-benchmark-trades
+
+# פתיחה אוטומטית של עסקאות ה-benchmark (תיקים 2–7, שש האסטרטגיות).
+#
+# ⚠️ נוסף 01/08/2026. עד אז **לא הייתה שום אוטומציה לתיקים האלה** —
+# open_trades_for_expiry נקראה רק מ-pages/5_paper_trading.py, ממשק Streamlit
+# שאינו פרוס. התוצאה: 24 עסקאות ידניות ב-15/06 ואז כלום, 132 עסקאות חסרות,
+# ושכבת הוולידציה (גשר 2) נשארה בלי מול-מה-להשוות.
+#
+# idempotent: הדדופ הוא UNIQUE (portfolio_id, strategy_id, expiry_date) ברמת ה-DB,
+# ו-open_trades_for_expiry בודק אותו לפני כל הכנסה. ריצה חוזרת לא תיצור כפילות.
+
+on:
+  schedule:
+    # שני–שישי, 09:00 UTC — **אותו תזמון כמו auto_record_margins** בכוונה.
+    # שתי הקבוצות חייבות להיכנס מאותו snapshot ובאותו רגע, אחרת ההשוואה
+    # בין תיק ההמלצות ל-benchmark חסרת ערך (מחירי כניסה שונים).
+    - cron: '0 9 * * 1-5'
+  workflow_dispatch: {}   # הרצה ידנית מטאב Actions
+
+concurrency:
+  group: open-benchmark-trades
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  open-benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Open benchmark trades
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          # kill-switch. ברירת המחדל בקוד היא **דלוק** — בניגוד ל-RECO_TRADING_ENABLED,
+          # כאן אין תלות במנוע: האסטרטגיות רצות על פרמטרים מוקפאים ישירות מהשרשרת,
+          # בלי expiry_history ובלי הכיול שנמצא בבדיקה. הגדרה מפורשת כדי שיהיה
+          # ברור איפה מכבים אם צריך.
+          BENCHMARK_TRADING_ENABLED: "true"
+        run: python scripts/auto_open_benchmark_trades.py

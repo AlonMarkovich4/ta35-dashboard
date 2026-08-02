@@ -239,32 +239,62 @@ def get_available_expiries(engine=None) -> list[str]:
 def get_latest_option_chain(
     expiry_date: Optional[str] = None,
     engine=None,
+    source_table: str = "tase_putcall",
+    fetch_date: Optional[str] = None,
 ) -> Optional[dict]:
     """
     קורא שרשרת אופציות מ-Supabase ומחזיר dict בפורמט זהה ל-parse_putvscall().
 
-    expiry_date — תאריך פקיעה (YYYY-MM-DD); None → כל הפקיעות הזמינות.
+    expiry_date  — תאריך פקיעה (YYYY-MM-DD); None → כל הפקיעות הזמינות.
+    source_table — `tase_putcall` (חי, ברירת מחדל) או `tase_putcall_history` (ארכיון).
+    fetch_date   — כשמסופק, נקרא ה-snapshot של אותו יום במקום העדכני ביותר.
+
+    שני הפרמטרים האחרונים נועדו ל**שחזור**: "מה המערכת הייתה רואה ביום X".
+    שתי הטבלאות זהות במבנה, ולכן אותו נתיב סינון משרת את שתיהן — בלי שכפול לוגיקה.
+
     מחזיר None אם אין חיבור DB, הטבלה ריקה, או שגיאה.
     """
     eng = _make_engine(engine)
     if eng is None:
         return None
     try:
-        return _load_chains(eng, expiry_date)
+        return _load_chains(eng, expiry_date, source_table, fetch_date)
     except Exception:
         return None
 
 
+# ─── מקורות שרשרת מותרים ───────────────────────────────────────────────
+# `tase_putcall` היא הטבלה החיה (snapshot יחיד); `tase_putcall_history` הוא הארכיון
+# (snapshot אחד ליום). שתיהן **זהות במבנה**, ולכן אותו נתיב קריאה וסינון משרת את שתיהן.
+# whitelist ולא f-string חופשי — שם הטבלה נכנס ל-SQL ואי אפשר לפרמטר אותו.
+_ALLOWED_SOURCES = frozenset({"tase_putcall", "tase_putcall_history"})
+
+
+def _check_source(table: str) -> str:
+    """מאמת שם טבלת-מקור מול ה-whitelist. זורק ValueError אחרת."""
+    if table not in _ALLOWED_SOURCES:
+        raise ValueError(f"מקור שרשרת לא מורשה: {table!r}. מותר: {sorted(_ALLOWED_SOURCES)}")
+    return table
+
+
 # ─── Internal helpers ──────────────────────────────────────────────────
 
-def _load_chains(eng, expiry_date: Optional[str]) -> Optional[dict]:
-    """מבצע את שאילתות ה-DB ובונה את ה-dict המוחזר."""
+def _load_chains(eng, expiry_date: Optional[str],
+                 source_table: str = "tase_putcall",
+                 fetch_date: Optional[str] = None) -> Optional[dict]:
+    """מבצע את שאילתות ה-DB ובונה את ה-dict המוחזר.
+
+    source_table — `tase_putcall` (חי) או `tase_putcall_history` (ארכיון).
+    fetch_date   — כשמסופק, נקרא ה-snapshot של אותו יום במקום העדכני ביותר.
+                   רלוונטי לארכיון בלבד (שחזור "מה המערכת הייתה רואה ביום X").
+    """
+    src = _check_source(source_table)
     with eng.connect() as conn:
         if expiry_date:
             targets = [expiry_date]
         else:
             rows = conn.execute(text(
-                "SELECT expiry_date FROM tase_putcall"
+                f"SELECT expiry_date FROM {src}"  # noqa: S608 — src עבר whitelist
                 " GROUP BY expiry_date ORDER BY MAX(fetched_at) DESC"
             )).fetchall()
             targets = [str(r[0]) for r in rows if r[0] is not None]
@@ -276,7 +306,7 @@ def _load_chains(eng, expiry_date: Optional[str]) -> Optional[dict]:
         latest_ts = None
 
         for target in targets:
-            result = _load_one_expiry(eng, conn, target)
+            result = _load_one_expiry(eng, conn, target, src, fetch_date)
             if result is None:
                 continue
 
@@ -317,28 +347,36 @@ def _load_chains(eng, expiry_date: Optional[str]) -> Optional[dict]:
     }
 
 
-def _load_one_expiry(eng, conn, target: str):
+def _load_one_expiry(eng, conn, target: str,
+                     source_table: str = "tase_putcall",
+                     fetch_date: Optional[str] = None):
     """
     טוען שרשרת פקיעה אחת ומחיל סינון רב-שכבתי.
 
     מחזיר (DataFrame, drvtype, fetched_at, atm_level, fetch_date) או None אם הנתונים
     לא תקינים. None מוחזר גם אם נותרות פחות מ-_MIN_CHAIN_ROWS שורות לאחר הסינון.
 
-    fetch_date מוחזר כדי שהקורא יוכל לבדוק טריות **פר-פקיעה** — ראה
-    trading_calendar.is_chain_fresh.
+    fetch_date (הפרמטר) — כשמסופק, נבחר ה-snapshot של אותו יום במקום העדכני ביותר.
+    fetch_date (בערך המוחזר) — כדי שהקורא יוכל לבדוק טריות **פר-פקיעה**;
+    ראה trading_calendar.is_chain_fresh.
     """
+    src = _check_source(source_table)
     # fetch_date ו-fetch_time זהים לכל ה-batches של אותה משיכה (נכתבים במפורש ע"י ה-pipeline)
     # בניגוד ל-fetched_at שמוגדר DEFAULT now() ומקבל ערך שונה לכל batch
+    day_filter = " AND fetch_date = :fdate" if fetch_date else ""
+    params = {"exp": target}
+    if fetch_date:
+        params["fdate"] = fetch_date
     latest_row = conn.execute(
-        text("""
+        text(f"""
             SELECT fetch_date, fetch_time, MAX(fetched_at) AS max_fetched_at
-            FROM tase_putcall
-            WHERE expiry_date = :exp
+            FROM {src}
+            WHERE expiry_date = :exp{day_filter}
             GROUP BY fetch_date, fetch_time
             ORDER BY MAX(fetched_at) DESC
             LIMIT 1
-        """),
-        {"exp": target},
+        """),  # noqa: S608 — src עבר whitelist, day_filter קבוע
+        params,
     ).fetchone()
 
     if not latest_row or latest_row[2] is None:
@@ -350,7 +388,7 @@ def _load_one_expiry(eng, conn, target: str):
 
     # שלב 1: קרא את כל ה-batches של המשיכה האחרונה (fetch_date + fetch_time זהים)
     df_raw = pd.read_sql(
-        text("""
+        text(f"""
             SELECT
                 COALESCE(expirationprice_call, expirationprice_put) AS strike,
                 lastrate_call   AS call_price,
@@ -366,12 +404,12 @@ def _load_one_expiry(eng, conn, target: str):
                 highrate_put    AS put_high,
                 lowrate_put     AS put_low,
                 drvtype
-            FROM tase_putcall
+            FROM {src}
             WHERE expiry_date = :exp
               AND fetch_date = :fdate
               AND fetch_time = :ftime
             ORDER BY COALESCE(expirationprice_call, expirationprice_put)
-        """),
+        """),  # noqa: S608 — src עבר whitelist ב-_check_source
         con=eng,
         params={"exp": target, "fdate": fetch_date_val, "ftime": fetch_time_val},
     )
