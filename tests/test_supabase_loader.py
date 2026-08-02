@@ -236,7 +236,7 @@ class TestGetLatestOptionChain:
         mock_conn.__exit__  = MagicMock(return_value=False)
         # targets query
         mock_conn.execute.return_value.fetchall.return_value = [("2026-05-29",)]
-        mock_conn.execute.return_value.fetchone.return_value = ("2026-05-22", "10:00", fetch_ts)
+        mock_conn.execute.return_value.fetchone.return_value = ("2026-05-22", "10:00", fetch_ts, "21/05/2026")
 
         mock_engine = MagicMock()
         mock_engine.connect.return_value = mock_conn
@@ -274,7 +274,7 @@ class TestGetLatestOptionChain:
         mock_conn.__enter__ = MagicMock(return_value=mock_conn)
         mock_conn.__exit__  = MagicMock(return_value=False)
         mock_conn.execute.return_value.fetchall.return_value = [("2026-05-29",)]
-        mock_conn.execute.return_value.fetchone.return_value = ("2026-05-22", "10:00", fetch_ts)
+        mock_conn.execute.return_value.fetchone.return_value = ("2026-05-22", "10:00", fetch_ts, "21/05/2026")
 
         mock_engine = MagicMock()
         mock_engine.connect.return_value = mock_conn
@@ -296,7 +296,7 @@ class TestGetLatestOptionChain:
         mock_conn.__enter__ = MagicMock(return_value=mock_conn)
         mock_conn.__exit__  = MagicMock(return_value=False)
         mock_conn.execute.return_value.fetchall.return_value = [("2026-05-29",)]
-        mock_conn.execute.return_value.fetchone.return_value = ("2026-05-22", "10:00", fetch_ts)
+        mock_conn.execute.return_value.fetchone.return_value = ("2026-05-22", "10:00", fetch_ts, "21/05/2026")
 
         mock_engine = MagicMock()
         mock_engine.connect.return_value = mock_conn
@@ -322,7 +322,7 @@ class TestGetLatestOptionChain:
         mock_conn.__enter__ = MagicMock(return_value=mock_conn)
         mock_conn.__exit__  = MagicMock(return_value=False)
         mock_conn.execute.return_value.fetchall.return_value = [("2026-05-29",)]
-        mock_conn.execute.return_value.fetchone.return_value = ("2026-05-22", "10:00", fetch_ts)
+        mock_conn.execute.return_value.fetchone.return_value = ("2026-05-22", "10:00", fetch_ts, "21/05/2026")
 
         mock_engine = MagicMock()
         mock_engine.connect.return_value = mock_conn
@@ -343,7 +343,7 @@ class TestGetLatestOptionChain:
         mock_conn.__enter__ = MagicMock(return_value=mock_conn)
         mock_conn.__exit__  = MagicMock(return_value=False)
         mock_conn.execute.return_value.fetchall.return_value = [("2026-05-29",)]
-        mock_conn.execute.return_value.fetchone.return_value = ("2026-05-22", "10:00", fetch_ts)
+        mock_conn.execute.return_value.fetchone.return_value = ("2026-05-22", "10:00", fetch_ts, "21/05/2026")
 
         mock_engine = MagicMock()
         mock_engine.connect.return_value = mock_conn
@@ -363,7 +363,7 @@ class TestGetLatestOptionChain:
         mock_conn.__enter__ = MagicMock(return_value=mock_conn)
         mock_conn.__exit__  = MagicMock(return_value=False)
         mock_conn.execute.return_value.fetchall.return_value = [("2026-05-22",)]
-        mock_conn.execute.return_value.fetchone.return_value = ("2026-05-22", "10:00", fetch_ts)
+        mock_conn.execute.return_value.fetchone.return_value = ("2026-05-22", "10:00", fetch_ts, "21/05/2026")
 
         mock_engine = MagicMock()
         mock_engine.connect.return_value = mock_conn
@@ -453,10 +453,17 @@ class TestGetSampleRow:
 
 # ─── _load_one_expiry — multi-layer filters ────────────────────────────
 
-def _mock_conn_fetchone(fetch_ts, fetch_date="2026-05-22", fetch_time="10:00"):
-    """mock connection עם fetchone שמחזיר (fetch_date, fetch_time, fetch_ts)."""
+def _mock_conn_fetchone(fetch_ts, fetch_date="2026-05-22", fetch_time="10:00",
+                        trade_date="21/05/2026"):
+    """
+    mock connection עם fetchone שמחזיר
+    (fetch_date, fetch_time, fetch_ts, trade_date).
+
+    trade_date בפורמט DD/MM/YYYY והוא T-1 מול fetch_date — כמו בנתונים האמיתיים.
+    """
     mock_conn = MagicMock()
-    mock_conn.execute.return_value.fetchone.return_value = (fetch_date, fetch_time, fetch_ts)
+    mock_conn.execute.return_value.fetchone.return_value = (
+        fetch_date, fetch_time, fetch_ts, trade_date)
     return mock_conn
 
 
@@ -770,7 +777,7 @@ class TestPriceConversion:
         mock_conn.__enter__ = MagicMock(return_value=mock_conn)
         mock_conn.__exit__  = MagicMock(return_value=False)
         mock_conn.execute.return_value.fetchall.return_value = [("2026-05-29",)]
-        mock_conn.execute.return_value.fetchone.return_value = ("2026-05-22", "10:00", fetch_ts)
+        mock_conn.execute.return_value.fetchone.return_value = ("2026-05-22", "10:00", fetch_ts, "21/05/2026")
 
         mock_engine = MagicMock()
         mock_engine.connect.return_value = mock_conn

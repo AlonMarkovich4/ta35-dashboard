@@ -79,13 +79,39 @@ def _upcoming_expiries(engine) -> list[pd.Timestamp]:
     return [d for d in parsed if d >= today]
 
 
-def _horizon_hold(base_index, expiry_day, today, margin_pct, crow) -> dict | None:
+def _anchor_date(trade_date, fallback):
+    """
+    התאריך שאליו העוגן (base_index) באמת שייך.
+
+    `base_index` מגיע מ-find_atm על מחירי השרשרת, והשרשרת מייצגת את
+    `trade_date` — בדרך כלל **T-1**, לא את היום הנוכחי. אומת על 37 snapshots:
+    ה-ATM המשתמע תואם את סגירת trade_date פי 9 טוב יותר מאשר את סגירת אותו יום
+    (|ממוצע| 0.116% מול 1.008%).
+
+    trade_date מגיע בפורמט DD/MM/YYYY (שונה מ-fetch_date!). בלתי-פריק → fallback.
+    """
+    if not trade_date:
+        return fallback
+    try:
+        return datetime.strptime(str(trade_date)[:10], "%d/%m/%Y").date()
+    except (ValueError, TypeError):
+        logger.warning("margin_recorder: trade_date לא פריק (%r) — נופל ל-%s",
+                       trade_date, fallback)
+        return fallback
+
+
+def _horizon_hold(base_index, expiry_day, today, margin_pct, crow,
+                  trade_date=None) -> dict | None:
     """
     ה-hold האמיתי לאופק שבו הפוזיציה חשופה — **תיעוד בלבד, לא משנה את הבחירה.**
 
     hold_blended נמדד על תנועת **מושב אחד** (סגירה→סילוק), אבל פוזיציה נפתחת
     מספר מושבים לפני הפקיעה. הפער נמדד על 1,993 מושבים במרווח 2.25%:
     97.5% למושב אחד מול 72.2% לחמישה.
+
+    **האופק נספר מ-trade_date ולא מהיום.** ה-strikes מעוגנים ל-base_index, שהוא
+    המדד של trade_date (T-1) — ולכן החשיפה בפועל מתחילה שם, מושב אחד מוקדם ממה
+    שנראה. ספירה מהיום הייתה מקצרת את האופק ומייפה את ה-hold.
 
     מחזיר None (ולא זורק) אם סדרת המדד לא נטענה — כשל רשת לא מפיל ריצת המלצות.
     """
@@ -98,10 +124,11 @@ def _horizon_hold(base_index, expiry_day, today, margin_pct, crow) -> dict | Non
         )
         from trading_calendar import trading_days_between
 
-        # האופק נספר מ**לוח המסחר**, לא מהסדרה ההיסטורית: הפקיעה בעתיד, ולסדרה
-        # אין בה ימים. trading_days_between יודע גם לדלג על חגים — 22/07→24/07
-        # הם 2 ימי לוח אבל מושב אחד בלבד, כי 23/07 היה תשעה באב.
-        k = trading_days_between(today, expiry_day)
+        # נספר מ**לוח המסחר**, לא מהסדרה ההיסטורית: הפקיעה בעתיד ולסדרה אין בה
+        # ימים. trading_days_between גם מדלג על חגים — 22/07→24/07 הם 2 ימי לוח
+        # אבל מושב אחד, כי 23/07 היה תשעה באב.
+        anchor = _anchor_date(trade_date, today)
+        k = trading_days_between(anchor, expiry_day)
         if k < 1:
             return None
 
@@ -115,6 +142,7 @@ def _horizon_hold(base_index, expiry_day, today, margin_pct, crow) -> dict | Non
 
         out = {
             "horizon_sessions": k,
+            "anchor_date":      str(anchor),      # התאריך שהעוגן שייך אליו (T-1)
             "n":                dist["n"],
             "hold_at_margin":   hold_probability_at_margin(dist, float(margin_pct)),
             "abs_mean_move":    dist.get("abs_mean"),
@@ -212,7 +240,8 @@ def _recommendation_for_expiry(
                  and round(float(r["margin_pct"]), 4) == round(float(sm), 4)), {})
 
     horizon = _horizon_hold(base_index=base_index, expiry_day=exp_ts.date(),
-                            today=today, margin_pct=sm, crow=crow)
+                            today=today, margin_pct=sm, crow=crow,
+                            trade_date=entry.get("trade_date"))
 
     return {
         "expiry_date":        exp_ts.date(),

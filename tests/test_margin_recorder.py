@@ -554,3 +554,52 @@ class TestHorizonHold:
         assert without["selected_margin"] == with_series["selected_margin"]
         assert without["hold_blended"] == with_series["hold_blended"]
         assert without["short_put_strike"] == with_series["short_put_strike"]
+
+
+# ─── עוגן ה-T-1 (נוסף 02/08/2026) ────────────────────────────────────────
+
+class TestAnchorDate:
+    """
+    base_index מגיע מ-find_atm על מחירי השרשרת, והשרשרת מייצגת את trade_date —
+    בדרך כלל T-1. אומת על 37 snapshots: ה-ATM המשתמע תואם את סגירת trade_date
+    פי 9 טוב יותר מסגירת אותו יום (|ממוצע| 0.116% מול 1.008%).
+
+    לכן החשיפה מתחילה ב-trade_date, לא היום. ספירה מהיום מקצרת את האופק
+    ומייפה את ה-hold.
+    """
+
+    def test_parses_dd_mm_yyyy(self):
+        """הפורמט הוא DD/MM/YYYY — **שונה** מ-fetch_date. 07/08 הוא 7 באוגוסט."""
+        assert mr._anchor_date("07/08/2026", date(2026, 1, 1)) == date(2026, 8, 7)
+        assert mr._anchor_date("30/07/2026", date(2026, 1, 1)) == date(2026, 7, 30)
+
+    @pytest.mark.parametrize("bad", [None, "", "not-a-date", "2026-07-30"])
+    def test_unparseable_falls_back(self, bad):
+        """בלתי-פריק → fallback, לא חריגה. (גם ISO נופל — הפורמט כאן DD/MM/YYYY.)"""
+        fb = date(2026, 8, 2)
+        assert mr._anchor_date(bad, fb) == fb
+
+    def test_anchor_lengthens_the_horizon(self, monkeypatch):
+        """
+        הליבה: ספירה מ-trade_date (T-1) נותנת אופק ארוך יותר מספירה מהיום —
+        ולכן hold נמוך יותר. זה התיקון.
+        """
+        sessions = TestHorizonHold._sessions()
+        import index_series
+        monkeypatch.setattr(index_series, "fetch_index_sessions", lambda *a, **k: sessions)
+
+        from_today = mr._horizon_hold(1000.0, date(2026, 8, 6), date(2026, 8, 3),
+                                      2.0, {}, trade_date=None)
+        from_anchor = mr._horizon_hold(1000.0, date(2026, 8, 6), date(2026, 8, 3),
+                                       2.0, {}, trade_date="31/07/2026")
+        assert from_anchor["horizon_sessions"] > from_today["horizon_sessions"]
+        assert from_anchor["hold_at_margin"] <= from_today["hold_at_margin"]
+        assert from_anchor["anchor_date"] == "2026-07-31"
+
+    def test_anchor_reported_in_output(self, monkeypatch):
+        import index_series
+        monkeypatch.setattr(index_series, "fetch_index_sessions",
+                            lambda *a, **k: TestHorizonHold._sessions())
+        out = mr._horizon_hold(1000.0, date(2026, 8, 6), date(2026, 8, 3),
+                               2.0, {}, trade_date="31/07/2026")
+        assert out["anchor_date"] == "2026-07-31"

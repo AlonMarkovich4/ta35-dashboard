@@ -310,7 +310,7 @@ def _load_chains(eng, expiry_date: Optional[str],
             if result is None:
                 continue
 
-            chain_df, drvtype_val, fetch_ts, baserate, fetch_date_val = result
+            chain_df, drvtype_val, fetch_ts, baserate, fetch_date_val, trade_date_val = result
 
             if latest_ts is None or fetch_ts > latest_ts:
                 latest_ts = fetch_ts
@@ -330,6 +330,11 @@ def _load_chains(eng, expiry_date: Optional[str],
                 # והם מה שצריך לבדוק כשמחליטים אם לפעול לפי השרשרת.
                 "fetch_date":  fetch_date_val,
                 "fetched_at":  fetch_ts,
+                # יום המסחר שהנתונים מייצגים (DD/MM/YYYY) — בדרך כלל T-1.
+                # **זה התאריך שאליו העוגן שייך**: ה-ATM המשתמע תואם את סגירת
+                # trade_date, לא את היום הנוכחי (אומת: פי 9 הידוק, 37 snapshots).
+                # מי שמחשב אופק חשיפה חייב לספור מכאן, לא מהיום.
+                "trade_date":  trade_date_val,
             })
 
     if not expiries:
@@ -353,8 +358,8 @@ def _load_one_expiry(eng, conn, target: str,
     """
     טוען שרשרת פקיעה אחת ומחיל סינון רב-שכבתי.
 
-    מחזיר (DataFrame, drvtype, fetched_at, atm_level, fetch_date) או None אם הנתונים
-    לא תקינים. None מוחזר גם אם נותרות פחות מ-_MIN_CHAIN_ROWS שורות לאחר הסינון.
+    מחזיר (DataFrame, drvtype, fetched_at, atm_level, fetch_date, trade_date)
+    או None אם הנתונים לא תקינים. None מוחזר גם אם נותרות פחות מ-_MIN_CHAIN_ROWS שורות לאחר הסינון.
 
     fetch_date (הפרמטר) — כשמסופק, נבחר ה-snapshot של אותו יום במקום העדכני ביותר.
     fetch_date (בערך המוחזר) — כדי שהקורא יוכל לבדוק טריות **פר-פקיעה**;
@@ -369,7 +374,8 @@ def _load_one_expiry(eng, conn, target: str,
         params["fdate"] = fetch_date
     latest_row = conn.execute(
         text(f"""
-            SELECT fetch_date, fetch_time, MAX(fetched_at) AS max_fetched_at
+            SELECT fetch_date, fetch_time, MAX(fetched_at) AS max_fetched_at,
+                   MIN(trade_date) AS trade_date
             FROM {src}
             WHERE expiry_date = :exp{day_filter}
             GROUP BY fetch_date, fetch_time
@@ -385,6 +391,9 @@ def _load_one_expiry(eng, conn, target: str,
     fetch_date_val = latest_row[0]
     fetch_time_val = latest_row[1]
     fetch_ts       = latest_row[2]  # MAX(fetched_at) — לתצוגת "עודכן"
+    # trade_date זהה לכל שורות אותה משיכה, ולכן MIN הוא פשוט "הערך".
+    # פורמט DD/MM/YYYY (שונה מ-fetch_date!) — ראה HANDOFF סעיף 1.6.
+    trade_date_val = latest_row[3]
 
     # שלב 1: קרא את כל ה-batches של המשיכה האחרונה (fetch_date + fetch_time זהים)
     df_raw = pd.read_sql(
@@ -554,4 +563,4 @@ def _load_one_expiry(eng, conn, target: str,
     df["put_pts"]  = (df["put_price"]  / MULTIPLIER).round(2)
 
     _dbg(f"✅ **תוצאה סופית:** {len(df)} שורות | ATM={atm_level:.0f}")
-    return df, str(drvtype_val), fetch_ts, atm_level, fetch_date_val
+    return df, str(drvtype_val), fetch_ts, atm_level, fetch_date_val, trade_date_val
