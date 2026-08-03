@@ -224,3 +224,120 @@ class TestDefaultFloorLocked:
         # 1.5 נותן 0.90 < 0.97 → נדחה; 2.0 (1.00) הוא הצר-שעומד-בסף הרשמי.
         # אילו ברירת המחדל הייתה חוזרת ל-0.90 — הבחירה הייתה 1.5, והבדיקה תיפול.
         assert implicit["selected_margin"] == 2.0
+
+
+# ─── שער כלכלי (נוסף 02/08/2026) ─────────────────────────────────────────
+
+from margin_selector import binary_ev, required_hold  # noqa: E402
+
+
+class TestRequiredHold:
+    """
+    ה-hold שהמבנה **דורש** כדי לא להפסיד — ללא תלות בשום מודל.
+    נמדד על 49 המלצות: credit/width ממוצע 0.21 ⇒ required ≈ 0.79,
+    בעוד המנוע טוען 0.977 וה-hold הכן ~0.70.
+    """
+
+    def test_symmetric_structure_needs_half(self):
+        """קרדיט = הפסד ⇒ צריך 50%."""
+        assert required_hold(100, -100) == 0.5
+
+    def test_the_real_ratio(self):
+        """credit/width = 0.21 ⇒ required = 0.79. זה המצב בפועל."""
+        assert required_hold(210, -790) == 0.79
+
+    def test_thin_credit_needs_near_certainty(self):
+        assert required_hold(19, -1481) == 0.9873
+
+    def test_zero_or_negative_credit_is_impossible(self):
+        """מבנה short בדביט — שום hold לא מציל אותו."""
+        assert required_hold(0, -1000) == 1.0
+        assert required_hold(-2.0, -1502.0) == 1.0     # ההמלצה שנצפתה בפועל
+
+    @pytest.mark.parametrize("c,ml", [(None, -100), (100, None), ("x", -100), (0, 0)])
+    def test_bad_input_returns_none(self, c, ml):
+        assert required_hold(c, ml) is None
+
+    def test_sign_of_max_loss_is_irrelevant(self):
+        assert required_hold(100, -300) == required_hold(100, 300)
+
+
+class TestBinaryEv:
+    def test_breakeven_at_required_hold(self):
+        """בדיוק ב-required_hold ה-EV אפס — זו ההגדרה."""
+        c, ml = 210, -790
+        assert abs(binary_ev(c, ml, required_hold(c, ml))) < 0.01
+
+    def test_positive_above_negative_below(self):
+        c, ml = 210, -790
+        rh = required_hold(c, ml)
+        assert binary_ev(c, ml, rh + 0.10) > 0
+        assert binary_ev(c, ml, rh - 0.10) < 0
+
+    def test_the_actual_gap(self):
+        """המנוע טוען 0.977 → EV חיובי; ב-0.70 הכן → שלילי. זה הממצא."""
+        c, ml = 210, -790
+        assert binary_ev(c, ml, 0.977) > 0
+        assert binary_ev(c, ml, 0.70) < 0
+
+
+class TestEconomicGate:
+    """
+    שתי דחיות שונות: פרמיה≤0 תמיד, ו-required>ev_hold רק כשסופק.
+    ev_hold=None משמר את ההתנהגות הקיימת במלואה.
+    """
+
+    @staticmethod
+    def _curve(rows):
+        return [{"margin_pct": m, "skipped": False, "net_premium": c,
+                 "max_loss": ml, "ev": None} for m, c, ml in rows]
+
+    @staticmethod
+    def _hist():
+        import numpy as np
+        rng = np.random.default_rng(5)
+        n = 400
+        return pd.DataFrame({
+            "expiry_date": pd.date_range("2024-01-01", periods=n, freq="D"),
+            "expiry_type": ["W"] * n,
+            "move_pct": rng.normal(0, 0.5, n),
+        })
+
+    def test_negative_premium_always_rejected(self):
+        """גם בלי ev_hold — מבנה בדביט נדחה."""
+        curve = self._curve([(1.5, -2.0, -1502.0), (2.0, 300.0, -700.0)])
+        out = select_margin(curve, self._hist(), "W", 0.3)
+        assert out["selected_margin"] == 2.0
+        assert len(out["rejected"]) == 1
+        assert "פרמיה" in out["rejected"][0]["reject_reason"]
+
+    def test_ev_hold_none_preserves_behaviour(self):
+        """ברירת המחדל אינה חוסמת שום מבנה רזה."""
+        curve = self._curve([(1.5, 19.0, -1481.0), (2.0, 300.0, -700.0)])
+        out = select_margin(curve, self._hist(), "W", 0.3)
+        assert out["ev_hold"] is None
+        assert all("דורש hold" not in r["reject_reason"] for r in out["rejected"])
+
+    def test_ev_hold_rejects_thin_credit(self):
+        """אותה עקומה עם ev_hold=0.70 — המבנה הרזה נדחה."""
+        curve = self._curve([(1.5, 19.0, -1481.0), (2.0, 300.0, -700.0)])
+        out = select_margin(curve, self._hist(), "W", 0.3, ev_hold=0.70)
+        assert out["selected_margin"] == 2.0
+        assert any("דורש hold" in r["reject_reason"] for r in out["rejected"])
+
+    def test_all_rejected_says_no_trade(self):
+        """
+        כשכל המבנים נדחים — התשובה היא "אין עסקה", ונבדלת מ"אין עקומה".
+        זו תשובה לגיטימית, לא כשל.
+        """
+        curve = self._curve([(1.5, 19.0, -1481.0), (2.0, 25.0, -1975.0)])
+        out = select_margin(curve, self._hist(), "W", 0.3, ev_hold=0.70)
+        assert out["selected_margin"] is None
+        assert len(out["rejected"]) == 2
+        assert "נדחו כלכלית" in out["reason"]
+
+    def test_required_hold_exposed_on_grid(self):
+        curve = self._curve([(2.0, 210.0, -790.0)])
+        out = select_margin(curve, self._hist(), "W", 0.3, ev_hold=0.70)
+        row = (out["grid"] or out["rejected"])[0]
+        assert row["required_hold"] == 0.79

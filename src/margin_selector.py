@@ -164,6 +164,58 @@ def _build_reason(sel: dict, hold_floor: float, below_floor: bool) -> str:
     )
 
 
+def required_hold(net_premium, max_loss) -> Optional[float]:
+    """
+    ה-hold המינימלי שבו המבנה **מאוזן** — מתחתיו התוחלת שלילית.
+
+    לקונדור בינארי (מחזיק → פרמיה מלאה · נשבר → max_loss):
+        EV = hold·credit − (1−hold)·|max_loss| = 0
+        ⇒ hold = |max_loss| / (credit + |max_loss|) = 1 − credit/width
+
+    זהו הרף שהמבנה **דורש**, ללא תלות בשום מודל הסתברות. `hold_blended` הוא מה
+    שהמנוע **מאמין** — והפער ביניהם הוא השאלה.
+
+    נמדד על 49 ההמלצות (`margin-v1.1`): credit/width ממוצע 0.21, כלומר
+    required_hold ≈ 0.79. המנוע טוען 0.977; ה-hold הכן לאופק בפועל הוא ~0.70.
+
+    מחזיר None אם הקלט חסר/לא-חוקי. credit ≤ 0 → 1.0 (בלתי אפשרי לאיזון):
+    מבנה short שנפתח בדביט אינו יכול להרוויח, ולכן שום hold לא מציל אותו.
+    """
+    c, ml = _f(net_premium), _f(max_loss)
+    if c is None or ml is None:
+        return None
+    width = c + abs(ml)
+    if width <= 0:
+        return None
+    if c <= 0:
+        return 1.0
+    return round(abs(ml) / width, 4)
+
+
+def binary_ev(net_premium, max_loss, hold) -> Optional[float]:
+    """
+    תוחלת בינארית: `hold·credit − (1−hold)·|max_loss|`.
+
+    קירוב מכוון — מתעלם משבירות חלקיות (הסילוק בין ה-short ל-long). לכן הוא
+    **שמרני בכיוון אחד בלבד**: שבירה חלקית מפסידה פחות מ-max_loss, ולכן ה-EV
+    האמיתי גבוה מעט מזה. מספיק לשער קבלה/דחייה, לא לתמחור.
+
+    ל-EV מדויק יש `margin_calculator.margin_pnl` על תנועה נתונה.
+    """
+    c, ml, h = _f(net_premium), _f(max_loss), _f(hold)
+    if c is None or ml is None or h is None:
+        return None
+    return round(h * c - (1.0 - h) * abs(ml), 2)
+
+
+def _f(v):
+    """float בטוח — None כשלא ניתן להמרה."""
+    try:
+        return None if v is None else float(v)
+    except (TypeError, ValueError):
+        return None
+
+
 def select_margin(
     margin_curve: list[dict],
     df: pd.DataFrame,
@@ -174,6 +226,7 @@ def select_margin(
     weight_conditional: float = DEFAULT_WEIGHT_CONDITIONAL,
     min_n: int = DEFAULT_MIN_N,
     before_date=None,
+    ev_hold: Optional[float] = None,
 ) -> dict:
     """
     בוחר את המרווח האופטימלי מהגריד: **הצר ביותר שה-hold המשוקלל שלו ≥ hold_floor**.
@@ -233,16 +286,58 @@ def select_margin(
             "net_premium":      row.get("net_premium"),
             "ev":               row.get("ev"),
             "max_loss":         row.get("max_loss"),
+            # ── כלכלת המבנה — ללא תלות במודל ההסתברות ──────────────────
+            "required_hold":    required_hold(row.get("net_premium"), row.get("max_loss")),
+            "ev_at_hold":       (binary_ev(row.get("net_premium"), row.get("max_loss"), ev_hold)
+                                 if ev_hold is not None else None),
         })
 
     grid.sort(key=lambda g: g["margin_pct"])   # הצר ביותר קודם
 
+    # ── שער כלכלי ────────────────────────────────────────────────────────
+    # שתי דחיות שונות באופיין:
+    #
+    # 1. net_premium <= 0 — **תמיד**, ללא תלות ב-ev_hold. מבנה short שנפתח
+    #    בדביט אינו יכול להרוויח בשום תרחיש. נצפה בפועל: המלצה עם
+    #    net_premium=-2.0 מול max_loss=-1502.0.
+    # 2. required_hold > ev_hold — רק כש-ev_hold סופק. המבנה דורש ביטחון
+    #    גבוה ממה שהמערכת באמת משיגה, ולכן תוחלתו שלילית.
+    #
+    # ⚠️ ev_hold=None (ברירת מחדל) משמר את ההתנהגות הקיימת לחלוטין — רק (1)
+    #    פועל. הפעלת (2) חוסמת 67% מההמלצות הנוכחיות ולכן היא **החלטה**, לא
+    #    ברירת מחדל: לעיתים קרובות התשובה הנכונה תהיה "אין עסקה".
+    rejected: list[dict] = []
+    if grid:
+        keep: list[dict] = []
+        for g in grid:
+            np_ = _f(g.get("net_premium"))
+            rh = g.get("required_hold")
+            if np_ is not None and np_ <= 0:
+                rejected.append({**g, "reject_reason": "פרמיה אפס או שלילית"})
+                continue
+            if ev_hold is not None and rh is not None and rh > float(ev_hold):
+                rejected.append({**g, "reject_reason":
+                                 f"דורש hold {rh:.1%} מול {float(ev_hold):.1%} בפועל"})
+                continue
+            keep.append(g)
+        grid = keep
+
     if not grid:
-        logger.warning("select_margin: אין מרווחים תקינים בעקומה — אין החלטה.")
+        # הבחנה חשובה: "אין עקומה" מול "כל המבנים נדחו כלכלית". השני הוא תשובה
+        # לגיטימית — לפעמים אין עסקה ששווה לפתוח, וזה מה שצריך להיאמר.
+        if rejected:
+            why = rejected[0].get("reject_reason", "")
+            logger.warning("select_margin: כל %d המרווחים נדחו כלכלית (%s).",
+                           len(rejected), why)
+            reason = (f"אין המלצה — כל {len(rejected)} המרווחים נדחו כלכלית. "
+                      f"הצר ביותר: {why}.")
+        else:
+            logger.warning("select_margin: אין מרווחים תקינים בעקומה — אין החלטה.")
+            reason = "אין מרווחים תקינים בעקומה — לא ניתן לבחור."
         return {
             "selected_margin": None, "hold_blended": None, "net_premium": None,
             "ev": None, "max_loss": None, "below_floor": True, "hold_floor": hold_floor,
-            "grid": [], "reason": "אין מרווחים תקינים בעקומה — לא ניתן לבחור.",
+            "grid": [], "rejected": rejected, "ev_hold": ev_hold, "reason": reason,
         }
 
     qualifying = [g for g in grid if g["hold_blended"] is not None and g["hold_blended"] >= hold_floor]
@@ -260,5 +355,7 @@ def select_margin(
         "below_floor":     below_floor,
         "hold_floor":      hold_floor,
         "grid":            grid,
+        "rejected":        rejected,
+        "ev_hold":         ev_hold,
         "reason":          _build_reason(sel, hold_floor, below_floor),
     }
