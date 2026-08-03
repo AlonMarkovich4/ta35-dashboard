@@ -113,8 +113,10 @@
 - `move_distribution.horizon_move_distribution(sessions, k)` — התפלגות לאופק k מושבים.
   `entry=close[i−k]`, `settle=open[i]`. מחזיר אותו מבנה ולכן משתלב עם `hold_probability_at_margin`.
 - `move_distribution.daily_volatility(sessions, window)` — σ יומית + **מיקום בהתפלגות**
-  (`percentile`/`quintile`). הערך הגולמי חסר משמעות בלי המיקום.
-  נמדד: `recent_move` AUC 0.600 · σ-10-מושבים AUC **0.657**. הטיה, לא מתג.
+  (`percentile`/`quintile`). תיעוד בלבד, אינו משפיע על בחירה.
+  ⛔ **AUC 0.657 שדווח ב-02/08 הוא ארטיפקט של 2016–2021.** במשטר החי (מ-08/2024,
+  n=412) הוא **0.507** — הטלת מטבע. גם EWMA (0.511) ופערי פתיחה (0.447) נכשלים.
+  **אין להשתמש בו כמנבא משטר.** פירוט: HANDOFF סעיף 10.
 - `margin_recorder._horizon_hold` — שומר `horizon.{hold_at_margin, anchor_date, daily_vol}`
   לצד `hold_blended`. **האופק נספר מ-`trade_date` (T-1)**, לא מהיום — ראה `_anchor_date`.
 - ⚠️ **אל תזריק מדד חי כעוגן.** כל השרשרת T-1, כולל המחירים. פירוט: HANDOFF 7.3.
