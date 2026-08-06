@@ -14,6 +14,7 @@ paper_db.py — שכבת DB לתיקי Paper Trading.
   get_trades(portfolio_id, status, expiry_date, engine=None)            → list[dict]
   get_open_trades_for_expiry(expiry_date, engine=None)                  → list[dict]
   get_settlement_index(expiry_date, engine=None)                        → float | None
+      מחיר הסילוק = **פתיחת המדד ביום הפקיעה**, לא הנעילה ולא actual_index_close.
   get_expiries_ready_to_close(engine=None)                              → list[dict]
   close_trade(trade_id, close_index, pnl, pnl_pct, exit_commission, engine) → bool
   insert_decision_log(decision, trigger, engine_version, engine)        → int | None
@@ -27,6 +28,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from typing import Optional
 
 from sqlalchemy import create_engine, text
@@ -396,55 +398,131 @@ def close_trade(
 
 
 # ─── Settlement source (read-only) ──────────────────────────────────────
+#
+# ⛔ **`condor_settled_detail.actual_index_close` אינו מחיר הסילוק.**
+#
+# אומת ב-06/08/2026 על 28 פקיעות (2026-06-10 → 2026-07-31), שלוש מדידות בלתי
+# תלויות שכולן מצביעות לאותו מקום:
+#   · aic == expiry_history.base_price          28/28, שגיאה 0.00
+#   · aic == נעילת המדד של המושב ה**קודם**       (Yahoo TA35.TA)
+#   · expiry_history.expiry_price == פתיחת יום הפקיעה   28/28, שגיאה 0.00
+#
+# כלומר האופציות השבועיות של TA-35 מסתלקות ב**מחיר הפתיחה של יום הפקיעה**,
+# ואילו aic מחזיק את הנעילה של המושב שלפניו. ההפרש הוא בדיוק פער הלילה —
+# 24 נקודות מדד חציונית, 0.59%. על רצועת מרווח של 1.75% זה 34% מרוחב הרצועה,
+# ולכן די בו כדי להפוך זכייה להפסד ליד הגבול. כל 25 העסקאות שנסגרו עד
+# 06/08/2026 נסגרו במחיר השגוי.
+#
+# היררכיית המקורות למטה מכוונת לערך אחד — פתיחת יום הפקיעה:
+#   1. `expiry_history.expiry_price` — קובץ הבורסה הרשמי. מקור האמת.
+#   2. פתיחת המדד מ-`index_series` — גיבוי, כי (1) מפגר מספר ימים אחרי הפקיעה
+#      בעוד שהסגירה צריכה לרוץ באותו יום.
+# aic אינו משמש יותר בשום מסלול. הממצא הועבר למתכנת השני (ראה HANDOFF).
+
+
+_OPEN_BY_DATE_CACHE: Optional[dict[str, Optional[float]]] = None
+_OPEN_CACHE_LOADED_AT: float = 0.0
+# כל פקיעה עתידית מחמיצה את ה-cache לנצח, ולכן "החמצה ⇒ רענן" לבדו היה מייצר
+# פנייה לרשת לכל פקיעה פתוחה בכל ריצה. הרענון נחסם לחלון הזה.
+_OPEN_CACHE_TTL_SEC: float = 300.0
+
+
+def _load_index_opens() -> dict[str, Optional[float]]:
+    """מפה תאריך→פתיחה מסדרת המדד. פנייה אחת לרשת, לא אחת לכל פקיעה.
+
+    בייבוא עצל — `index_series` פונה לרשת, ואין סיבה לשלם על כך בכל ייבוא של
+    `paper_db`. הפונקציה שם בולעת כשל רשת ומחזירה [] ולעולם אינה זורקת.
+    """
+    try:
+        from index_series import fetch_index_sessions
+    except Exception:  # pragma: no cover - סביבה בלי המודול
+        logger.warning("index_series אינו זמין — אין מסלול גיבוי לסילוק.")
+        return {}
+
+    out: dict[str, Optional[float]] = {}
+    for session in fetch_index_sessions("2y") or []:
+        val = session.get("open")
+        try:
+            out[str(session.get("date"))[:10]] = None if val is None else float(val)
+        except (TypeError, ValueError):
+            out[str(session.get("date"))[:10]] = None
+    return out
+
+
+def _settlement_from_index_series(expiry_date) -> Optional[float]:
+    """גיבוי: פתיחת המדד ביום הפקיעה.
+
+    מחזיר None כשהמושב אינו בסדרה או טרם נפתח — ואז הפקיעה פשוט לא נסגרת.
+    זו ההתנהגות הרצויה: עדיף לא לסגור מאשר לסגור במחיר שגוי.
+
+    התאריך המבוקש חסר ⇒ ייתכן שנוסף מושב חדש מאז, ולכן מרעננים — אבל לא יותר
+    מפעם ב-`_OPEN_CACHE_TTL_SEC`. בלי החסם הזה כל פקיעה **עתידית** (שלעולם
+    לא תימצא בסדרה) הייתה מייצרת פנייה נוספת לרשת בכל ריצה. כך תהליך
+    ארוך-חיים עדיין קולט מושבים חדשים, ותהליך קצר משלם על הרשת פעם אחת.
+    """
+    global _OPEN_BY_DATE_CACHE, _OPEN_CACHE_LOADED_AT
+
+    target = str(expiry_date)[:10]
+    stale = (time.monotonic() - _OPEN_CACHE_LOADED_AT) > _OPEN_CACHE_TTL_SEC
+    if _OPEN_BY_DATE_CACHE is None or (target not in _OPEN_BY_DATE_CACHE and stale):
+        _OPEN_BY_DATE_CACHE = _load_index_opens()
+        _OPEN_CACHE_LOADED_AT = time.monotonic()
+    return _OPEN_BY_DATE_CACHE.get(target)
+
 
 def get_settlement_index(expiry_date, engine=None) -> Optional[float]:
-    """מחזיר את מחיר הסטלמנט (actual_index_close) של פקיעה מ-condor_settled_detail.
+    """מחזיר את מחיר הסילוק של פקיעה — **פתיחת המדד ביום הפקיעה**.
 
-    קריאה בלבד. מחזיר float אם קיים מחיר נעילה קובע לפקיעה, אחרת None
-    (למשל פקיעה שטרם נקבע לה סטלמנט — כמו 2026-06-19 כרגע).
-
-    טבלת ה-detail עשויה להחזיק כמה שורות לפקיעה (פירוט לפי סטרייק), אך מחיר
-    הנעילה הקובע זהה לכולן — לכן נשלפת שורה תקפה אחת (LIMIT 1).
+    קריאה בלבד. מחזיר None אם הסילוק טרם ידוע (למשל פקיעה עתידית, או יום
+    שהמושב בו טרם נפתח) — ואז הפקיעה פשוט לא תיסגר. ראה את ההערה מעל לגבי
+    למה `condor_settled_detail.actual_index_close` אינו המקור.
     """
     eng = _make_engine(engine)
-    if eng is None:
-        return None
-    try:
-        with eng.connect() as conn:
-            row = conn.execute(
-                text("""
-                    SELECT actual_index_close
-                    FROM condor_settled_detail
-                    WHERE expiry_date = :expiry_date
-                      AND actual_index_close IS NOT NULL
-                    LIMIT 1
-                """),
-                {"expiry_date": expiry_date},
-            ).fetchone()
-        if row is None:
-            return None
-        val = row._mapping.get("actual_index_close")
-        return float(val) if val is not None else None
-    except Exception as exc:
-        logger.warning(
-            "get_settlement_index נכשל (expiry_date=%s): %s",
-            expiry_date, exc, exc_info=True,
+    if eng is not None:
+        try:
+            with eng.connect() as conn:
+                row = conn.execute(
+                    text("""
+                        SELECT expiry_price
+                        FROM expiry_history
+                        WHERE expiry_date::date = CAST(:expiry_date AS date)
+                          AND expiry_price IS NOT NULL
+                        LIMIT 1
+                    """),
+                    {"expiry_date": str(expiry_date)[:10]},
+                ).fetchone()
+            if row is not None:
+                val = row._mapping.get("expiry_price")
+                if val is not None:
+                    return float(val)
+        except Exception as exc:
+            logger.warning(
+                "get_settlement_index: שליפת expiry_history נכשלה (expiry_date=%s): %s",
+                expiry_date, exc, exc_info=True,
+            )
+
+    fallback = _settlement_from_index_series(expiry_date)
+    if fallback is not None:
+        logger.info(
+            "get_settlement_index: %s נלקח מסדרת המדד (%.2f) — expiry_history טרם מעודכן.",
+            expiry_date, fallback,
         )
-        return None
+    return fallback
 
 
 def get_expiries_ready_to_close(engine=None) -> list[dict]:
-    """מחזיר פקיעות שבשלו לסגירה: יש להן עסקאות פתוחות *וגם* מחיר סטלמנט זמין.
+    """מחזיר פקיעות שבשלו לסגירה: יש להן עסקאות פתוחות *וגם* מחיר סילוק זמין.
 
     קריאה בלבד. פקיעה "בשלה" = קיימות לה שורות status='open' ב-paper_trades,
-    וגם קיים actual_index_close ב-condor_settled_detail. פקיעה עם עסקאות
-    פתוחות אך ללא סטלמנט (כמו 2026-06-19) לא תיכלל — זה התנאי שמגן מסגירה
-    מוקדמת.
+    וגם ידוע מחיר הסילוק שלה — פתיחת המדד ביום הפקיעה. פקיעה עם עסקאות
+    פתוחות אך ללא סילוק (פקיעה עתידית, או מושב שטרם נפתח) לא תיכלל; זה התנאי
+    שמגן מסגירה מוקדמת.
 
     לכל פקיעה: {expiry_date, settlement_index, open_trades}, ממוין לפי תאריך.
 
-    ה-condor_settled_detail מצומצם לשורה-אחת-לפקיעה בתת-שאילתה *לפני* ה-JOIN,
-    כדי שספירת העסקאות הפתוחות (COUNT) לא תוכפל ע"י ריבוי שורות הפירוט.
+    ה-SQL מביא רק את הפקיעות עם עסקאות פתוחות ואת המחיר מ-`expiry_history`
+    אם הוא כבר שם; ההשלמה מסדרת המדד נעשית ב-Python, כי היא אינה שאילתת DB.
+    מכאן ה-LEFT JOIN — פקיעה בלי שורה ב-`expiry_history` עדיין מועמדת לגיבוי.
 
     ה-JOIN ממיר את שני צידי expiry_date ל-::date: העמודות בשתי הטבלאות אינן
     מאותו טיפוס (אחת date ואחת text בפורמט 'YYYY-MM-DD'), ו-Postgres מסרב
@@ -461,17 +539,13 @@ def get_expiries_ready_to_close(engine=None) -> list[dict]:
                 text("""
                     SELECT pt.expiry_date     AS expiry_date,
                            COUNT(*)           AS open_trades,
-                           s.settlement_index AS settlement_index
+                           MAX(h.expiry_price) AS settlement_index
                     FROM paper_trades pt
-                    JOIN (
-                        SELECT expiry_date,
-                               MAX(actual_index_close) AS settlement_index
-                        FROM condor_settled_detail
-                        WHERE actual_index_close IS NOT NULL
-                        GROUP BY expiry_date
-                    ) s ON s.expiry_date::date = pt.expiry_date::date
+                    LEFT JOIN expiry_history h
+                           ON h.expiry_date::date = pt.expiry_date::date
+                          AND h.expiry_price IS NOT NULL
                     WHERE pt.status = 'open'
-                    GROUP BY pt.expiry_date, s.settlement_index
+                    GROUP BY pt.expiry_date
                     ORDER BY pt.expiry_date
                 """),
             ).fetchall()
@@ -479,9 +553,22 @@ def get_expiries_ready_to_close(engine=None) -> list[dict]:
         for r in rows:
             m  = r._mapping
             si = m.get("settlement_index")
+            si = float(si) if si is not None else _settlement_from_index_series(
+                m.get("expiry_date")
+            )
+            # פקיעה בלי מחיר סילוק אינה בשלה — משמיטים אותה כדי שהקורא לא
+            # ינסה לסגור ב-None. הקורא סופר "בשלות", ולכן שקט כאן מטעה:
+            # רושמים שורת לוג אחת לכל פקיעה שנדחתה.
+            if si is None:
+                logger.info(
+                    "get_expiries_ready_to_close: %s טרם בשלה — אין מחיר סילוק "
+                    "(%s עסקאות פתוחות).",
+                    m.get("expiry_date"), m.get("open_trades"),
+                )
+                continue
             out.append({
                 "expiry_date":      m.get("expiry_date"),
-                "settlement_index": float(si) if si is not None else None,
+                "settlement_index": si,
                 "open_trades":      int(m.get("open_trades") or 0),
             })
         return out

@@ -19,6 +19,7 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
+import paper_db
 from paper_db import (
     _dumps,
     _dumps_decision,
@@ -903,45 +904,140 @@ class TestGetDecisionLogs:
 # ─── get_settlement_index ──────────────────────────────────────────────
 
 class TestGetSettlementIndex:
-    def test_returns_value_when_present(self):
-        eng = _mock_engine(fetchone=_make_row(actual_index_close=4258.3))
-        assert get_settlement_index("2026-06-16", engine=eng) == pytest.approx(4258.3)
+    """מחיר הסילוק = פתיחת המדד ביום הפקיעה.
 
-    def test_returns_none_when_no_row(self):
-        """פקיעה ללא שורת סטלמנט (כמו 2026-06-19) → None."""
+    כל הבדיקות כאן חוסמות את הרשת (`_settlement_from_index_series`) במפורש,
+    חוץ מאלה שבודקות את מסלול הגיבוי עצמו.
+    """
+
+    def test_returns_expiry_price_when_present(self):
+        eng = _mock_engine(fetchone=_make_row(expiry_price=4229.52))
+        assert get_settlement_index("2026-06-16", engine=eng) == pytest.approx(4229.52)
+
+    def test_falls_back_to_index_open_when_history_missing(self):
+        """expiry_history מפגר כמה ימים אחרי הפקיעה — הגיבוי הוא פתיחת המדד."""
         eng = _mock_engine(fetchone=None)
-        assert get_settlement_index("2026-06-19", engine=eng) is None
+        with patch("paper_db._settlement_from_index_series", return_value=4111.69):
+            assert get_settlement_index("2026-08-04", engine=eng) == pytest.approx(4111.69)
 
-    def test_returns_none_when_value_is_null(self):
-        eng = _mock_engine(fetchone=_make_row(actual_index_close=None))
-        assert get_settlement_index("2026-06-19", engine=eng) is None
+    def test_returns_none_when_neither_source_has_it(self):
+        """פקיעה עתידית: אין שורה ואין מושב → None, ואז היא פשוט לא נסגרת."""
+        eng = _mock_engine(fetchone=None)
+        with patch("paper_db._settlement_from_index_series", return_value=None):
+            assert get_settlement_index("2026-12-31", engine=eng) is None
 
-    def test_returns_none_without_engine(self, monkeypatch):
-        monkeypatch.delenv("DATABASE_URL", raising=False)
-        assert get_settlement_index("2026-06-16") is None
-
-    def test_returns_none_on_db_error(self):
+    def test_db_error_still_tries_fallback(self):
+        """כשל DB אינו אמור להשבית את הסגירה אם המדד זמין."""
         eng = MagicMock()
         eng.connect.side_effect = Exception("read error")
-        assert get_settlement_index("2026-06-16", engine=eng) is None
+        with patch("paper_db._settlement_from_index_series", return_value=4100.0):
+            assert get_settlement_index("2026-06-16", engine=eng) == pytest.approx(4100.0)
+
+    def test_returns_none_without_engine_and_without_series(self, monkeypatch):
+        monkeypatch.delenv("DATABASE_URL", raising=False)
+        with patch("paper_db._settlement_from_index_series", return_value=None):
+            assert get_settlement_index("2026-06-16") is None
 
     def test_value_coerced_to_float(self):
-        """ערך שמגיע כמחרוזת/Decimal עדיין מוחזר כ-float."""
-        eng = _mock_engine(fetchone=_make_row(actual_index_close="4200"))
+        eng = _mock_engine(fetchone=_make_row(expiry_price="4200"))
         out = get_settlement_index("2026-06-16", engine=eng)
         assert isinstance(out, float)
         assert out == pytest.approx(4200.0)
 
-    def test_sql_queries_condor_settled_detail(self):
-        conn = _mock_conn(fetchone=_make_row(actual_index_close=4200.0))
+    def test_sql_queries_expiry_history_not_settled_detail(self):
+        """רגרסיה על הבאג המרכזי (אומת 06/08/2026).
+
+        `condor_settled_detail.actual_index_close` הוא הנעילה של המושב הקודם,
+        לא הסילוק. חזרה אליו מחזירה שגיאה של פער הלילה — 0.59% חציונית,
+        שהיא כשליש מרוחב רצועת מרווח טיפוסית.
+        """
+        conn = _mock_conn(fetchone=_make_row(expiry_price=4200.0))
         eng  = MagicMock()
         eng.connect.return_value = conn
         get_settlement_index("2026-06-16", engine=eng)
         sql = str(conn.execute.call_args[0][0])
-        assert "condor_settled_detail" in sql
-        assert "actual_index_close" in sql
-        params = conn.execute.call_args[0][1]
-        assert params["expiry_date"] == "2026-06-16"
+        assert "expiry_history" in sql
+        assert "expiry_price" in sql
+        assert "condor_settled_detail" not in sql
+        assert "actual_index_close" not in sql
+        assert conn.execute.call_args[0][1]["expiry_date"] == "2026-06-16"
+
+    def test_datetime_expiry_is_truncated_to_date(self):
+        """הקורא עשוי להעביר datetime/date — הפרמטר חייב לצאת כ-'YYYY-MM-DD'."""
+        conn = _mock_conn(fetchone=_make_row(expiry_price=4200.0))
+        eng  = MagicMock()
+        eng.connect.return_value = conn
+        get_settlement_index(datetime(2026, 6, 16, 9, 30), engine=eng)
+        assert conn.execute.call_args[0][1]["expiry_date"] == "2026-06-16"
+
+
+class TestSettlementFromIndexSeries:
+    @pytest.fixture(autouse=True)
+    def _clear_cache(self):
+        """ה-cache גלובלי לתהליך — בלי איפוס הבדיקות דולפות זו לזו."""
+        paper_db._OPEN_BY_DATE_CACHE = None
+        paper_db._OPEN_CACHE_LOADED_AT = 0.0
+        yield
+        paper_db._OPEN_BY_DATE_CACHE = None
+        paper_db._OPEN_CACHE_LOADED_AT = 0.0
+
+    def test_returns_open_of_expiry_day(self):
+        sessions = [
+            {"date": "2026-08-03", "open": 4090.0, "close": 4100.0},
+            {"date": "2026-08-04", "open": 4111.69, "close": 4120.0},
+        ]
+        with patch("index_series.fetch_index_sessions", return_value=sessions):
+            out = paper_db._settlement_from_index_series("2026-08-04")
+        assert out == pytest.approx(4111.69)
+
+    def test_returns_none_when_session_absent(self):
+        with patch("index_series.fetch_index_sessions", return_value=[]):
+            assert paper_db._settlement_from_index_series("2026-08-04") is None
+
+    def test_returns_none_when_open_missing(self):
+        """שורה קיימת בלי פתיחה = המושב טרם נפתח. לא סוגרים."""
+        sessions = [{"date": "2026-08-04", "open": None, "close": None}]
+        with patch("index_series.fetch_index_sessions", return_value=sessions):
+            assert paper_db._settlement_from_index_series("2026-08-04") is None
+
+    def test_uses_open_not_close(self):
+        """נעילה היא לא הסילוק — האופציות מסתלקות בפתיחה."""
+        sessions = [{"date": "2026-07-30", "open": 4020.66, "close": 4095.39}]
+        with patch("index_series.fetch_index_sessions", return_value=sessions):
+            out = paper_db._settlement_from_index_series("2026-07-30")
+        assert out == pytest.approx(4020.66)
+
+    def test_hit_does_not_refetch(self):
+        """תאריך שנמצא ב-cache אינו מצדיק פנייה נוספת לרשת."""
+        sessions = [{"date": "2026-08-04", "open": 4111.69, "close": 4120.0}]
+        with patch("index_series.fetch_index_sessions", return_value=sessions) as f:
+            for _ in range(4):
+                paper_db._settlement_from_index_series("2026-08-04")
+        assert f.call_count == 1
+
+    def test_miss_refetches_after_ttl(self):
+        """תאריך חסר = ייתכן שנוסף מושב חדש — מרעננים במקום להיתקע."""
+        first  = [{"date": "2026-08-04", "open": 4111.69}]
+        second = [{"date": "2026-08-04", "open": 4111.69},
+                  {"date": "2026-08-05", "open": 4182.49}]
+        with patch("index_series.fetch_index_sessions",
+                   side_effect=[first, second]) as f:
+            assert paper_db._settlement_from_index_series("2026-08-04") == pytest.approx(4111.69)
+            paper_db._OPEN_CACHE_LOADED_AT = 0.0   # מדמה שה-TTL חלף
+            assert paper_db._settlement_from_index_series("2026-08-05") == pytest.approx(4182.49)
+        assert f.call_count == 2
+
+    def test_future_expiries_do_not_refetch_within_ttl(self):
+        """רגרסיה: כל פקיעה עתידית מחמיצה לנצח.
+
+        בלי חסם ה-TTL, ריצה עם 5 פקיעות פתוחות עתידיות הייתה מייצרת 5 פניות
+        לרשת — נמדד בפועל לפני התיקון.
+        """
+        sessions = [{"date": "2026-08-04", "open": 4111.69}]
+        with patch("index_series.fetch_index_sessions", return_value=sessions) as f:
+            for d in ("2026-08-07", "2026-08-11", "2026-08-12", "2026-08-13"):
+                assert paper_db._settlement_from_index_series(d) is None
+        assert f.call_count == 1
 
 
 # ─── get_expiries_ready_to_close ───────────────────────────────────────
@@ -959,15 +1055,24 @@ class TestGetExpiriesReadyToClose:
         assert out[0]["open_trades"] == 6
 
     def test_excludes_expiry_without_settlement(self):
-        """פקיעה ללא סטלמנט (06-19) לא חוזרת מה-DB — ה-JOIN+IS NOT NULL מסנן אותה."""
-        # ה-DB (לפי ה-SQL) מחזיר רק את הפקיעות הבשלות; 06-19 לא ביניהן.
+        """פקיעה שאין לה מחיר סילוק באף מקור מושמטת — היא אינה בשלה."""
         eng = _mock_engine(fetchall=[
-            _make_row(expiry_date="2026-06-16", open_trades=6, settlement_index=4258.3),
+            _make_row(expiry_date="2026-06-16", open_trades=6, settlement_index=4229.52),
+            _make_row(expiry_date="2026-12-31", open_trades=6, settlement_index=None),
         ])
-        out = get_expiries_ready_to_close(engine=eng)
-        assert all(r["expiry_date"] != "2026-06-19" for r in out)
-        # והשאילתה אכן כוללת את התנאי שמסנן פקיעות בלי סטלמנט:
-        # (נבדק במפורש ב-test_sql_joins_filters_open_and_not_null)
+        with patch("paper_db._settlement_from_index_series", return_value=None):
+            out = get_expiries_ready_to_close(engine=eng)
+        assert [r["expiry_date"] for r in out] == ["2026-06-16"]
+
+    def test_falls_back_to_index_open_when_history_missing(self):
+        """expiry_history מפגר; פקיעה כזו עדיין בשלה דרך פתיחת המדד."""
+        eng = _mock_engine(fetchall=[
+            _make_row(expiry_date="2026-08-04", open_trades=6, settlement_index=None),
+        ])
+        with patch("paper_db._settlement_from_index_series", return_value=4111.69):
+            out = get_expiries_ready_to_close(engine=eng)
+        assert out[0]["settlement_index"] == pytest.approx(4111.69)
+        assert out[0]["open_trades"] == 6
 
     def test_empty_when_none_ready(self):
         eng = _mock_engine(fetchall=[])
@@ -982,24 +1087,29 @@ class TestGetExpiriesReadyToClose:
         eng.connect.side_effect = Exception("join failed")
         assert get_expiries_ready_to_close(engine=eng) == []
 
-    def test_settlement_index_none_safe(self):
+    def test_skipped_expiry_is_logged_not_silent(self, caplog):
+        """פקיעה שנדחתה חייבת להשאיר עקבה — אחרת 'אפס בשלות' נראה תקין."""
         eng = _mock_engine(fetchall=[
-            _make_row(expiry_date="2026-06-16", open_trades=3, settlement_index=None),
+            _make_row(expiry_date="2026-12-31", open_trades=4, settlement_index=None),
         ])
-        out = get_expiries_ready_to_close(engine=eng)
-        assert out[0]["settlement_index"] is None
-        assert out[0]["open_trades"] == 3
+        with patch("paper_db._settlement_from_index_series", return_value=None):
+            with caplog.at_level(logging.INFO, logger="paper_db"):
+                assert get_expiries_ready_to_close(engine=eng) == []
+        assert "2026-12-31" in caplog.text
 
-    def test_sql_joins_filters_open_and_not_null(self):
+    def test_sql_reads_expiry_history_not_settled_detail(self):
+        """רגרסיה: המסלול הזה קרא גם הוא מ-actual_index_close (הנעילה הקודמת)."""
         conn = _mock_conn(fetchall=[])
         eng  = MagicMock()
         eng.connect.return_value = conn
         get_expiries_ready_to_close(engine=eng)
         sql = str(conn.execute.call_args[0][0])
         assert "paper_trades" in sql
-        assert "condor_settled_detail" in sql
+        assert "expiry_history" in sql
+        assert "expiry_price" in sql
         assert "'open'" in sql
-        assert "actual_index_close IS NOT NULL" in sql
+        assert "condor_settled_detail" not in sql
+        assert "actual_index_close" not in sql
 
     def test_join_casts_both_sides_to_date(self):
         """רגרסיה: ה-JOIN חייב להמיר את שני צידי expiry_date ל-::date.
@@ -1012,4 +1122,12 @@ class TestGetExpiriesReadyToClose:
         eng.connect.return_value = conn
         get_expiries_ready_to_close(engine=eng)
         sql = str(conn.execute.call_args[0][0])
-        assert "s.expiry_date::date = pt.expiry_date::date" in sql
+        assert "h.expiry_date::date = pt.expiry_date::date" in sql
+
+    def test_left_join_keeps_expiry_without_history_row(self):
+        """חייב LEFT JOIN — אחרת פקיעה בלי שורה ב-expiry_history לא תגיע לגיבוי."""
+        conn = _mock_conn(fetchall=[])
+        eng  = MagicMock()
+        eng.connect.return_value = conn
+        get_expiries_ready_to_close(engine=eng)
+        assert "LEFT JOIN" in str(conn.execute.call_args[0][0])
