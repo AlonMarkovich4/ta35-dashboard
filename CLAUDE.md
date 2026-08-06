@@ -57,9 +57,16 @@
   - השורות נמחקו (גיבוי: `expiry_history_backup_20260731`) ושוחזרו נכון.
 - **ההגדרה הנכונה:** `move_pct = (expiry_price − base_price)/base_price·100`, כאשר
   `base_price` = סגירת המושב הקודם ו-`expiry_price` = מחיר הסילוק (פתיחת יום הפקיעה).
-- ⚠️ **`actual_index_close` אינו מה ששמו אומר:** הוא **סגירת המושב הקודם** (אומת מול Yahoo, 27/27).
-  הבאג ב-`tase-pipeline/strategy_engine._fetch_settlement_price`, **לא ב-repo הזה**. לכן גם
-  `iron_condor_strategies.actual_pnl_ils` ו-`close_index` של עסקאות סגורות מחושבים ממחיר מוסט.
+- ⚠️ **`actual_index_close` אינו מה ששמו אומר:** הוא **סגירת המושב הקודם** (אומת מול Yahoo,
+  27/27 ואז שוב 28/28 ב-06/08). המקור הוא באג ב-`tase-pipeline/_fetch_settlement_price`,
+  אבל **הצריכה הייתה שלנו** — `paper_db` קרא ממנו כמחיר סילוק, וכל עסקה נסגרה במחיר מוסט
+  ב-0.59% (פער הלילה). ✅ **תוקן 06/08/2026:** `get_settlement_index` ו-
+  `get_expiries_ready_to_close` קוראים מ-`expiry_history.expiry_price` (= פתיחת יום הפקיעה),
+  עם גיבוי לפתיחת המדד מ-`index_series`. 187 עסקאות תוקנו רטרואקטיבית
+  (`scripts/reprice_closed_trades.py`), **43 הפכו סימן**. בדיקות רגרסיה נועלות את השם
+  `condor_settled_detail` מחוץ לשני המסלולים. פירוט: HANDOFF סעיף 11.
+  ⛔ **החסם האמיתי שנחשף בדרך: 84% מהציטוטים בארכיון הם ימים ללא אף עסקה**, והפער בין
+  `lastrate` למחיר שנסחר הוא 43% חציוני. **כל יתרון שנמדד עד היום קטן מרעש התמחור.**
 - **שני שערים ב-`history_updater`:** `find_shared_bases` (base משותף בין פקיעות ⇒ חסימה) ו-
   `is_plausible_move` (|move| > 8% ⇒ חסימה; השיא ההיסטורי 5.92%).
 - **חיווט Action:** `scripts/auto_close_expiries.py` מריץ את העדכון *אחרי* סגירת העסקאות,
