@@ -1,7 +1,7 @@
 import "server-only";
 import { sql } from "@/lib/db";
 import {
-  computeRealized, computeOpenExposure, parseLegs,
+  computeRealized, computeOpenExposure, parseLegs, returnOnRisk,
   type TradeLite, type LegData, type OpenExposure,
 } from "@/lib/paperMath";
 import { findAtm } from "@/lib/chainMath";
@@ -431,7 +431,10 @@ export async function getTrackRecord(portfolioId?: number): Promise<TrackRowData
 
 export type TradeRowData = {
   strat: string; expiry: string; status: string;
-  entry: number; comm: number; pnl: number | null; pnlPct: number | null;
+  entry: number; comm: number; pnl: number | null;
+  // תשואה על ההון בסיכון (pnl/|max_loss|), **לא** עמודת pnl_pct שב-DB —
+  // היא מחלקת בקרדיט ולכן מתפוצצת בקונדור. ראה paperMath.returnOnRisk.
+  ror: number | null;
   legs: LegData[];
 };
 export type PortfolioDetail = {
@@ -480,7 +483,7 @@ export async function getPortfolioDetail(id: number): Promise<PortfolioDetail | 
         entry: Number(t.entry_cost ?? 0),
         comm: Number(t.entry_commission ?? 0),
         pnl: t.pnl === null ? null : Number(t.pnl),
-        pnlPct: t.pnl_pct === null ? null : Number(t.pnl_pct),
+        ror: returnOnRisk(t.pnl, t.max_loss),
         legs: parseLegs(t.legs_json),
       })),
     };

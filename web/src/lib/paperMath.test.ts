@@ -1,5 +1,40 @@
 import { describe, it, expect } from "vitest";
-import { computeRealized, computeOpenExposure, parseLegs } from "@/lib/paperMath";
+import { computeRealized, computeOpenExposure, parseLegs, returnOnRisk } from "@/lib/paperMath";
+
+describe("returnOnRisk", () => {
+  // רגרסיה: המסך הציג ‎-7726.3% על עסקה אמיתית בתיק 8 (פקיעה 30/07/2026).
+  // pnl_pct מחלק בקרדיט שהתקבל (‎19₪) במקום בהון בסיכון (‎1,481₪).
+  it("does not blow up on a credit spread with a tiny premium", () => {
+    expect(returnOnRisk(-1468, -1481)).toBeCloseTo(-0.9912, 4);
+  });
+
+  // no-op לאסטרטגיות דביט: אצלן |entry_cost| == |max_loss|, ולכן התוצאה
+  // זהה למה ש-pnl_pct הראה קודם. תיק 7, פקיעה 16/06/2026.
+  it("matches the old number for a debit strategy", () => {
+    expect(returnOnRisk(1777, -237)).toBeCloseTo(7.4979, 4);
+  });
+
+  it("uses the magnitude of max_loss regardless of its sign", () => {
+    expect(returnOnRisk(500, -1000)).toBe(returnOnRisk(500, 1000));
+  });
+
+  it("returns null when there is no pnl (open trade)", () => {
+    expect(returnOnRisk(null, -1000)).toBeNull();
+    expect(returnOnRisk(undefined, -1000)).toBeNull();
+  });
+
+  // הגנה על החלוקה: max_loss חסר או אפס ⇒ אין תשואה להציג, לא Infinity.
+  it("returns null instead of dividing by zero", () => {
+    expect(returnOnRisk(500, 0)).toBeNull();
+    expect(returnOnRisk(500, null)).toBeNull();
+    expect(returnOnRisk(500, undefined)).toBeNull();
+  });
+
+  it("returns null on non-finite input", () => {
+    expect(returnOnRisk(Number.NaN, -1000)).toBeNull();
+    expect(returnOnRisk(500, Number.NaN)).toBeNull();
+  });
+});
 
 describe("computeRealized", () => {
   it("adds pnl for closed trades (ignores their entry cost)", () => {

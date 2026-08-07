@@ -30,6 +30,31 @@ export function computeRealized(initial: number, trades: PnlTrade[]): number {
   return r4(equity);
 }
 
+// תשואה על ההון בסיכון: pnl / |max_loss|.
+//
+// **למה לא pnl_pct שב-DB.** העמודה הזו מחושבת כ-`pnl / |entry_cost|`, ובאסטרטגיות
+// **דביט** (סטרדל, סטרנגל, פרפרים, bull call) זה נכון — `entry_cost` הוא מה ששולם,
+// שהוא גם ההון בסיכון. אבל ב-**קרדיט** (Short Iron Condor, תיקים 3 ו-8) `entry_cost`
+// הוא הפרמיה שהתקבלה, בעוד שההון בסיכון הוא `max_loss` — גדול ממנו בסדרי גודל.
+// התוצאה במסך הייתה ‎-7726.3% על עסקה עם קרדיט ‎19₪ ו-max_loss של ‎1,481₪
+// (אותה עסקה היא ‎-99.1% מההון). אומת 06/08/2026 על 193 עסקאות סגורות.
+//
+// המעבר הוא no-op לאסטרטגיות הדביט: אצלן |entry_cost| == |max_loss| (אומת 30/30
+// בתיקים 2, 4, 5, 7; בתיק 6 ההפרש 25₪ מתוך 3,738 — עמלת הכניסה).
+//
+// `pnl_pct` נשאר ב-DB כרשומה היסטורית; התצוגה נגזרת, לא מאוחסנת.
+export function returnOnRisk(
+  pnl: number | null | undefined,
+  maxLoss: number | null | undefined,
+): number | null {
+  if (pnl === null || pnl === undefined) return null;
+  const risk = Math.abs(Number(maxLoss ?? 0));
+  if (!Number.isFinite(risk) || risk === 0) return null;
+  const p = Number(pnl);
+  if (!Number.isFinite(p)) return null;
+  return r4(p / risk);
+}
+
 export type OpenExposure = {
   count: number;    // כמה פוזיציות פתוחות
   cashFlow: number; // תזרים בפועל על הפתוחות: חיובי = פרמיה שנגבתה, שלילי = עלות ששולמה

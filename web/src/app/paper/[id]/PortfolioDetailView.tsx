@@ -169,7 +169,10 @@ export function PortfolioDetailView({
                 <th className="pb-2 font-medium">עלות כניסה</th>
                 <th className="pb-2 font-medium">עמלות</th>
                 <th className="pb-2 font-medium">PnL</th>
-                <th className="pb-2 font-medium">PnL%</th>
+                {/* לא PnL% — האחוז הזה הוא pnl/|max_loss|, כלומר תשואה על ההון
+                    בסיכון. הכותרת הישנה לצד המספר הזה קראה כמו תשואה על העלות,
+                    וזה מטעה בקרדיט ספרד שבו העלות היא זיכוי. */}
+                <th className="pb-2 font-medium">תשואה על הון</th>
               </tr>
             </thead>
             <tbody>
@@ -185,8 +188,8 @@ export function PortfolioDetailView({
                     <td className={`py-2.5 tabular-nums font-semibold ${t.pnl == null ? "text-text3" : pnlTone(t.pnl)}`} dir="ltr">
                       {t.pnl == null ? "—" : money(t.pnl)}
                     </td>
-                    <td className={`py-2.5 tabular-nums ${t.pnlPct == null ? "text-text3" : pnlTone(t.pnlPct)}`} dir="ltr">
-                      {t.pnlPct == null ? "—" : signedPctFrac(t.pnlPct)}
+                    <td className={`py-2.5 tabular-nums ${t.ror == null ? "text-text3" : pnlTone(t.ror)}`} dir="ltr">
+                      {t.ror == null ? "—" : signedPctFrac(t.ror)}
                     </td>
                   </tr>
                 );
