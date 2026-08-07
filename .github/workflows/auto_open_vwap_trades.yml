@@ -1,0 +1,57 @@
+name: auto-open-vwap-trades
+
+# פתיחה יומית של התיק הממולא במחירי עסקה אמיתיים (VWAP).
+#
+# ⚠️ נוסף 07/08/2026. הרקע: `lastrate` — המחיר שכל התיקים מולאו לפיו — אינו
+# מחיר עסקה. הוא נופל מחוץ לטווח [lowrate, highrate] של אותו יום ב-45%
+# מה-CALL ו-40% מה-PUT, ודווקא בסטרייקים שכן נסחרו (HANDOFF 11.2).
+#
+# התיק הזה משקף את אותן המלצות בדיוק, אבל ממולא ב-VWAP
+# (OverallTurnOverValue_Shekel / OverallTurnOverUnits), שאומת בתוך טווח
+# הנסחר ב-100.0% מהמקרים. ההשוואה בין שני התיקים בעוד מספר חודשים היא
+# המדידה: כמה מהתוצאה של תיק 8 הייתה אמיתית וכמה מחיר מומצא.
+#
+# **התיק יפתח פחות עסקאות מתיק 8, וזה תקין.** אין מחיר עסקה לכל 4 הרגליים ⇒
+# אין עסקה. נמדד ביום ההפעלה: 1 מתוך 4. אין להרחיב את הקריטריון כדי לפתוח יותר.
+#
+# idempotent: דדופ ברמת הפקיעה בתוך התיק. ריצה חוזרת לא תיצור כפילות.
+
+on:
+  schedule:
+    # שני–שישי, 09:00 UTC — **אותו תזמון כמו auto_record_margins ו-
+    # auto_open_benchmark_trades**, בכוונה. שלוש הקבוצות חייבות להיכנס מאותו
+    # snapshot, אחרת ההשוואה ביניהן חסרת ערך.
+    - cron: '0 9 * * 1-5'
+  workflow_dispatch: {}   # הרצה ידנית מטאב Actions
+
+concurrency:
+  group: open-vwap-trades
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  open-vwap:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Open VWAP-priced trades
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          # kill-switch ייעודי, נפרד מ-RECO_TRADING_ENABLED — הדלקת תיק
+          # ההמלצות אינה מדליקה את התיק הזה, ולהפך.
+          VWAP_TRADING_ENABLED: "true"
+        run: python scripts/auto_open_vwap_trades.py --commit
