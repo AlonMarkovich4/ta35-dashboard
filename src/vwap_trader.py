@@ -47,7 +47,7 @@ from paper_db import (
     insert_trade,
 )
 from payoff import MULTIPLIER          # ₪ לנקודה — מקור אמת אחד
-from vwap_pricing import fetch_traded_quotes, price_legs
+from vwap_pricing import chain_asof, fetch_traded_quotes, price_legs
 
 logger = logging.getLogger(__name__)
 
@@ -219,7 +219,9 @@ def open_vwap_condor(expiry_date, engine=None, portfolio_id: int | None = None,
                      as_of=None, dry_run: bool = True) -> dict:
     """פותח קונדור בתיק ה-VWAP — **רק** אם כל 4 הרגליים נסחרו באמת.
 
-    `as_of` — יום השרשרת שממנו נלקחים מחירי העסקה. ברירת מחדל: היום.
+    `as_of` — יום שרשרת מפורש, ל-backtest בלבד. **ברירת המחדל None = הצילום
+    האחרון בטבלה החיה**, וזה הנכון בזמן אמת: `tase_putcall_history` נכתב בסוף
+    המסחר, שעות אחרי שהפותחים רצים.
     `dry_run=True` (ברירת מחדל) מחשב הכל ואינו כותב כלום.
     """
     result: dict = {"expiry_date": str(expiry_date)[:10], "status": "skipped",
@@ -255,14 +257,27 @@ def open_vwap_condor(expiry_date, engine=None, portfolio_id: int | None = None,
         result["reason"] = _SKIP_NO_STRIKES
         return result
 
-    as_of = as_of or datetime.now(timezone.utc).date()
+    # `as_of=None` ⇒ הצילום האחרון בטבלה החיה. ראה את ההערה ב-`fetch_traded_quotes`:
+    # הארכיון נכתב בסוף המסחר, שעות אחרי שהפותחים רצים.
+    snap = chain_asof(eng)
+    if snap is None:
+        result["reason"] = "אין שרשרת כלל — לא נסחר, לא נדלג בשקט"
+        logger.warning("vwap_trader: %s — אין שרשרת.", result["expiry_date"])
+        return result
+    result["chain"] = snap
+
     quotes = fetch_traded_quotes(expiry_date, as_of, eng)
     priced = price_legs(legs, quotes)
 
     if not priced.complete:
         result["missing"] = priced.missing
+        # ⚠️ הסיבה חייבת לנקוב **בצילום** ולא רק במספר הרגליים. "4/4 ללא מחיר"
+        # נקרא כמו ממצא נזילות, בעוד שהוא עלול להיות היעדר נתונים לגמרי —
+        # וזה בדיוק ההבדל שהפרויקט הזה כבר שילם עליו (סעיף 10, לקח 1).
         result["reason"] = (
-            f"{len(priced.missing)}/4 רגליים ללא מחיר עסקה ב-{str(as_of)[:10]}"
+            f"{len(priced.missing)}/{len(legs)} רגליים ללא מחיר עסקה · "
+            f"שרשרת {snap['fetch_date']} {snap.get('fetch_time') or ''} "
+            f"(trade_date {snap.get('trade_date')}) · {len(quotes)} סטרייקים נסחרו בפקיעה"
         )
         logger.info("vwap_trader: %s דילוג — %s", result["expiry_date"], result["reason"])
         return result
@@ -290,7 +305,11 @@ def open_vwap_condor(expiry_date, engine=None, portfolio_id: int | None = None,
         snapshot={
             "source": "vwap_trader",
             "price_source": "vwap",
-            "as_of": str(as_of)[:10],
+            # הצילום שממנו נלקחו המחירים בפועל — לא "היום". בלי זה אי אפשר
+            # לשחזר בדיעבד על מה העסקה נפתחה.
+            "chain_fetch_date": snap["fetch_date"],
+            "chain_fetch_time": snap.get("fetch_time"),
+            "chain_trade_date": snap.get("trade_date"),
             "engine_version": VWAP_ENGINE_VERSION,
             "margin_pct": _as_float(rec["margin_pct"]),
             "traded_strikes_in_chain": len(quotes),

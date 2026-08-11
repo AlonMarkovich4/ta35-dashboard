@@ -36,6 +36,9 @@ CURVE = {"long_put_strike": 4030, "short_put_strike": 4060,
 QUOTES = {("Put", 4030.0): 245.29, ("Put", 4060.0): 424.25,
           ("Call", 4200.0): 165.85, ("Call", 4230.0): 72.84}
 
+CHAIN = {"fetch_date": "2026-08-11", "fetch_time": "16:01",
+         "trade_date": "10/08/2026"}
+
 
 @pytest.fixture(autouse=True)
 def _on(monkeypatch):
@@ -55,6 +58,7 @@ def _patch(quotes=QUOTES, rec=None, trades=None):
         patch.object(vwap_trader, "get_trades", return_value=trades or []),
         patch.object(vwap_trader, "_latest_recommendation", return_value=rec),
         patch.object(vwap_trader, "fetch_traded_quotes", return_value=quotes),
+        patch.object(vwap_trader, "chain_asof", return_value=CHAIN),
     )
 
 
@@ -130,10 +134,26 @@ class TestSkipsWithoutTradedPrices:
         assert r["status"] == "skipped"
         assert len(r["missing"]) == 4
 
-    def test_skip_reason_names_the_as_of_date(self):
-        """דילוג שקט הוא הבאג שהפרויקט הזה כבר שילם עליו — הסיבה חייבת להיות מפורשת."""
+    def test_skip_reason_names_the_chain_snapshot(self):
+        """דילוג שקט הוא הבאג שהפרויקט הזה כבר שילם עליו. "4/4 ללא מחיר" לבדו
+        נקרא כמו ממצא נזילות — הסיבה חייבת לנקוב בצילום שעליו נבדק."""
         r = _run(quotes={})
-        assert "2026-08-07" in r["reason"]
+        assert "2026-08-11" in r["reason"]        # fetch_date
+        assert "10/08/2026" in r["reason"]        # trade_date
+        assert "0 סטרייקים" in r["reason"]
+
+    def test_missing_chain_is_reported_not_silent(self):
+        ps = _patch()
+        for p_ in ps:
+            p_.start()
+        try:
+            with patch.object(vwap_trader, "chain_asof", return_value=None):
+                r = open_vwap_condor("2026-08-11", engine=_eng(), dry_run=True)
+        finally:
+            for p_ in ps:
+                p_.stop()
+        assert r["trade"] is None
+        assert "אין שרשרת" in r["reason"]
 
     def test_all_four_traded_produces_a_trade(self):
         r = _run()
@@ -204,7 +224,8 @@ class TestPricing:
         after = datetime.now(tz=timezone.utc)
         assert t["opened_at"].tzinfo is not None
         assert before <= t["opened_at"] <= after      # "עכשיו", לא תאריך השרשרת
-        assert t["market_snapshot_json"]["as_of"] == "2026-08-07"
+        assert t["market_snapshot_json"]["chain_fetch_date"] == "2026-08-11"
+        assert t["market_snapshot_json"]["chain_trade_date"] == "10/08/2026"
 
     def test_max_loss_comes_from_strikes_not_from_the_recommendation(self):
         """max_loss שבהמלצה חושב על קרדיט של lastrate ואינו תקף כאן."""

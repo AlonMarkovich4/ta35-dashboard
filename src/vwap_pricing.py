@@ -114,9 +114,50 @@ def price_legs(legs: Iterable[dict], quotes: dict) -> PricedLegs:
     )
 
 
-def fetch_traded_quotes(expiry_date, as_of, engine,
-                        source_table: str = "tase_putcall_history") -> dict:
-    """מחירי עסקה לכל הסטרייקים בפקיעה, ליום `as_of`. קריאה בלבד.
+def chain_asof(engine, source_table: str = "tase_putcall") -> Optional[dict]:
+    """זהות הצילום האחרון בטבלה: {fetch_date, fetch_time, trade_date}.
+
+    נועד לתיעוד ולשער טריות — הקורא רושם ביומן **על איזה צילום** הוא פעל.
+    None אם אין נתונים או בכשל DB.
+    """
+    if source_table not in _ALLOWED_SOURCES:
+        raise ValueError(f"source_table לא מורשה: {source_table!r}")
+    if engine is None:
+        return None
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                text(f"""
+                    SELECT fetch_date, fetch_time, trade_date
+                    FROM {source_table}
+                    ORDER BY fetched_at DESC
+                    LIMIT 1
+                """),  # noqa: S608 — source_table עבר whitelist למעלה
+            ).fetchone()
+    except Exception as exc:
+        logger.warning("chain_asof נכשל (%s): %s", source_table, exc, exc_info=True)
+        return None
+    if row is None:
+        return None
+    m = row._mapping
+    return {"fetch_date": str(m.get("fetch_date"))[:10],
+            "fetch_time": m.get("fetch_time"),
+            "trade_date": m.get("trade_date")}
+
+
+def fetch_traded_quotes(expiry_date, as_of=None, engine=None,
+                        source_table: str = "tase_putcall") -> dict:
+    """מחירי עסקה לכל הסטרייקים בפקיעה. קריאה בלבד.
+
+    `as_of=None` (ברירת המחדל) ⇒ **הצילום האחרון בטבלה**. `tase_putcall` מחזיקה
+    צילום אחד בלבד, ולכן זה בדיוק מה שרוצים בזמן אמת.
+
+    ⚠️ **למה `tase_putcall` ולא `tase_putcall_history`.** הארכיון נכתב פעם ביום
+    בסוף המסחר (~17:15 שעון ישראל), בעוד שהפותחים רצים ב-09:00 UTC = 12:00
+    שעון ישראל. קריאה מהארכיון בשעה הזו מוצאת רק את **אתמול**, ובימים מסוימים
+    לא מוצאת כלום — ואז כל פקיעה מדולגת ב"אין מחיר עסקה", מה שנראה כמו ממצא
+    נזילות ולא כמו היעדר נתונים. נמדד 11/08/2026: מהארכיון 0 עסקאות, מהטבלה
+    החיה 2. השאר את הארכיון ל-backtest, שם `as_of` מפורש הוא הנכון.
 
     מחזיר {("Call"|"Put", strike) -> vwap} — **רק** סטרייקים שנסחרו.
     כשל DB או היעדר נתונים ⇒ מילון ריק, לא חריגה. הקורא יראה `missing` מלא
@@ -127,6 +168,12 @@ def fetch_traded_quotes(expiry_date, as_of, engine,
     if engine is None:
         return {}
 
+    where = "expiry_date::date = CAST(:exp AS date)"
+    params = {"exp": str(expiry_date)[:10]}
+    if as_of is not None:
+        where += " AND fetch_date::date = CAST(:asof AS date)"
+        params["asof"] = str(as_of)[:10]
+
     out: dict = {}
     try:
         with engine.connect() as conn:
@@ -136,10 +183,9 @@ def fetch_traded_quotes(expiry_date, as_of, engine,
                            overallturnoverunits_call,  overallturnovervalue_shekel_call,
                            overallturnoverunits_put,   overallturnovervalue_shekel_put
                     FROM {source_table}
-                    WHERE expiry_date::date = CAST(:exp AS date)
-                      AND fetch_date::date  = CAST(:asof AS date)
-                """),  # noqa: S608 — source_table עבר whitelist למעלה
-                {"exp": str(expiry_date)[:10], "asof": str(as_of)[:10]},
+                    WHERE {where}
+                """),  # noqa: S608 — source_table עבר whitelist, where נבנה מקבועים
+                params,
             ).fetchall()
     except Exception as exc:
         logger.warning(
@@ -168,7 +214,7 @@ def fetch_traded_quotes(expiry_date, as_of, engine,
 
     if not out:
         logger.info(
-            "fetch_traded_quotes: אין אף סטרייק שנסחר (expiry=%s as_of=%s).",
-            expiry_date, as_of,
+            "fetch_traded_quotes: אין אף סטרייק שנסחר (expiry=%s as_of=%s טבלה=%s).",
+            expiry_date, as_of if as_of is not None else "אחרון", source_table,
         )
     return out

@@ -14,7 +14,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from vwap_pricing import fetch_traded_quotes, price_legs, vwap  # noqa: E402
+from vwap_pricing import chain_asof, fetch_traded_quotes, price_legs, vwap  # noqa: E402
 
 
 def _row(**kw) -> MagicMock:
@@ -24,10 +24,14 @@ def _row(**kw) -> MagicMock:
 
 
 def _engine(rows=None, raises=False) -> MagicMock:
+    """mock engine. `fetchone` מוגדר במפורש — MagicMock מחזיר mock "אמיתי"
+    כברירת מחדל, ובדיקת "אין נתונים" הייתה עוברת בטעות."""
+    rows = rows or []
     conn = MagicMock()
     conn.__enter__ = MagicMock(return_value=conn)
     conn.__exit__ = MagicMock(return_value=False)
-    conn.execute.return_value.fetchall.return_value = rows or []
+    conn.execute.return_value.fetchall.return_value = rows
+    conn.execute.return_value.fetchone.return_value = rows[0] if rows else None
     eng = MagicMock()
     if raises:
         eng.connect.side_effect = Exception("db down")
@@ -179,3 +183,50 @@ class TestFetchTradedQuotes:
         fetch_traded_quotes("2026-08-11T09:30:00", "2026-08-07T14:00:00", eng)
         params = eng.connect.return_value.execute.call_args[0][1]
         assert params == {"exp": "2026-08-11", "asof": "2026-08-07"}
+
+    # ── רגרסיה על הבאג של 11/08/2026 ──────────────────────────────────
+    def test_defaults_to_the_live_table(self):
+        """`tase_putcall_history` נכתב בסוף המסחר (~17:15), והפותחים רצים
+        ב-09:00 UTC. ברירת מחדל לארכיון פירושה אפס עסקאות, לנצח."""
+        eng = _engine([])
+        fetch_traded_quotes("2026-08-12", engine=eng)
+        assert "tase_putcall_history" not in str(eng.connect.return_value.execute.call_args[0][0])
+        assert "tase_putcall" in str(eng.connect.return_value.execute.call_args[0][0])
+
+    def test_no_as_of_does_not_filter_by_fetch_date(self):
+        """הטבלה החיה מחזיקה צילום אחד; סינון לפי תאריך היה מפספס אותו."""
+        eng = _engine([])
+        fetch_traded_quotes("2026-08-12", engine=eng)
+        sql = str(eng.connect.return_value.execute.call_args[0][0])
+        assert "fetch_date" not in sql
+        assert eng.connect.return_value.execute.call_args[0][1] == {"exp": "2026-08-12"}
+
+    def test_explicit_as_of_still_filters(self):
+        """ל-backtest צריך צילום מפורש — המסלול הזה חייב להישמר."""
+        eng = _engine([])
+        fetch_traded_quotes("2026-08-12", "2026-08-10", eng,
+                            source_table="tase_putcall_history")
+        assert "fetch_date" in str(eng.connect.return_value.execute.call_args[0][0])
+
+
+class TestChainAsof:
+    def test_returns_the_latest_snapshot(self):
+        eng = _engine([_row(fetch_date="2026-08-11", fetch_time="16:01",
+                            trade_date="10/08/2026")])
+        assert chain_asof(eng) == {"fetch_date": "2026-08-11", "fetch_time": "16:01",
+                                   "trade_date": "10/08/2026"}
+
+    def test_orders_by_fetched_at_desc(self):
+        eng = _engine([])
+        chain_asof(eng)
+        sql = str(eng.connect.return_value.execute.call_args[0][0])
+        assert "ORDER BY fetched_at DESC" in sql
+
+    def test_none_when_empty_or_broken(self):
+        assert chain_asof(_engine([])) is None
+        assert chain_asof(_engine(raises=True)) is None
+        assert chain_asof(None) is None
+
+    def test_rejects_unknown_source_table(self):
+        with pytest.raises(ValueError):
+            chain_asof(_engine(), source_table="users")
