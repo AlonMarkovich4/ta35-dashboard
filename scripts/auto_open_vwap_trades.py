@@ -26,8 +26,9 @@ scripts/auto_open_vwap_trades.py — פתיחה יומית של התיק הממ�
 
 קודי יציאה: 0 = הצלחה או דילוג לגיטימי · 1 = שגיאה.
 
-    python scripts/auto_open_vwap_trades.py              # dry-run
-    python scripts/auto_open_vwap_trades.py --commit     # כתיבה
+    python scripts/auto_open_vwap_trades.py                     # תיק 9, dry-run
+    python scripts/auto_open_vwap_trades.py --spec liquidity   # תיק 10
+    python scripts/auto_open_vwap_trades.py --commit            # כתיבה
 """
 from __future__ import annotations
 
@@ -74,20 +75,18 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--commit", action="store_true",
                     help="כתיבה בפועל (ברירת מחדל: dry-run)")
+    ap.add_argument("--spec", choices=("vwap", "liquidity"), default="vwap",
+                    help="איזה תיק להריץ: vwap (תיק 9) או liquidity (תיק 10)")
     args = ap.parse_args()
 
     if (rc := _trading_day_guard()) is not None:
         return rc
 
-    from vwap_trader import (
-        VWAP_PORTFOLIO_NAME,
-        get_vwap_portfolio_id,
-        open_vwap_condor,
-        vwap_trading_enabled,
-    )
+    from vwap_trader import SPECS, get_portfolio_id, open_vwap_condor, trading_enabled
 
-    if not vwap_trading_enabled():
-        log("VWAP_TRADING_ENABLED != 'true' — kill-switch כבוי, אין ריצה.")
+    spec = SPECS[args.spec]
+    if not trading_enabled(spec):
+        log(f"{spec.env_flag} != 'true' — kill-switch כבוי, אין ריצה.")
         return EXIT_OK
 
     db_url = os.getenv("DATABASE_URL", "")
@@ -97,9 +96,9 @@ def main() -> int:
     engine = create_engine(db_url, pool_pre_ping=True,
                            connect_args={"connect_timeout": 30})
 
-    pid = get_vwap_portfolio_id(engine)
+    pid = get_portfolio_id(spec, engine)
     if pid is None:
-        log(f"התיק '{VWAP_PORTFOLIO_NAME}' אינו קיים — יש ליצור אותו פעם אחת.",
+        log(f"התיק '{spec.portfolio_name}' אינו קיים — יש ליצור אותו פעם אחת.",
             level="ERROR")
         return EXIT_ERR
 
@@ -117,14 +116,15 @@ def main() -> int:
         log("אין המלצות להיום — אין מה לפתוח.")
         return EXIT_OK
 
-    log(f"תיק {pid} · {len(expiries)} פקיעות · "
+    log(f"'{spec.portfolio_name}' (תיק {pid}, strategy {spec.strategy_id}) · "
+        f"{len(expiries)} פקיעות · סף מחזור {spec.min_units:g} · "
         f"{'כתיבה' if args.commit else 'DRY-RUN'}")
 
     opened = skipped = errors = 0
     for exp in expiries:
         try:
             r = open_vwap_condor(exp, engine=engine, portfolio_id=pid,
-                                 dry_run=not args.commit)
+                                 dry_run=not args.commit, spec=spec)
         except Exception as exc:                      # noqa: BLE001
             errors += 1
             log(f"{str(exp)[:10]}  חריגה: {exc}", level="ERROR")

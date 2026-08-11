@@ -36,6 +36,7 @@ import json
 import logging
 import os
 from datetime import datetime, timezone
+from typing import NamedTuple
 
 from sqlalchemy import text
 
@@ -56,6 +57,43 @@ VWAP_STRATEGY_ID = 103
 VWAP_STRATEGY_NAME = "Short Iron Condor (VWAP)"
 VWAP_PORTFOLIO_NAME = "המלצות המערכת — תמחור VWAP"
 
+
+class PortfolioSpec(NamedTuple):
+    """הגדרת תיק. שני התיקים רצים על **אותו מסלול קוד** ונבדלים רק כאן.
+
+    זה מכוון: ההבדל היחיד שרוצים למדוד הוא `min_units`, וקוד כפול היה
+    נסחף עם הזמן והופך את ההשוואה לחסרת ערך.
+    """
+    portfolio_name: str
+    strategy_id: int
+    strategy_name: str
+    env_flag: str
+    min_units: float
+
+
+#: תיק 9 — "נסחר בכלל". `min_units=0`.
+VWAP_SPEC = PortfolioSpec(
+    portfolio_name=VWAP_PORTFOLIO_NAME,
+    strategy_id=VWAP_STRATEGY_ID,
+    strategy_name=VWAP_STRATEGY_NAME,
+    env_flag="VWAP_TRADING_ENABLED",
+    min_units=0.0,
+)
+
+#: תיק 10 — "נסחר **בעומק**". הסף נקבע מהמדידה של 11/08/2026: ברגליים
+#: 1–2 ימים לפקיעה ועד 4% מהכסף, חציון המחזור 128 יחידות ואחוזון 25 הוא 28.
+#: 50 חותך את ה-34% הרזים ביותר ומשאיר רגל שבה פקודה אחת היא ≤2% מהמחזור.
+LIQUIDITY_MIN_UNITS = 50.0
+LIQUIDITY_SPEC = PortfolioSpec(
+    portfolio_name="המלצות המערכת — סינון נזילות",
+    strategy_id=104,
+    strategy_name="Short Iron Condor (נזילות)",
+    env_flag="LIQUIDITY_TRADING_ENABLED",
+    min_units=LIQUIDITY_MIN_UNITS,
+)
+
+SPECS = {"vwap": VWAP_SPEC, "liquidity": LIQUIDITY_SPEC}
+
 _SKIP_DISABLED = "VWAP_TRADING_ENABLED != 'true' (kill-switch כבוי)"
 _SKIP_NO_PORTFOLIO = f"תיק '{VWAP_PORTFOLIO_NAME}' אינו קיים"
 _SKIP_DUPLICATE = "כבר קיימת עסקה לפקיעה הזו בתיק"
@@ -63,17 +101,30 @@ _SKIP_NO_REC = "אין המלצה תקפה לפקיעה"
 _SKIP_NO_STRIKES = "ההמלצה חסרה סטרייקים"
 
 
+def trading_enabled(spec: PortfolioSpec = VWAP_SPEC) -> bool:
+    """kill-switch לפי התיק. ברירת מחדל: כבוי.
+
+    לכל תיק דגל משלו — הדלקת אחד אינה מדליקה את השני, וגם לא את תיק 8.
+    """
+    return os.getenv(spec.env_flag, "").strip().lower() == "true"
+
+
 def vwap_trading_enabled() -> bool:
-    """kill-switch נפרד מזה של תיק ההמלצות. ברירת מחדל: כבוי."""
-    return os.getenv("VWAP_TRADING_ENABLED", "").strip().lower() == "true"
+    """תאימות לאחור — ה-kill-switch של תיק 9."""
+    return trading_enabled(VWAP_SPEC)
+
+
+def get_portfolio_id(spec: PortfolioSpec = VWAP_SPEC, engine=None) -> int | None:
+    """מזהה התיק לפי שמו. None אם טרם נוצר."""
+    for p in get_portfolios(engine=engine) or []:
+        if p.get("name") == spec.portfolio_name:
+            return int(p["id"])
+    return None
 
 
 def get_vwap_portfolio_id(engine=None) -> int | None:
-    """מזהה התיק לפי שם. None אם טרם נוצר."""
-    for p in get_portfolios(engine=engine) or []:
-        if p.get("name") == VWAP_PORTFOLIO_NAME:
-            return int(p["id"])
-    return None
+    """תאימות לאחור — מזהה תיק 9."""
+    return get_portfolio_id(VWAP_SPEC, engine=engine)
 
 
 def _loads(v):
@@ -155,7 +206,8 @@ TRADE_FIELDS = frozenset({
 
 def build_vwap_trade(portfolio_id: int, expiry_date: str, legs: list[dict],
                      entry_cost: float, max_loss: float, entry_index,
-                     commission_per_leg: float, snapshot: dict) -> dict:
+                     commission_per_leg: float, snapshot: dict,
+                     spec: PortfolioSpec = VWAP_SPEC) -> dict:
     """בונה את מילון העסקה. טהור — ללא DB, ללא זמן חיצוני פרט ל-`opened_at`.
 
     מחזיר את **הסט המלא** של `TRADE_FIELDS`, כולל שדות ה-NULL: `insert_trade`
@@ -163,8 +215,8 @@ def build_vwap_trade(portfolio_id: int, expiry_date: str, legs: list[dict],
     """
     return {
         "portfolio_id":         portfolio_id,
-        "strategy_id":          VWAP_STRATEGY_ID,
-        "strategy_name":        VWAP_STRATEGY_NAME,
+        "strategy_id":          spec.strategy_id,
+        "strategy_name":        spec.strategy_name,
         "expiry_date":          expiry_date,
         # **רגע הפתיחה, לא `as_of`** — ה-snapshot הוא T-1 לפי מבנה הפיד, אבל
         # ההחלטה והכניסה קורות עכשיו. ערבוב השניים הוא מה שייצר
@@ -216,7 +268,8 @@ def _latest_recommendation(eng, expiry_date) -> dict | None:
 
 
 def open_vwap_condor(expiry_date, engine=None, portfolio_id: int | None = None,
-                     as_of=None, dry_run: bool = True) -> dict:
+                     as_of=None, dry_run: bool = True,
+                     spec: PortfolioSpec = VWAP_SPEC) -> dict:
     """פותח קונדור בתיק ה-VWAP — **רק** אם כל 4 הרגליים נסחרו באמת.
 
     `as_of` — יום שרשרת מפורש, ל-backtest בלבד. **ברירת המחדל None = הצילום
@@ -227,8 +280,8 @@ def open_vwap_condor(expiry_date, engine=None, portfolio_id: int | None = None,
     result: dict = {"expiry_date": str(expiry_date)[:10], "status": "skipped",
                     "reason": None, "trade": None, "missing": []}
 
-    if not vwap_trading_enabled():
-        result["reason"] = _SKIP_DISABLED
+    if not trading_enabled(spec):
+        result["reason"] = f"{spec.env_flag} != 'true' (kill-switch כבוי)"
         return result
 
     eng = _make_engine(engine)
@@ -236,9 +289,9 @@ def open_vwap_condor(expiry_date, engine=None, portfolio_id: int | None = None,
         result["reason"] = "אין חיבור ל-DB"
         return result
 
-    pid = portfolio_id if portfolio_id is not None else get_vwap_portfolio_id(eng)
+    pid = portfolio_id if portfolio_id is not None else get_portfolio_id(spec, eng)
     if pid is None:
-        result["reason"] = _SKIP_NO_PORTFOLIO
+        result["reason"] = f"תיק '{spec.portfolio_name}' אינו קיים"
         return result
 
     # דדופ — עסקה אחת לכל פקיעה בתיק הזה, בכל סטטוס.
@@ -266,7 +319,8 @@ def open_vwap_condor(expiry_date, engine=None, portfolio_id: int | None = None,
         return result
     result["chain"] = snap
 
-    quotes = fetch_traded_quotes(expiry_date, as_of, eng)
+    quotes = fetch_traded_quotes(expiry_date, as_of, eng,
+                                 min_units=spec.min_units)
     priced = price_legs(legs, quotes)
 
     if not priced.complete:
@@ -277,7 +331,8 @@ def open_vwap_condor(expiry_date, engine=None, portfolio_id: int | None = None,
         result["reason"] = (
             f"{len(priced.missing)}/{len(legs)} רגליים ללא מחיר עסקה · "
             f"שרשרת {snap['fetch_date']} {snap.get('fetch_time') or ''} "
-            f"(trade_date {snap.get('trade_date')}) · {len(quotes)} סטרייקים נסחרו בפקיעה"
+            f"(trade_date {snap.get('trade_date')}) · {len(quotes)} סטרייקים עברו "
+            f"את הסף (min_units={spec.min_units:g})"
         )
         logger.info("vwap_trader: %s דילוג — %s", result["expiry_date"], result["reason"])
         return result
@@ -302,6 +357,7 @@ def open_vwap_condor(expiry_date, engine=None, portfolio_id: int | None = None,
         max_loss=max_loss,
         entry_index=_as_float(rec["curve_row"].get("base_index")),
         commission_per_leg=commission_per_leg,
+        spec=spec,
         snapshot={
             "source": "vwap_trader",
             "price_source": "vwap",
@@ -312,7 +368,8 @@ def open_vwap_condor(expiry_date, engine=None, portfolio_id: int | None = None,
             "chain_trade_date": snap.get("trade_date"),
             "engine_version": VWAP_ENGINE_VERSION,
             "margin_pct": _as_float(rec["margin_pct"]),
-            "traded_strikes_in_chain": len(quotes),
+            "tradeable_strikes": len(quotes),
+            "min_units": spec.min_units,
             # הקרדיט לפי lastrate, לשם ההשוואה שבגללה התיק קיים.
             "net_premium_lastrate": _as_float(rec["curve_row"].get("net_premium")),
         },

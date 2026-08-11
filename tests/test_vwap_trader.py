@@ -19,7 +19,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 import vwap_trader  # noqa: E402
 from vwap_trader import (  # noqa: E402
+    LIQUIDITY_SPEC,
     VWAP_PORTFOLIO_NAME,
+    VWAP_SPEC,
     TRADE_FIELDS,
     VWAP_STRATEGY_ID,
     build_vwap_legs,
@@ -53,7 +55,7 @@ def _patch(quotes=QUOTES, rec=None, trades=None):
     """מרכיב את כל התלויות החיצוניות של open_vwap_condor."""
     rec = rec if rec is not None else {"margin_pct": 1.75, "curve_row": CURVE, "full": {}}
     return (
-        patch.object(vwap_trader, "get_vwap_portfolio_id", return_value=9),
+        patch.object(vwap_trader, "get_portfolio_id", return_value=9),
         patch.object(vwap_trader, "get_portfolio", return_value={"commission_per_leg": 2.5}),
         patch.object(vwap_trader, "get_trades", return_value=trades or []),
         patch.object(vwap_trader, "_latest_recommendation", return_value=rec),
@@ -107,8 +109,10 @@ class TestIsolation:
     def test_portfolio_resolved_by_its_own_name(self):
         with patch.object(vwap_trader, "get_portfolios",
                           return_value=[{"id": 8, "name": "המלצות המערכת — Iron Condor"},
-                                        {"id": 9, "name": VWAP_PORTFOLIO_NAME}]):
+                                        {"id": 9, "name": VWAP_PORTFOLIO_NAME},
+                                        {"id": 10, "name": LIQUIDITY_SPEC.portfolio_name}]):
             assert get_vwap_portfolio_id(_eng()) == 9
+            assert vwap_trader.get_portfolio_id(LIQUIDITY_SPEC, _eng()) == 10
 
     def test_missing_portfolio_opens_nothing(self):
         with patch.object(vwap_trader, "get_portfolios", return_value=[]):
@@ -226,6 +230,7 @@ class TestPricing:
         assert before <= t["opened_at"] <= after      # "עכשיו", לא תאריך השרשרת
         assert t["market_snapshot_json"]["chain_fetch_date"] == "2026-08-11"
         assert t["market_snapshot_json"]["chain_trade_date"] == "10/08/2026"
+        assert t["market_snapshot_json"]["min_units"] == 0.0
 
     def test_max_loss_comes_from_strikes_not_from_the_recommendation(self):
         """max_loss שבהמלצה חושב על קרדיט של lastrate ואינו תקף כאן."""
@@ -293,3 +298,81 @@ class TestPureHelpers:
 
     def test_max_loss_none_on_incomplete_legs(self):
         assert max_loss_from_legs([{"type": "Put", "strike": 4000}], -100) is None
+
+
+# ─── ההבדל בין תיק 9 לתיק 10 ────────────────────────────────────────────
+
+class TestPortfolioSpecs:
+    """שני התיקים רצים על אותו מסלול קוד. ההבדל היחיד הוא `min_units` —
+    וזה בדיוק מה שההשוואה ביניהם אמורה למדוד."""
+
+    def test_specs_differ_only_where_intended(self):
+        assert VWAP_SPEC.min_units == 0.0
+        assert LIQUIDITY_SPEC.min_units == 50.0
+        assert VWAP_SPEC.strategy_id != LIQUIDITY_SPEC.strategy_id
+        assert VWAP_SPEC.env_flag != LIQUIDITY_SPEC.env_flag
+        assert VWAP_SPEC.portfolio_name != LIQUIDITY_SPEC.portfolio_name
+
+    def test_liquidity_strategy_id_is_isolated(self):
+        """1–6 benchmark · 102 תיק 8 · 103 תיק 9. כל האגרגציות חסומות ל-1..6."""
+        assert LIQUIDITY_SPEC.strategy_id == 104
+        assert LIQUIDITY_SPEC.strategy_id not in (102, 103)
+        assert not (1 <= LIQUIDITY_SPEC.strategy_id <= 6)
+
+    def test_each_kill_switch_is_independent(self, monkeypatch):
+        monkeypatch.delenv("VWAP_TRADING_ENABLED", raising=False)
+        monkeypatch.setenv("LIQUIDITY_TRADING_ENABLED", "true")
+        assert vwap_trader.trading_enabled(LIQUIDITY_SPEC) is True
+        assert vwap_trader.trading_enabled(VWAP_SPEC) is False
+
+    def test_min_units_reaches_the_quote_fetcher(self, monkeypatch):
+        """זו כל המכניקה של תיק 10 — אם הסף לא מגיע לשאילתה, אין הבדל."""
+        monkeypatch.setenv("LIQUIDITY_TRADING_ENABLED", "true")
+        seen = {}
+
+        def _spy(expiry, as_of=None, engine=None, min_units=0.0, **kw):
+            seen["min_units"] = min_units
+            return QUOTES
+
+        ps = _patch()
+        for p_ in ps:
+            p_.start()
+        try:
+            with patch.object(vwap_trader, "fetch_traded_quotes", _spy):
+                open_vwap_condor("2026-08-12", engine=_eng(), dry_run=True,
+                                 spec=LIQUIDITY_SPEC)
+        finally:
+            for p_ in ps:
+                p_.stop()
+        assert seen["min_units"] == 50.0
+
+    def test_trade_carries_the_spec_identity(self, monkeypatch):
+        monkeypatch.setenv("LIQUIDITY_TRADING_ENABLED", "true")
+        ps = _patch()
+        for p_ in ps:
+            p_.start()
+        try:
+            r = open_vwap_condor("2026-08-12", engine=_eng(), dry_run=True,
+                                 spec=LIQUIDITY_SPEC)
+        finally:
+            for p_ in ps:
+                p_.stop()
+        t = r["trade"]
+        assert t["strategy_id"] == 104
+        assert t["strategy_name"] == LIQUIDITY_SPEC.strategy_name
+        assert t["market_snapshot_json"]["min_units"] == 50.0
+
+    def test_skip_reason_names_the_threshold(self):
+        """דילוג ב-104 חייב להבדיל בין 'לא נסחר' ל'נסחר רזה מדי'."""
+        ps = _patch(quotes={})
+        for p_ in ps:
+            p_.start()
+        try:
+            import os as _os
+            _os.environ["LIQUIDITY_TRADING_ENABLED"] = "true"
+            r = open_vwap_condor("2026-08-12", engine=_eng(), dry_run=True,
+                                 spec=LIQUIDITY_SPEC)
+        finally:
+            for p_ in ps:
+                p_.stop()
+        assert "min_units=50" in r["reason"]

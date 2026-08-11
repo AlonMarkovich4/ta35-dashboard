@@ -1,0 +1,59 @@
+name: auto-open-liquidity-trades
+
+# תיק 10 — כמו תיק 9, אבל דורש גם **עומק** ולא רק שהסטרייק נסחר.
+#
+# ⚠️ נוסף 11/08/2026. הרקע: ניסיון מכירה אמיתי בחשבון פרטי לקראת פקיעה
+# נשאר בלי קונה. השאלה שנפתחה: "נסחר" זה לא "אפשר לצאת".
+#
+# נמדד על 44 ימי ארכיון, ברגליים 1–2 ימים לפקיעה ועד 4% מהכסף:
+#   חציון המחזור 128 יחידות ליום · אחוזון 25 = 28 · אחוזון 10 = 6
+#   **20% מהרגליים שנסחרו הציגו פחות מ-20 יחידות** — פקודה אחת שם היא
+#   עשרות אחוזים מהמחזור היומי.
+# הסף 50 יחידות חותך את שליש הרגליים הרזות ומשאיר רגל שבה חוזה אחד הוא
+# ≤2% מהמחזור.
+#
+# **ההבדל מתיק 9 הוא מספר אחד** (`min_units`): שניהם רצים על אותו מסלול קוד
+# (`vwap_trader.PortfolioSpec`), כדי שההשוואה ביניהם תמדוד את הסינון ולא
+# הבדלי מימוש שנסחפו.
+#
+# strategy_id=104, kill-switch משלו. אינו נוגע בתיקים 2–9.
+
+on:
+  schedule:
+    # שני–שישי, 09:00 UTC — **אותו תזמון כמו auto_record_margins ו-
+    # auto_open_benchmark_trades**, בכוונה. שלוש הקבוצות חייבות להיכנס מאותו
+    # snapshot, אחרת ההשוואה ביניהן חסרת ערך.
+    - cron: '0 9 * * 1-5'
+  workflow_dispatch: {}   # הרצה ידנית מטאב Actions
+
+concurrency:
+  group: open-liquidity-trades
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  open-liquidity:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Open liquidity-filtered trades
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          # kill-switch ייעודי, נפרד מ-RECO_TRADING_ENABLED — הדלקת תיק
+          # ההמלצות אינה מדליקה את התיק הזה, ולהפך.
+          LIQUIDITY_TRADING_ENABLED: "true"
+        run: python scripts/auto_open_vwap_trades.py --spec liquidity --commit

@@ -146,8 +146,20 @@ def chain_asof(engine, source_table: str = "tase_putcall") -> Optional[dict]:
 
 
 def fetch_traded_quotes(expiry_date, as_of=None, engine=None,
-                        source_table: str = "tase_putcall") -> dict:
+                        source_table: str = "tase_putcall",
+                        min_units: float = 0.0) -> dict:
     """מחירי עסקה לכל הסטרייקים בפקיעה. קריאה בלבד.
+
+    `min_units` — מחזור מינימלי ביחידות שהסטרייק חייב להציג כדי להיחשב סחיר.
+    **0 (ברירת המחדל) = "נסחר בכלל"**, וזה מה שתיק 9 משתמש בו.
+    ערך גבוה יותר שואל "נסחר **בעומק**", וזו שאלה אחרת: נמדד 11/08/2026 על
+    44 ימי ארכיון, ברגליים 1–2 ימים לפקיעה ועד 4% מהכסף —
+
+        חציון 128 יחידות ליום · אחוזון 25 = 28 · אחוזון 10 = 6
+        20% מהרגליים שנסחרו הציגו פחות מ-20 יחידות
+
+    כלומר "נסחר" אינו "אפשר לצאת". רגל עם 2 יחידות ביום נסחרה, אבל פקודה
+    אחת היא 50% מהמחזור היומי שלה.
 
     `as_of=None` (ברירת המחדל) ⇒ **הצילום האחרון בטבלה**. `tase_putcall` מחזיקה
     צילום אחד בלבד, ולכן זה בדיוק מה שרוצים בזמן אמת.
@@ -194,6 +206,15 @@ def fetch_traded_quotes(expiry_date, as_of=None, engine=None,
         )
         return {}
 
+    def _deep_enough(units) -> bool:
+        """מחזור מספיק כדי שנחשיב את הרגל סחירה."""
+        if min_units <= 0:
+            return True
+        try:
+            return float(units or 0) >= float(min_units)
+        except (TypeError, ValueError):
+            return False
+
     for r in rows:
         m = r._mapping
         strike = m.get("strike")
@@ -203,13 +224,13 @@ def fetch_traded_quotes(expiry_date, as_of=None, engine=None,
             k = float(strike)
         except (TypeError, ValueError):
             continue
-        c = vwap(m.get("overallturnoverunits_call"),
-                 m.get("overallturnovervalue_shekel_call"))
-        p = vwap(m.get("overallturnoverunits_put"),
-                 m.get("overallturnovervalue_shekel_put"))
-        if c is not None:
+        uc = m.get("overallturnoverunits_call")
+        up = m.get("overallturnoverunits_put")
+        c = vwap(uc, m.get("overallturnovervalue_shekel_call"))
+        p = vwap(up, m.get("overallturnovervalue_shekel_put"))
+        if c is not None and _deep_enough(uc):
             out[("Call", k)] = c
-        if p is not None:
+        if p is not None and _deep_enough(up):
             out[("Put", k)] = p
 
     if not out:

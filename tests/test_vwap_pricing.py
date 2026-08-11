@@ -230,3 +230,39 @@ class TestChainAsof:
     def test_rejects_unknown_source_table(self):
         with pytest.raises(ValueError):
             chain_asof(_engine(), source_table="users")
+
+
+class TestMinUnitsFilter:
+    """`min_units` הוא ההבדל היחיד בין תיק 9 לתיק 10. אם הוא לא מסנן —
+    שני התיקים זהים וההשוואה חסרת ערך."""
+
+    ROWS = [
+        _row(strike=4100.0,
+             overallturnoverunits_call=200, overallturnovervalue_shekel_call=40000,
+             overallturnoverunits_put=5,   overallturnovervalue_shekel_put=500),
+        _row(strike=4200.0,
+             overallturnoverunits_call=10, overallturnovervalue_shekel_call=1000,
+             overallturnoverunits_put=None, overallturnovervalue_shekel_put=None),
+    ]
+
+    def test_zero_threshold_keeps_everything_traded(self):
+        q = fetch_traded_quotes("2026-08-12", engine=_engine(self.ROWS), min_units=0)
+        assert set(q) == {("Call", 4100.0), ("Put", 4100.0), ("Call", 4200.0)}
+
+    def test_threshold_drops_the_thin_legs(self):
+        """רגל עם 5 יחידות ליום נסחרה — אבל פקודה אחת היא 20% מהמחזור שלה."""
+        q = fetch_traded_quotes("2026-08-12", engine=_engine(self.ROWS), min_units=50)
+        assert set(q) == {("Call", 4100.0)}
+
+    def test_threshold_is_inclusive(self):
+        rows = [_row(strike=4100.0,
+                     overallturnoverunits_call=50, overallturnovervalue_shekel_call=10000,
+                     overallturnoverunits_put=None, overallturnovervalue_shekel_put=None)]
+        assert ("Call", 4100.0) in fetch_traded_quotes(
+            "2026-08-12", engine=_engine(rows), min_units=50)
+
+    def test_price_is_unaffected_by_the_threshold(self):
+        """הסינון קובע מי נכנס, לא באיזה מחיר."""
+        a = fetch_traded_quotes("2026-08-12", engine=_engine(self.ROWS), min_units=0)
+        b = fetch_traded_quotes("2026-08-12", engine=_engine(self.ROWS), min_units=50)
+        assert b[("Call", 4100.0)] == a[("Call", 4100.0)] == pytest.approx(200.0)
