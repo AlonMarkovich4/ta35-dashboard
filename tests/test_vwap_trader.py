@@ -61,6 +61,7 @@ def _patch(quotes=QUOTES, rec=None, trades=None):
         patch.object(vwap_trader, "_latest_recommendation", return_value=rec),
         patch.object(vwap_trader, "fetch_traded_quotes", return_value=quotes),
         patch.object(vwap_trader, "chain_asof", return_value=CHAIN),
+        patch.object(vwap_trader, "available_capital", return_value=100000.0),
     )
 
 
@@ -376,3 +377,68 @@ class TestPortfolioSpecs:
             for p_ in ps:
                 p_.stop()
         assert "min_units=50" in r["reason"]
+
+
+# ─── שער ההון ───────────────────────────────────────────────────────────
+
+class TestCapitalGate:
+    """תיק של 20,000 ₪ שפותח בלי לבדוק ביטחונות אינו מדמה מציאות."""
+
+    def _eng_capital(self, initial, realized, committed):
+        conn = MagicMock()
+        conn.__enter__ = MagicMock(return_value=conn)
+        conn.__exit__ = MagicMock(return_value=False)
+        row = MagicMock()
+        row._mapping = {"initial_balance": initial, "realized": realized,
+                        "committed": committed}
+        conn.execute.return_value.fetchone.return_value = row
+        eng = MagicMock()
+        eng.connect.return_value = conn
+        return eng
+
+    def test_formula_is_initial_plus_realized_minus_committed(self):
+        eng = self._eng_capital(20000, -1500, 6000)
+        assert vwap_trader.available_capital(9, eng) == pytest.approx(12500.0)
+
+    def test_none_on_db_error(self):
+        eng = MagicMock()
+        eng.connect.side_effect = Exception("db down")
+        assert vwap_trader.available_capital(9, eng) is None
+        assert vwap_trader.available_capital(9, None) is None
+
+    def _run_with_capital(self, avail):
+        ps = [p_ for p_ in _patch()
+              if "available_capital" not in str(p_)]
+        for p_ in ps:
+            p_.start()
+        try:
+            with patch.object(vwap_trader, "available_capital", return_value=avail):
+                return open_vwap_condor("2026-08-12", engine=_eng(), dry_run=True)
+        finally:
+            for p_ in ps:
+                p_.stop()
+
+    def test_blocks_when_collateral_exceeds_available(self):
+        # max_loss של הקונדור בפיקסטורה הוא 1,228.03 ₪
+        r = self._run_with_capital(500.0)
+        assert r["trade"] is None
+        assert "אין הון פנוי" in r["reason"]
+        assert r["capital"]["required"] == pytest.approx(1228.03)
+
+    def test_opens_when_capital_suffices(self):
+        assert self._run_with_capital(20000.0)["trade"] is not None
+
+    def test_boundary_exactly_enough_opens(self):
+        assert self._run_with_capital(1228.03)["trade"] is not None
+
+    def test_unknown_capital_blocks(self):
+        """fail-safe: לא לדעת כמה הון יש אינו סיבה לפתוח."""
+        r = self._run_with_capital(None)
+        assert r["trade"] is None
+        assert "לא ניתן לחשב הון פנוי" in r["reason"]
+
+    def test_snapshot_records_the_capital_state(self):
+        """בלי זה אי אפשר לשחזר בדיעבד למה עסקה נפתחה או לא."""
+        t = self._run_with_capital(20000.0)["trade"]
+        assert t["market_snapshot_json"]["capital_available_before"] == 20000.0
+        assert t["market_snapshot_json"]["collateral_required"] == pytest.approx(1228.03)

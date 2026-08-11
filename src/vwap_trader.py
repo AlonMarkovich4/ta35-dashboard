@@ -127,6 +127,44 @@ def get_vwap_portfolio_id(engine=None) -> int | None:
     return get_portfolio_id(VWAP_SPEC, engine=engine)
 
 
+def available_capital(portfolio_id: int, engine) -> float | None:
+    """הון פנוי לפתיחת פוזיציה נוספת, בשקלים.
+
+        הון פנוי = הון התחלתי + Σ P&L(סגורות) − Σ |max_loss|(פתוחות)
+
+    **למה `max_loss` הוא הביטחונות.** בקונדור מוגדר-סיכון הברוקר מקפיא את
+    ההפסד המרבי עד הפקיעה — לא את הקרדיט ולא את המרווח הנומינלי. פוזיציה
+    פתוחה תופסת את הסכום הזה גם אם היא בכיוון הנכון.
+
+    מחזיר None בכשל DB — והקורא **אינו פותח**. fail-safe: לא לדעת כמה הון
+    יש אינו סיבה לפתוח, במיוחד בתיק שכל מטרתו לדמות אילוץ הון אמיתי.
+    """
+    if engine is None:
+        return None
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(text("""
+                SELECT p.initial_balance,
+                       COALESCE(SUM(t.pnl) FILTER (WHERE t.status = 'closed'), 0)
+                           AS realized,
+                       COALESCE(SUM(ABS(t.max_loss)) FILTER (WHERE t.status = 'open'), 0)
+                           AS committed
+                FROM paper_portfolios p
+                LEFT JOIN paper_trades t ON t.portfolio_id = p.id
+                WHERE p.id = :pid
+                GROUP BY p.initial_balance
+            """), {"pid": portfolio_id}).fetchone()
+    except Exception as exc:
+        logger.warning("available_capital נכשל (portfolio_id=%s): %s",
+                       portfolio_id, exc, exc_info=True)
+        return None
+    if row is None:
+        return None
+    m = row._mapping
+    return round(float(m["initial_balance"]) + float(m["realized"])
+                 - float(m["committed"]), 2)
+
+
 def _loads(v):
     if isinstance(v, str):
         try:
@@ -342,6 +380,22 @@ def open_vwap_condor(expiry_date, engine=None, portfolio_id: int | None = None,
         result["reason"] = "לא ניתן לחשב max_loss מהסטרייקים"
         return result
 
+    # ─── שער הון ──────────────────────────────────────────────────────
+    # תיק עם 20,000 ₪ שפותח פוזיציה חמישית בלי לבדוק ביטחונות אינו מדמה
+    # מציאות. הבדיקה נכונה לכל תיק; בתיק עם 100,000 היא פשוט לא תיגע.
+    avail = available_capital(pid, eng)
+    need = abs(float(max_loss))
+    if avail is None:
+        result["reason"] = "לא ניתן לחשב הון פנוי — לא נפתחת פוזיציה"
+        logger.warning("vwap_trader: %s — %s", result["expiry_date"], result["reason"])
+        return result
+    if need > avail:
+        result["capital"] = {"available": avail, "required": need}
+        result["reason"] = (f"אין הון פנוי — נדרשים {need:,.0f} ₪ ביטחונות "
+                            f"ופנויים {avail:,.0f} ₪")
+        logger.info("vwap_trader: %s דילוג — %s", result["expiry_date"], result["reason"])
+        return result
+
     portfolio = get_portfolio(pid, engine=eng) or {}
     cpl = portfolio.get("commission_per_leg")
     commission_per_leg = float(cpl if cpl is not None else 2.5)
@@ -370,6 +424,8 @@ def open_vwap_condor(expiry_date, engine=None, portfolio_id: int | None = None,
             "margin_pct": _as_float(rec["margin_pct"]),
             "tradeable_strikes": len(quotes),
             "min_units": spec.min_units,
+            "capital_available_before": avail,
+            "collateral_required": need,
             # הקרדיט לפי lastrate, לשם ההשוואה שבגללה התיק קיים.
             "net_premium_lastrate": _as_float(rec["curve_row"].get("net_premium")),
         },
