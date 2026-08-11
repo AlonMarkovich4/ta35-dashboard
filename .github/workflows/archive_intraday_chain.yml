@@ -1,0 +1,57 @@
+name: archive-intraday-chain
+
+# שמירת צילומי השרשרת התוך-יומיים.
+#
+# ⚠️ נוסף 11/08/2026. הרקע: `tase_putcall` מתעדכנת כל ~15 דקות, אבל
+# `tase_putcall_history` שומרת ממנה **צילום אחד ביום ב-~17:15**. כל
+# ההתפתחות התוך-יומית נזרקת — ואיתה התשובה לשאלה "כמה מהמחזור היומי כבר
+# עבר בשעה שאני נכנס". זו שאלה מעשית: ניסיון מכירה ב-16:30 (נעילה ~17:00)
+# נשאר בלי קונה.
+#
+# ה-Action **רק שומר**. אינו סוחר, אינו מייצר מסקנות, ואינו נוגע בשום
+# טבלה קיימת — `tase_putcall` היא SELECT בלבד (בבעלות המתכנת השני).
+#
+# idempotent: המפתח הוא הצילום של **המקור** (fetch_date+fetch_time), לא זמן
+# הריצה. ריצה שנדחתה, רצה פעמיים, או תפסה צילום שכבר נשמר — לא מייצרת כפילות.
+# לכן אין בעיה שה-cron צפוף יותר מקצב העדכון של המקור.
+#
+# הרצה חד-פעמית ליצירת הטבלה:
+#   python scripts/archive_intraday_chain.py --create-table
+
+on:
+  schedule:
+    # כל 30 דק', 06:00–15:30 UTC = 09:00–18:30 שעון ישראל, שני–שישי.
+    # המסחר ב-TASE הוא ~09:30–17:25, והחלון רחב בכוונה: עדיף לתפוס צילום
+    # מיותר (שיידחה בדדופ) מאשר לפספס את קצה היום — שהוא בדיוק החלק
+    # שבגללו ה-Action הזה קיים.
+    - cron: '0,30 6-15 * * 1-5'
+  workflow_dispatch: {}   # הרצה ידנית מטאב Actions
+
+concurrency:
+  group: archive-intraday-chain
+  cancel-in-progress: false   # אל תבטל ריצה באמצע כתיבה
+
+permissions:
+  contents: read
+
+jobs:
+  archive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Archive current chain snapshot
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python scripts/archive_intraday_chain.py --commit
