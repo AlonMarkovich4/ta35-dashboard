@@ -130,7 +130,9 @@
 ## אוטומציית תיקי ה-benchmark — ✅ נוסף 02/08/2026
 `open_trades_for_expiry` נקראה **רק** מ-`pages/5_paper_trading.py` (Streamlit, שאינו פרוס),
 ולכן תיקים 2–7 לא שוגרו אוטומטית מעולם. 24 עסקאות נפתחו ידנית 15/06 ואז כלום.
-- `scripts/auto_open_benchmark_trades.py` + workflow — ב'–ו' 09:00 UTC.
+- `scripts/auto_open_benchmark_trades.py` — ב'–ו' 09:00 UTC, **כשלב 3 בתוך
+  `auto_trade_daily.yml`** (אוחד 31/08/2026; ה-workflow הנפרד נשאר ידני-בלבד).
+  לוח הזמנים המלא וה-*למה* — HANDOFF 6ב, שהוא הבעלים היחיד של העובדה הזו.
   דדופ ברמת ה-DB (`UNIQUE (portfolio_id, strategy_id, expiry_date)`).
   kill-switch `BENCHMARK_TRADING_ENABLED`, **דלוק** — אין כאן תלות במנוע.
 - `scripts/backfill_benchmark_trades.py` — שחזר 132 עסקאות מהארכיון.

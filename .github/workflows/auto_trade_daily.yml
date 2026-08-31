@@ -1,0 +1,92 @@
+name: auto-trade-daily
+
+# הצינור היומי המלא, ב-workflow אחד.
+#
+# ⚠️ נוסף 31/08/2026 אחרי שה-Actions נדחו ב-10–12 שעות ב-27–28/08 ולא רצו
+# כלל ב-31/08. כל 60 הריצות הצליחו — לא היה כשל, רק תזמון. GitHub אינו
+# מתחייב לדיוק ב-cron ומוריד בעדיפות repo עם הרבה טריגרים מתוזמנים; היו לנו
+# ~32 הפעלות ביום מ-7 workflows.
+#
+# **מה זה מחליף.** חמישה workflows שרצו כולם ב-09:00 בנפרד:
+#   auto_record_decisions · auto_record_margins · auto_open_benchmark_trades
+#   auto_open_vwap_trades · auto_open_liquidity_trades
+# ה-cron הוסר מהם (workflow_dispatch נשאר, להרצה ידנית).
+#
+# **למה איחוד ולא רק פחות תדירות.** חמשת השלבים חייבים לרוץ מאותו snapshot —
+# אחרת מחירי הכניסה של התיקים שונים וההשוואה ביניהם חסרת ערך. כשהם חמישה
+# workflows נפרדים הם התפזרו על פני 10 דקות ולפעמים על פני שעות. כאן הם
+# רצים ברצף מובטח.
+#
+# **כל שלב אידמפוטנטי בפני עצמו** (דדופ ברמת ה-DB + שער יום-מסחר), ולכן
+# ריצת ההשלמה ב-13:00 היא no-op אם ריצת הבוקר הצליחה. זו הרשת שתופסת
+# ריצה שנדחתה או נופלה.
+#
+# `continue-on-error` בכל שלב בכוונה: כשל בשלב אחד לא ימנע מהשאר לרוץ.
+# תיק שלא נפתח היום הוא פער שלא ניתן לשחזר — עדיף שיפתחו 4 מתוך 5.
+
+on:
+  schedule:
+    # ⚠️ DOW = 1-5 = **שני–שישי**. אל תחזיר ל-'0-4'.
+    #    TASE עברה לשבוע מסחר שני–שישי בתחילת 2026. '0-4' רץ בימי ראשון בלי
+    #    דאטה טרי ודילג על שישי — יום מסחר מלא עם פקיעות. תוקן 31/07/2026,
+    #    אומת משני מקורות: expiry_history (אפס פקיעות ביום ראשון ב-2026)
+    #    ו-Yahoo TA35.TA (אפס ימי ראשון עם מסחר).
+    #
+    # GitHub cron הוא UTC וללא DST. ישראל = UTC+2 (חורף) / UTC+3 (קיץ):
+    #   09:00 UTC = 11:00 בחורף / 12:00 בקיץ
+    #   13:00 UTC = 15:00 בחורף / 16:00 בקיץ
+    #
+    # ה-cron הוא אופטימיזציה בלבד — `_trading_day_guard` בסקריפטים חוסם חגים,
+    # ושער הטריות חוסם שרשרת ישנה. גם cron שגוי לא יכתוב זיוף.
+    - cron: '0 9 * * 1-5'    # הריצה הראשית
+    - cron: '0 13 * * 1-5'   # השלמה. no-op אם הבוקר הצליח.
+  workflow_dispatch: {}
+
+concurrency:
+  group: auto-trade-daily     # שתי הריצות לא יידרסו זו את זו
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  trade:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: pip
+      - run: pip install -r requirements.txt
+
+      - name: 1 · רישום החלטות
+        continue-on-error: true
+        run: python scripts/auto_record_decisions.py
+
+      - name: 2 · המלצות מרווח + תיק 8
+        continue-on-error: true
+        env:
+          RECO_TRADING_ENABLED: "true"
+        run: python scripts/auto_record_margins.py
+
+      - name: 3 · benchmark (תיקים 2–7)
+        continue-on-error: true
+        env:
+          BENCHMARK_TRADING_ENABLED: "true"
+        run: python scripts/auto_open_benchmark_trades.py
+
+      - name: 4 · תיק 9 — תמחור VWAP
+        continue-on-error: true
+        env:
+          VWAP_TRADING_ENABLED: "true"
+        run: python scripts/auto_open_vwap_trades.py --commit
+
+      - name: 5 · תיק 10 — סינון נזילות
+        continue-on-error: true
+        env:
+          LIQUIDITY_TRADING_ENABLED: "true"
+        run: python scripts/auto_open_vwap_trades.py --spec liquidity --commit

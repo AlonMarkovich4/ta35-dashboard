@@ -19,11 +19,9 @@ name: auto-open-liquidity-trades
 # strategy_id=104, kill-switch משלו. אינו נוגע בתיקים 2–9.
 
 on:
-  schedule:
-    # שני–שישי, 09:00 UTC — **אותו תזמון כמו auto_record_margins ו-
-    # auto_open_benchmark_trades**, בכוונה. שלוש הקבוצות חייבות להיכנס מאותו
-    # snapshot, אחרת ההשוואה ביניהן חסרת ערך.
-    - cron: '0 9 * * 1-5'
+  # ⛔ ה-cron הוסר 31/08/2026 — השלבים רצים מ-auto_trade_daily.yml,
+  #    כדי שכולם ייצאו מאותו snapshot ובטריגר מתוזמן אחד.
+  #    ההרצה הידנית נשארה.
   workflow_dispatch: {}   # הרצה ידנית מטאב Actions
 
 concurrency:

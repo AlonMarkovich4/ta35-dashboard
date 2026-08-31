@@ -11,11 +11,9 @@ name: auto-open-benchmark-trades
 # ו-open_trades_for_expiry בודק אותו לפני כל הכנסה. ריצה חוזרת לא תיצור כפילות.
 
 on:
-  schedule:
-    # שני–שישי, 09:00 UTC — **אותו תזמון כמו auto_record_margins** בכוונה.
-    # שתי הקבוצות חייבות להיכנס מאותו snapshot ובאותו רגע, אחרת ההשוואה
-    # בין תיק ההמלצות ל-benchmark חסרת ערך (מחירי כניסה שונים).
-    - cron: '0 9 * * 1-5'
+  # ⛔ ה-cron הוסר 31/08/2026 — השלבים רצים מ-auto_trade_daily.yml,
+  #    כדי שכולם ייצאו מאותו snapshot ובטריגר מתוזמן אחד.
+  #    ההרצה הידנית נשארה.
   workflow_dispatch: {}   # הרצה ידנית מטאב Actions
 
 concurrency:
