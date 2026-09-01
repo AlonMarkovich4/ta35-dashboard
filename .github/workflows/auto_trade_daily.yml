@@ -23,6 +23,17 @@ name: auto-trade-daily
 #
 # `continue-on-error` בכל שלב בכוונה: כשל בשלב אחד לא ימנע מהשאר לרוץ.
 # תיק שלא נפתח היום הוא פער שלא ניתן לשחזר — עדיף שיפתחו 4 מתוך 5.
+#
+# ⚠️ **אבל `continue-on-error` לבדו הופך את ה-job לירוק תמיד** — הוא קובע
+# `conclusion=success` גם לשלב שיצא בקוד שגיאה. זו הייתה רגרסיה בין
+# 31/08 ל-01/09: `auto_record_margins` ו-`auto_open_benchmark_trades` יוצאים
+# בקוד שגיאה **בכוונה** כששרשרת לא טרייה ("כדי שה-Action יסומן אדום"), וה-flag
+# ביטל את זה. ב-01/09 האוסף נפל, אפס עסקאות נפתחו, וה-run היה ירוק לחלוטין.
+#
+# לכן כל שלב מקבל `id`, והשלב האחרון בודק את `outcome` (שנשאר `failure` גם
+# תחת continue-on-error, בניגוד ל-`conclusion`) ומפיל את ה-job.
+# **אל תסיר את שלב הסיכום.** בלעדיו אין שום מסלול שבו הצינור נצבע אדום,
+# והכלל בפרויקט הוא שנתיב שלא יכול להאדים אינו מנוטר.
 
 on:
   schedule:
@@ -64,29 +75,58 @@ jobs:
       - run: pip install -r requirements.txt
 
       - name: 1 · רישום החלטות
+        id: s1
         continue-on-error: true
         run: python scripts/auto_record_decisions.py
 
       - name: 2 · המלצות מרווח + תיק 8
+        id: s2
         continue-on-error: true
         env:
           RECO_TRADING_ENABLED: "true"
         run: python scripts/auto_record_margins.py
 
       - name: 3 · benchmark (תיקים 2–7)
+        id: s3
         continue-on-error: true
         env:
           BENCHMARK_TRADING_ENABLED: "true"
         run: python scripts/auto_open_benchmark_trades.py
 
       - name: 4 · תיק 9 — תמחור VWAP
+        id: s4
         continue-on-error: true
         env:
           VWAP_TRADING_ENABLED: "true"
         run: python scripts/auto_open_vwap_trades.py --commit
 
       - name: 5 · תיק 10 — סינון נזילות
+        id: s5
         continue-on-error: true
         env:
           LIQUIDITY_TRADING_ENABLED: "true"
         run: python scripts/auto_open_vwap_trades.py --spec liquidity --commit
+
+      # ─── שער האדום ────────────────────────────────────────────────────
+      # `outcome` הוא התוצאה **לפני** ש-continue-on-error ממתן אותה; `conclusion`
+      # כבר ממותן. לכן הבדיקה כאן היא על outcome — היחיד שעדיין אומר את האמת.
+      - name: סיכום — הפלת ה-job אם שלב כלשהו נכשל
+        if: always()
+        env:
+          S1: ${{ steps.s1.outcome }}
+          S2: ${{ steps.s2.outcome }}
+          S3: ${{ steps.s3.outcome }}
+          S4: ${{ steps.s4.outcome }}
+          S5: ${{ steps.s5.outcome }}
+        run: |
+          failed=""
+          for s in S1 S2 S3 S4 S5; do
+            eval "v=\$$s"
+            echo "  $s: $v"
+            [ "$v" = "failure" ] && failed="$failed $s"
+          done
+          if [ -n "$failed" ]; then
+            echo "::error::שלבים שנכשלו:$failed — הצינור לא הושלם. ראה את הלוג של השלב."
+            exit 1
+          fi
+          echo "כל השלבים עברו."
