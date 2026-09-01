@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import sys
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -38,7 +38,8 @@ CURVE = {"long_put_strike": 4030, "short_put_strike": 4060,
 QUOTES = {("Put", 4030.0): 245.29, ("Put", 4060.0): 424.25,
           ("Call", 4200.0): 165.85, ("Call", 4230.0): 72.84}
 
-CHAIN = {"fetch_date": "2026-08-11", "fetch_time": "16:01",
+CHAIN_DATE = "2026-08-11"          # היום שבו נמשכה CHAIN
+CHAIN = {"fetch_date": CHAIN_DATE, "fetch_time": "16:01",
          "trade_date": "10/08/2026"}
 
 
@@ -51,10 +52,17 @@ def _eng() -> MagicMock:
     return MagicMock()
 
 
-def _patch(quotes=QUOTES, rec=None, trades=None):
-    """מרכיב את כל התלויות החיצוניות של open_vwap_condor."""
+def _patch(quotes=QUOTES, rec=None, trades=None, today=CHAIN_DATE):
+    """מרכיב את כל התלויות החיצוניות של open_vwap_condor.
+
+    `today` מקובע כברירת מחדל ליום שבו נמשכה CHAIN, כלומר "שרשרת טרייה".
+    בלי קיבוע הבדיקות היו תלויות בשעון האמיתי, ושער הטריות היה מפיל את כולן
+    למחרת. בדיקות שרוצות שרשרת ישנה מעבירות `today` מאוחר יותר במפורש.
+    """
     rec = rec if rec is not None else {"margin_pct": 1.75, "curve_row": CURVE, "full": {}}
     return (
+        patch.object(vwap_trader, "_today_il",
+                     return_value=date.fromisoformat(today)),
         patch.object(vwap_trader, "get_portfolio_id", return_value=9),
         patch.object(vwap_trader, "get_portfolio", return_value={"commission_per_leg": 2.5}),
         patch.object(vwap_trader, "get_trades", return_value=trades or []),
@@ -66,7 +74,8 @@ def _patch(quotes=QUOTES, rec=None, trades=None):
 
 
 def _run(**kw):
-    ps = _patch(**{k: v for k, v in kw.items() if k in ("quotes", "rec", "trades")})
+    ps = _patch(**{k: v for k, v in kw.items()
+               if k in ("quotes", "rec", "trades", "today")})
     for p in ps:
         p.start()
     try:
@@ -442,3 +451,184 @@ class TestCapitalGate:
         t = self._run_with_capital(20000.0)["trade"]
         assert t["market_snapshot_json"]["capital_available_before"] == 20000.0
         assert t["market_snapshot_json"]["collateral_required"] == pytest.approx(1228.03)
+
+
+# ─── שער טריות — רגרסיה על הבאג של 01/09/2026 ──────────────────────────
+#
+# הבאג: `vwap_trader` נכתב ב-07–11/08, **אחרי** שאירוע תשעה באב (23/07) הוסיף
+# `is_chain_fresh` ל-`margin_recorder` ול-`auto_open_benchmark_trades` — והוא
+# לא קיבל את השער. תיקים 9 ו-10 היו היחידים שיכלו לפתוח על שרשרת בת ימים.
+#
+# מדוע זה לא התפוצץ קודם: כל עוד האוסף עובד, `fetch_date == today` ממילא.
+# השער נדרש בדיוק ביום שבו האוסף נופל — 01/09/2026, שבו `tase_putcall` נשארה
+# קפואה על 31/08 17:16 (trade_date 28/08). ב-dry-run של אותו יום הקוד ניגש
+# לתמחר על שרשרת בת שלושה מושבים ונעצר **רק** כי אף רגל לא תומחרה — כלומר
+# המסנן היחיד שפעל היה `priced.complete`, שהוא הסתברות ולא שער.
+
+class TestChainFreshness:
+    """CHAIN נמשכה 2026-08-11. כל בדיקה קובעת 'היום' במפורש — אין תלות בשעון."""
+
+    STALE = "2026-09-01"          # שלושה שבועות אחרי CHAIN
+    NEXT_SESSION = "2026-08-12"   # המושב הבא — כבר לא טרי (ברירת המחדל 0)
+
+    def test_שרשרת_בת_שבועות_חוסמת_פתיחה(self):
+        """הבאג עצמו. לפני התיקון נפתחה כאן עסקה על מחירים בני שבועות."""
+        r = _run(today=self.STALE)
+        assert r["status"] == "skipped", "נפתחה עסקה על שרשרת בת שבועות"
+        assert r["trade"] is None
+        assert "טרייה" in r["reason"]
+
+    def test_גם_מושב_אחד_מספיק_כדי_לחסום(self):
+        """`is_chain_fresh` עם ברירת מחדל 0 = 'נמשכה היום'. שרשרת של אתמול
+        אינה טרייה — האוסף מושך כל 15 דק', והיעדר משיכה של היום = תקלה."""
+        r = _run(today=self.NEXT_SESSION)
+        assert r["status"] == "skipped"
+        assert r["trade"] is None
+
+    def test_שרשרת_של_היום_עוברת(self):
+        """השער חוסם ישן — ולא חוסם תקין. בלי זה היינו 'מתקנים' בכך שכלום לא עובד."""
+        r = _run(today=CHAIN_DATE)
+        assert r["status"] == "dry-run"
+        assert r["trade"] is not None
+
+    def test_הסיבה_נוקבת_בתאריך_השרשרת_ובהיום(self):
+        """סיבה שאינה נוקבת במקור מסתירה תקלה מאחורי ממצא (סעיף 10, לקח 1)."""
+        r = _run(today=self.STALE)
+        assert CHAIN_DATE in r["reason"], f"חסר תאריך השרשרת: {r['reason']!r}"
+        assert self.STALE in r["reason"], f"חסר התאריך של היום: {r['reason']!r}"
+
+    def test_אין_פנייה_לתמחור_כששרשרת_ישנה(self, monkeypatch):
+        """השער חייב לחסום **לפני** התמחור ולא להסתמך על כך שהתמחור ייכשל.
+        זה ההבדל בין שער להסתברות — וב-01/09 רק ההסתברות פעלה."""
+        called = []
+        ps = _patch(today=self.STALE)
+        for p_ in ps:
+            p_.start()
+        try:
+            monkeypatch.setattr(vwap_trader, "fetch_traded_quotes",
+                                lambda *a, **k: called.append(1) or {})
+            open_vwap_condor("2026-08-11", engine=_eng(), as_of="2026-08-07",
+                             dry_run=True)
+        finally:
+            for p_ in ps:
+                p_.stop()
+        assert not called, "תומחר על שרשרת ישנה — השער לא חסם לפני התמחור"
+
+    def test_fetch_date_חסר_נחשב_לא_טרי(self):
+        """fail-safe: שרשרת בלי תאריך אינה 'כנראה בסדר'."""
+        ps = _patch(today=CHAIN_DATE)
+        for p_ in ps:
+            p_.start()
+        try:
+            with patch.object(vwap_trader, "chain_asof",
+                              return_value={"fetch_date": None, "fetch_time": None,
+                                            "trade_date": None}):
+                r = open_vwap_condor("2026-08-11", engine=_eng(), dry_run=True)
+        finally:
+            for p_ in ps:
+                p_.stop()
+        assert r["trade"] is None
+
+    def test_השער_חל_גם_על_תיק_10(self):
+        """שני התיקים רצים על אותו מסלול קוד — אבל נעילה מפורשת, כי 'זה אותו
+        קוד' הוא בדיוק ההנחה שמאפשרת לענף אחד להישאר לא-מוגן."""
+        ps = _patch(today=self.STALE)
+        for p_ in ps:
+            p_.start()
+        try:
+            r = open_vwap_condor("2026-08-11", engine=_eng(), as_of="2026-08-07",
+                                 dry_run=True, spec=LIQUIDITY_SPEC)
+        finally:
+            for p_ in ps:
+                p_.stop()
+        assert r["status"] == "skipped"
+        assert r["trade"] is None
+        assert "טרייה" in r["reason"]
+
+
+# ─── טריות ההמלצה — החלק השני של אותו באג (01/09/2026) ──────────────────
+#
+# `_latest_recommendation` היה `ORDER BY recommended_at DESC LIMIT 1` בלי גבול
+# תאריך, והבורר ב-`auto_open_vwap_trades.py` בחר `max(recommended_at::date)` —
+# בעוד ההערה מעליו כתבה "המלצה מהיום". ביום שבו שלב 2 לא רשם (האוסף נפל),
+# שניהם היו נופלים אחורה להמלצה של אתמול. סטרייקים של קונדור נבחרים ביחס
+# לרמת המדד של אותו יום, ולכן זו לא "המלצה קצת ישנה" אלא **מרווח אחר**.
+
+class TestRecommendationFreshness:
+    def _capture(self, today=None):
+        """מריץ את _latest_recommendation מול engine מזויף ומחזיר (sql, params)."""
+        eng, conn, cur = MagicMock(), MagicMock(), MagicMock()
+        cur.fetchone.return_value = None
+        conn.execute.return_value = cur
+        eng.connect.return_value.__enter__.return_value = conn
+        with patch.object(vwap_trader, "_today_il",
+                          return_value=date.fromisoformat(CHAIN_DATE)):
+            vwap_trader._latest_recommendation(eng, "2026-08-11", today=today)
+        args = conn.execute.call_args[0]
+        return str(args[0]), (args[1] if len(args) > 1 else {})
+
+    def test_השאילתה_מגבילה_את_תאריך_ההמלצה(self):
+        sql, params = self._capture()
+        assert "recommended_at::date" in sql, \
+            "השאילתה אינה מגבילה את תאריך ההמלצה — תיקח המלצה בת ימים"
+        assert params.get("today") == CHAIN_DATE
+
+    def test_ברירת_המחדל_היא_היום_בישראל(self):
+        """בלי `today` מפורש הפונקציה נופלת ל-_today_il, לא ל-UTC ולא ל-'האחרון'."""
+        _, params = self._capture()
+        assert params.get("today") == CHAIN_DATE
+
+    def test_today_מפורש_גובר(self):
+        _, params = self._capture(today="2026-07-01")
+        assert params.get("today") == "2026-07-01"
+
+    def test_גם_גרסת_המנוע_עדיין_מוגבלת(self):
+        """הגבול החדש לא ביטל את הישן."""
+        sql, params = self._capture()
+        assert "engine_version" in sql
+        assert params.get("ver") == vwap_trader.VWAP_ENGINE_VERSION
+
+    def test_תאריך_אחד_לכל_הריצה(self):
+        """`_today_il` נקרא פעם אחת ב-open_vwap_condor. שתי קריאות יכולות ליפול
+        משני צדדיו של חצות ולתת תשובות סותרות — המלצה תיפסל כישנה בעוד
+        השרשרת תיחשב טרייה."""
+        calls = []
+        ps = _patch(today=CHAIN_DATE)
+        for p_ in ps:
+            p_.start()
+        try:
+            real = date.fromisoformat(CHAIN_DATE)
+            with patch.object(vwap_trader, "_today_il",
+                              side_effect=lambda: calls.append(1) or real):
+                open_vwap_condor("2026-08-11", engine=_eng(),
+                                 as_of="2026-08-07", dry_run=True)
+        finally:
+            for p_ in ps:
+                p_.stop()
+        assert len(calls) == 1, f"_today_il נקרא {len(calls)} פעמים — לא אטומי"
+
+
+class TestExpirySelectorSQL:
+    """נעילה על השאילתה בסקריפט — היא לא עוברת דרך vwap_trader."""
+
+    def _sql(self, strip_comments: bool = False) -> str:
+        src = (Path(__file__).parent.parent
+               / "scripts" / "auto_open_vwap_trades.py").read_text(encoding="utf-8")
+        if not strip_comments:
+            return src
+        # ההערה שמעל השאילתה מצטטת בכוונה את הצורה הישנה, כדי שאיש לא יחזיר
+        # אותה מתוך אי-ידיעה. הבדיקה על הקוד עצמו חייבת להתעלם ממנה.
+        return "\n".join(l for l in src.splitlines() if not l.lstrip().startswith("#"))
+
+    def test_הבורר_משווה_להיום_ולא_למקסימום(self):
+        code = self._sql(strip_comments=True)
+        assert "recommended_at::date = CURRENT_DATE" in code, \
+            "הבורר אינו מוגבל להיום"
+        assert "max(recommended_at::date)" not in code, \
+            "הבורר עדיין נופל אחורה להמלצה האחרונה שקיימת"
+
+    def test_היעדר_המלצות_מסומן_כתקלה_אפשרית_ולא_כיום_שקט(self):
+        """דילוג שנקרא כמו 'אין מה לעשות' מסתיר את שלב 2 שנכשל."""
+        sql = self._sql()
+        assert "אין המלצות מהיום" in sql
+        assert 'level="WARN"' in sql

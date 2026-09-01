@@ -102,18 +102,30 @@ def main() -> int:
             level="ERROR")
         return EXIT_ERR
 
-    # הפקיעות שיש להן המלצה מהיום. אין המלצה ⇒ אין מה לשקף.
+    # הפקיעות שיש להן המלצה **מהיום**. אין המלצה ⇒ אין מה לשקף.
+    #
+    # ⚠️ תוקן 01/09/2026. הגרסה הקודמת בחרה
+    #     recommended_at::date = (SELECT max(recommended_at::date) ...)
+    # כלומר "ההמלצה האחרונה שקיימת", **בלי השוואה ל-today** — ההערה מעליה כבר
+    # אמרה "מהיום", והקוד אמר משהו אחר. ביום שבו שלב 2 לא רשם המלצות (האוסף
+    # נפל, שרשרת ישנה, כשל DB) הסקריפט היה נופל אחורה להמלצה של אתמול ופותח
+    # לפיה. הסטרייקים של קונדור נבחרים ביחס לרמת המדד של אותו יום; שימוש
+    # בסטרייקים של אתמול עם מחירי היום אינו המרווח שהמנוע בחר.
+    #
+    # `CURRENT_DATE` הוא תאריך ה-DB. השרת ב-UTC, וההרצות ב-09:00/13:00 UTC =
+    # 12:00/16:00 בישראל — אותו יום קלנדרי בשני האזורים, ולכן אין כאן פער.
     with engine.connect() as conn:
         conn.execute(text("SET TRANSACTION READ ONLY"))
         expiries = [r[0] for r in conn.execute(text("""
             SELECT DISTINCT expiry_date FROM margin_recommendations
-            WHERE recommended_at::date = (
-                SELECT max(recommended_at::date) FROM margin_recommendations)
+            WHERE recommended_at::date = CURRENT_DATE
             ORDER BY expiry_date
         """)).fetchall()]
 
     if not expiries:
-        log("אין המלצות להיום — אין מה לפתוח.")
+        # לא "אין מה לפתוח" סתם — זה עלול להיות שלב 2 שנכשל, וזו תקלה.
+        log("אין המלצות מהיום — לא נפתח כלום. אם שלב 2 (auto_record_margins) "
+            "רץ היום ולא רשם, זו תקלה ולא יום שקט.", level="WARN")
         return EXIT_OK
 
     log(f"'{spec.portfolio_name}' (תיק {pid}, strategy {spec.strategy_id}) · "

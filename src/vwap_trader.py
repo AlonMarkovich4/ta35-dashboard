@@ -35,8 +35,9 @@ from __future__ import annotations
 import json
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import NamedTuple
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import text
 
@@ -48,9 +49,19 @@ from paper_db import (
     insert_trade,
 )
 from payoff import MULTIPLIER          # ₪ לנקודה — מקור אמת אחד
+from trading_calendar import is_chain_fresh
 from vwap_pricing import chain_asof, fetch_traded_quotes, price_legs
 
 logger = logging.getLogger(__name__)
+
+# שעון ישראל, כמו ב-`margin_recorder` — ולא UTC. ב-23:30 UTC כבר מחר בישראל,
+# ושרשרת שנמשכה "היום" הייתה נראית בת יום. מקור אמת אחד לשאלה "מה התאריך".
+TZ_IL = ZoneInfo("Asia/Jerusalem")
+
+
+def _today_il() -> date:
+    """התאריך בישראל. פונקציה נפרדת כדי שבדיקות יוכלו לקבע 'היום'."""
+    return datetime.now(TZ_IL).date()
 
 VWAP_ENGINE_VERSION = "margin-v1.1"
 VWAP_STRATEGY_ID = 103
@@ -277,8 +288,19 @@ def build_vwap_trade(portfolio_id: int, expiry_date: str, legs: list[dict],
     }
 
 
-def _latest_recommendation(eng, expiry_date) -> dict | None:
-    """ההמלצה האחרונה לפקיעה, בגרסת המנוע הרשמית בלבד. קריאה בלבד."""
+def _latest_recommendation(eng, expiry_date, today=None) -> dict | None:
+    """ההמלצה של **היום** לפקיעה, בגרסת המנוע הרשמית בלבד. קריאה בלבד.
+
+    ⚠️ הגבול `recommended_at::date = today` נוסף 01/09/2026. קודם היה כאן
+    `ORDER BY recommended_at DESC LIMIT 1` בלי גבול תאריך — כלומר ההמלצה
+    האחרונה שקיימת, גם אם היא בת ימים. הסטרייקים של קונדור נבחרים ביחס לרמת
+    המדד של אותו יום, ולכן המלצה ישנה אינה "קצת פחות עדכנית" אלא מרווח אחר.
+
+    הגבול קיים גם בבורר הפקיעות ב-`auto_open_vwap_trades.py`, ובכוונה בשני
+    המקומות: התיקון בפונקציה מגן על **כל** קורא, כולל אוטומציה עתידית שלא
+    תעבור דרך הסקריפט.
+    """
+    today = today or _today_il()
     try:
         with eng.connect() as conn:
             row = conn.execute(
@@ -287,10 +309,12 @@ def _latest_recommendation(eng, expiry_date) -> dict | None:
                     FROM margin_recommendations
                     WHERE expiry_date::date = CAST(:exp AS date)
                       AND engine_version = :ver
+                      AND recommended_at::date = CAST(:today AS date)
                     ORDER BY recommended_at DESC
                     LIMIT 1
                 """),
-                {"exp": str(expiry_date)[:10], "ver": VWAP_ENGINE_VERSION},
+                {"exp": str(expiry_date)[:10], "ver": VWAP_ENGINE_VERSION,
+                 "today": str(today)[:10]},
             ).fetchone()
     except Exception as exc:
         logger.warning("_latest_recommendation נכשל (%s): %s", expiry_date, exc,
@@ -338,7 +362,12 @@ def open_vwap_condor(expiry_date, engine=None, portfolio_id: int | None = None,
         result["reason"] = _SKIP_DUPLICATE
         return result
 
-    rec = _latest_recommendation(eng, expiry_date)
+    # תאריך אחד לכל הריצה. שתי קריאות נפרדות ל-`_today_il` יכולות ליפול משני
+    # צדדיו של חצות ולתת תשובות סותרות — המלצה תיפסל כישנה בעוד השרשרת תיחשב
+    # טרייה, או להפך.
+    today = _today_il()
+
+    rec = _latest_recommendation(eng, expiry_date, today=today)
     if rec is None:
         result["reason"] = _SKIP_NO_REC
         return result
@@ -356,6 +385,31 @@ def open_vwap_condor(expiry_date, engine=None, portfolio_id: int | None = None,
         logger.warning("vwap_trader: %s — אין שרשרת.", result["expiry_date"])
         return result
     result["chain"] = snap
+
+    # ─── שער טריות ────────────────────────────────────────────────────
+    # ⚠️ נוסף 01/09/2026. **המודול הזה נכתב אחרי שהשער כבר קיים במקומות
+    # האחרים** (`margin_recorder:212`, `auto_open_benchmark_trades:160`,
+    # שנוספו בעקבות תשעה באב 23/07) — ופשוט לא קיבל אותו. תיקים 9 ו-10 היו
+    # היחידים שיכלו לפתוח על שרשרת בת ימים.
+    #
+    # למה זה לא התפוצץ עד שהתגלה: כל עוד האוסף עובד `fetch_date == today`
+    # ממילא. השער נדרש בדיוק ביום שבו האוסף נופל — 01/09/2026, שבו
+    # `tase_putcall` נשארה קפואה על 31/08 17:16 (trade_date 28/08).
+    #
+    # **חייב להיות כאן, לפני `fetch_traded_quotes`.** באותו יום התמחור נכשל
+    # ממילא ("4/4 רגליים ללא מחיר") ולכן לא נפתחה עסקה — אבל זה `priced.complete`,
+    # שהוא **הסתברות ולא שער**. ביום שבו שרשרת ישנה כן תתמחר במלואה, הייתה
+    # נפתחת פוזיציה על מחירים בני ימים. בדיקה נועלת שאין פנייה לתמחור כאן.
+    if not is_chain_fresh(snap.get("fetch_date"), today):
+        result["reason"] = (
+            f"שרשרת אינה טרייה — נמשכה {snap.get('fetch_date')} "
+            f"{snap.get('fetch_time') or ''} (trade_date {snap.get('trade_date')}), "
+            f"היום {today}. לא נפתחת עסקה."
+        )
+        # ERROR ולא INFO: ביום מסחר תקין קיימת משיכה של אותו יום. הגעה לכאן
+        # פירושה שהאוסף לא עבד — תקלה, לא דילוג שגרתי.
+        logger.error("vwap_trader: %s — %s", result["expiry_date"], result["reason"])
+        return result
 
     quotes = fetch_traded_quotes(expiry_date, as_of, eng,
                                  min_units=spec.min_units)
